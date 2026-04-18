@@ -7,8 +7,14 @@ plugins {
 }
 
 val sampleSdkVersion = providers.gradleProperty("TMK_SDK_VERSION").orElse("1.0.0").get()
-val sampleAppId = providers.gradleProperty("TMK_SAMPLE_APP_ID").orElse("").get()
-val sampleAppSecret = providers.gradleProperty("TMK_SAMPLE_APP_SECRET").orElse("").get()
+val sampleAppId = providers.environmentVariable("TMK_SAMPLE_APP_ID")
+    .orElse(providers.gradleProperty("TMK_SAMPLE_APP_ID"))
+    .orElse("")
+    .get()
+val sampleAppSecret = providers.environmentVariable("TMK_SAMPLE_APP_SECRET")
+    .orElse(providers.gradleProperty("TMK_SAMPLE_APP_SECRET"))
+    .orElse("")
+    .get()
 
 android {
     namespace = "co.timekettle.translation.sample"

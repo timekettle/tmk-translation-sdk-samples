@@ -23,6 +23,7 @@ data class ListenModeScreen(
         val navigator = LocalNavigator.currentOrThrow
         val viewModel: OnlineListenViewModel = hiltViewModel()
         val isInitialized by viewModel.isInitialized.collectAsState()
+        val initErrorMessage by viewModel.initErrorMessage.collectAsState()
         val isStarted by viewModel.isStarted.collectAsState()
         val isStarting by viewModel.isStarting.collectAsState()
         val bubbles by viewModel.bubbles.collectAsState()
@@ -34,6 +35,13 @@ data class ListenModeScreen(
         }
         BackHandler(enabled = true) { viewModel.stopTranslation(); navigator.pop() }
         DisposableEffect(Unit) { onDispose { viewModel.stopTranslation() } }
+
+        if (initErrorMessage != null) {
+            SampleInitErrorDialog(
+                message = initErrorMessage!!,
+                onDismiss = viewModel::dismissInitError,
+            )
+        }
 
         Column(
             modifier = Modifier.fillMaxSize().padding(16.dp),

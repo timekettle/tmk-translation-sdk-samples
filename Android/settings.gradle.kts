@@ -14,7 +14,7 @@ dependencyResolutionManagement {
         .orElse("timekettle")
         .get()
     val githubPackagesRepo = providers.gradleProperty("TMK_GITHUB_PACKAGES_REPOSITORY")
-        .orElse("tmk-translation-sdk")
+        .orElse("tmk-translation-sdk-dist")
         .get()
     val githubPackagesUser = providers.gradleProperty("gpr.user")
         .orElse(providers.environmentVariable("GPR_USER"))
@@ -24,7 +24,6 @@ dependencyResolutionManagement {
         .orElse(providers.environmentVariable("GH_ACCESS_TOKEN"))
 
     repositories {
-        mavenLocal()
         google()
         mavenCentral()
         maven(url = "https://maven.aliyun.com/repository/public")
@@ -37,14 +36,7 @@ dependencyResolutionManagement {
                 password = githubPackagesToken.orNull ?: ""
             }
         }
-        maven {
-            name = "GitHubPackagesTmkTranslationSdkDist"
-            url = uri("https://maven.pkg.github.com/$githubPackagesOwner/tmk-translation-sdk-dist")
-            credentials {
-                username = githubPackagesUser.orNull ?: ""
-                password = githubPackagesToken.orNull ?: ""
-            }
-        }
+        mavenLocal()
     }
 }
 

@@ -73,6 +73,8 @@ class Online1v1ViewModel @Inject constructor(
 
     private val _isInitialized = MutableStateFlow(false)
     val isInitialized: StateFlow<Boolean> = _isInitialized.asStateFlow()
+    private val _initErrorMessage = MutableStateFlow<String?>(null)
+    val initErrorMessage: StateFlow<String?> = _initErrorMessage.asStateFlow()
     private val _isStarted = MutableStateFlow(false)
     val isStarted: StateFlow<Boolean> = _isStarted.asStateFlow()
     private val _isStarting = MutableStateFlow(false)
@@ -118,11 +120,17 @@ class Online1v1ViewModel @Inject constructor(
         try {
             TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig())
             _isInitialized.value = true
+            _initErrorMessage.value = null
             addLog("SDK 初始化完成")
         } catch (e: Exception) {
             addLog("SDK 初始化异常: ${e.message}")
+            _initErrorMessage.value = SampleSdkConfig.buildInitErrorMessage(e)
             Log.e(TAG, "initSDK failed", e)
         }
+    }
+
+    fun dismissInitError() {
+        _initErrorMessage.value = null
     }
 
     fun startTranslation() {

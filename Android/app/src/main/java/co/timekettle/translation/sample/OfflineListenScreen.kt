@@ -40,6 +40,7 @@ data class OfflineListenScreen(
         val isDownloading by viewModel.isDownloading.collectAsState()
         val downloadProgress by viewModel.downloadProgress.collectAsState()
         val isInitialized by viewModel.isInitialized.collectAsState()
+        val initErrorMessage by viewModel.initErrorMessage.collectAsState()
         val isStarted by viewModel.isStarted.collectAsState()
         val isStarting by viewModel.isStarting.collectAsState()
         val logs by viewModel.logMessages.collectAsState()
@@ -58,6 +59,13 @@ data class OfflineListenScreen(
 
         DisposableEffect(Unit) {
             onDispose { viewModel.stop() }
+        }
+
+        if (initErrorMessage != null) {
+            SampleInitErrorDialog(
+                message = initErrorMessage!!,
+                onDismiss = viewModel::dismissInitError,
+            )
         }
 
         Column(
