@@ -19,7 +19,7 @@ enum DemoSDKConfigurationFactory {
             .setAuth(appId: credentials.appId, secret: credentials.appSecret)
             .setOnlineAuthContext(tenantId: defaultTenantId)
             .setLogEnabled(config.consoleLogEnabled)
-            .setNetworkEnvironment(config.networkEnvironment)
+            .setNetworkBaseURL(URL(string: "https://tmk-translation-test.timekettle.net/apis")!)
             .setDiagnosisEnabled(config.diagnosisEnabled)
             .build()
     }
