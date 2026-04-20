@@ -1,0 +1,6 @@
+#include "../../Pods/Target Support Files/Pods-SDKDemo/Pods-SDKDemo.release.xcconfig"
+
+TMK_SAMPLE_APP_ID =
+TMK_SAMPLE_APP_SECRET =
+
+#include? "LocalSecrets.xcconfig"

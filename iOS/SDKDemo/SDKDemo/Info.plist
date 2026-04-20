@@ -25,6 +25,10 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>TMKSampleAppID</key>
+	<string>$(TMK_SAMPLE_APP_ID)</string>
+	<key>TMKSampleAppSecret</key>
+	<string>$(TMK_SAMPLE_APP_SECRET)</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>SDK Demo 需要使用麦克风采集音频以进行实时翻译和录音测试。</string>
 	<key>UIApplicationSceneManifest</key>

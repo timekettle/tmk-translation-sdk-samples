@@ -1,0 +1,11 @@
+# CocoaPods
+Pods/
+
+# Xcode user-specific files
+xcuserdata/
+*.xcuserstate
+SDKDemo/SDKDemo.xcworkspace/xcuserdata/
+SDKDemo/SDKDemo.xcworkspace/xcuserdata/**/*.xcuserstate
+
+# Local credentials
+SDKDemo/SDKDemo/Config/LocalSecrets.xcconfig

@@ -282,6 +282,13 @@ final class ViewController: UIViewController {
     }
 
     private func bindViewModel() {
+        NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.viewModel.onAppDidBecomeActive()
+            }
+            .store(in: &cancellables)
+
         viewModel.$state
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in

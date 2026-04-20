@@ -26,11 +26,12 @@ final class OfflineModelPackageListView: UIView {
     }
 
     func render(packages: [TmkOfflineModelPackageInfo]) {
+        let oldPackages = self.packages
         self.packages = packages
         refreshSummaryLabel()
         updateExpandedState()
         updateTableHeight()
-        tableView.reloadData()
+        applyTableUpdates(from: oldPackages, to: packages)
     }
 
     func currentSummaryText() -> String {
@@ -124,6 +125,36 @@ private extension OfflineModelPackageListView {
             return Float(min(max(package.unzipProgress, 0), 1))
         case .needsDownload, .needsUpdate, .resumable, .failed, .cancelled:
             return 0
+        }
+    }
+
+    func applyTableUpdates(from oldPackages: [TmkOfflineModelPackageInfo], to newPackages: [TmkOfflineModelPackageInfo]) {
+        guard tableView.window != nil else {
+            tableView.reloadData()
+            return
+        }
+
+        guard oldPackages.isEmpty == false else {
+            tableView.reloadData()
+            return
+        }
+
+        let oldKeys = oldPackages.map(\.packageKey)
+        let newKeys = newPackages.map(\.packageKey)
+        guard oldKeys == newKeys else {
+            tableView.reloadData()
+            return
+        }
+
+        let changedRows = zip(oldPackages, newPackages).enumerated().compactMap { index, pair -> IndexPath? in
+            let (oldPackage, newPackage) = pair
+            return oldPackage == newPackage ? nil : IndexPath(row: index, section: 0)
+        }
+
+        guard changedRows.isEmpty == false else { return }
+
+        UIView.performWithoutAnimation {
+            tableView.reloadRows(at: changedRows, with: .none)
         }
     }
 

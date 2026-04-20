@@ -21,8 +21,16 @@ final class TmkVoiceProcessingIO {
         case stopped
     }
 
+    enum VADState: String {
+        case speechStart
+        case speeching
+        case speechEnd
+        case silence
+    }
+
     // 录音数据回调（业务层拿到后自行处理）
-    typealias InputPCMHandler = (_ pcmData: Data, _ format: AudioStreamBasicDescription) -> Void
+    typealias InputPCMHandler = (_ pcmData: Data, _ format: AudioStreamBasicDescription, _ vadState: VADState) -> Void
+    typealias VADStateResolver = (_ pcmData: Data, _ format: AudioStreamBasicDescription) -> VADState
 
     // 采样配置
     private let config: TmkVPConfig
@@ -39,6 +47,8 @@ final class TmkVoiceProcessingIO {
 
     // 录音回调（业务层获取原始 PCM）
     var onInputPCM: InputPCMHandler?
+    // VAD 状态由业务层外部注入；未设置时表示当前不启用 VAD，回调中的 vadState 无实际语义。
+    var resolveVADState: VADStateResolver?
     // 外部可读取当前实际采集声道数
     var activeChannels: UInt32 { activeStreamDescription.mChannelsPerFrame }
 
@@ -230,7 +240,8 @@ final class TmkVoiceProcessingIO {
         if let dataPtr = bufferList.mBuffers.mData {
             let byteSize = Int(bufferList.mBuffers.mDataByteSize)
             let data = Data(bytes: dataPtr, count: byteSize)
-            onInputPCM?(data, activeStreamDescription)
+            let vadState = resolveVADState?(data, activeStreamDescription) ?? .silence
+            onInputPCM?(data, activeStreamDescription, vadState)
         }
 
         return noErr

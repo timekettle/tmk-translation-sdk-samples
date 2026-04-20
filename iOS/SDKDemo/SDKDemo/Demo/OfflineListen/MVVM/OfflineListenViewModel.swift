@@ -7,8 +7,7 @@
 
 import Foundation
 import Combine
-import AVFAudio
-import CoreAudioTypes
+import AVFoundation
 import TmkTranslationSDK
 
 typealias OfflineLanguageOption = (code: String, name: String)
@@ -44,8 +43,6 @@ final class OfflineListenViewModel: NSObject {
     private var lastPlaybackChannels = 0
     private var offlineSupportChecked = false
     private var offlineTranslationSupported = false
-    private let lingCastAspect = DemoLingCastAspect()
-
     /// 模型根目录（App Documents/tmkOfflineModel/）。
     private var modelRootDirectory: String {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -62,9 +59,6 @@ final class OfflineListenViewModel: NSObject {
     }
 
     func onViewDidLoad() {
-        lingCastAspect.updateModeName("listen")
-        lingCastAspect.updateTransEngineName("offline")
-        lingCastAspect.setTraceReportingEnabled(true)
         loadOfflineSupportedLanguages()
         updateStateOnMain {
             $0.sourceLanguage = self.selectedSourceLang
@@ -77,7 +71,6 @@ final class OfflineListenViewModel: NSObject {
 
     func onViewWillClose() {
         TmkTranslationSDK.shared.cancelOfflineModelDownload()
-        lingCastAspect.onConversationEnd()
         stopListeningIfNeeded()
     }
 
@@ -183,7 +176,7 @@ final class OfflineListenViewModel: NSObject {
             updateStatus("音频会话配置失败：\(error.localizedDescription)")
             return
         }
-        voiceIO.onInputPCM = { [weak self, weak channel] data, format in
+        voiceIO.onInputPCM = { [weak self, weak channel] data, format, _ in
             guard let self else { return }
             let captureChannels = Int(format.mChannelsPerFrame)
             self.updateCaptureAudioInfo(sampleRate: Int(format.mSampleRate), channels: captureChannels)
@@ -236,7 +229,6 @@ final class OfflineListenViewModel: NSObject {
         resetRows()
         voiceIO?.stop()
         setListeningActive(false)
-        lingCastAspect.onConversationEnd()
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         hasStoppedListening = false
@@ -388,21 +380,17 @@ private extension OfflineListenViewModel {
             $0.configuredSampleRate = config.pcmSampleRate
             $0.configuredChannels = config.pcmChannels
         }
-        lingCastAspect.updateLanguages(source: selectedSourceLang, target: selectedTargetLang)
-        lingCastAspect.onJoinRoomStarted()
         updateStatus("正在加载离线模型...")
         TmkTranslationSDK.shared.createTranslationChannel(config, listener: self) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let channel):
-                self.lingCastAspect.onJoinRoomFinished(error: nil)
                 self.channel = channel
                 self.updateStateOnMain { $0.canStartListening = true }
                 self.downloadButtonState = .ready
                 self.updateDownloadPackageListStatusText(header: "模型已就绪")
                 self.updateStatus(#"离线通道已就绪，点击"开始收听"开始采集"#)
             case .failure(let error):
-                self.lingCastAspect.onJoinRoomFinished(error: error)
                 self.downloadButtonState = .notDownloaded
                 self.checkModelReadyAndUpdateButton(autoStartIfReady: false, autoDownloadIfNeeded: false)
                 self.updateStatus("离线通道创建失败：\(error.localizedDescription)")
@@ -416,7 +404,6 @@ private extension OfflineListenViewModel {
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
-        lingCastAspect.onConversationEnd()
         voiceIO?.stop()
         voiceIO = nil
         TmkTranslationSDK.shared.releaseChannel()
@@ -427,7 +414,6 @@ private extension OfflineListenViewModel {
     func stopCurrentChannelForMissingModels() {
         voiceIO?.stop()
         setListeningActive(false)
-        lingCastAspect.onConversationEnd()
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
     }
@@ -546,8 +532,9 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
                                                text: event.text,
                                                sourceLangCode: event.sourceLangCode,
                                                targetLangCode: event.targetLangCode)
-        guard let snapshot = bubbleAssembler.consume(normalized) else { return }
-        applyBubbleSnapshot(snapshot)
+        let snapshots = bubbleAssembler.consume(normalized)
+        guard snapshots.isEmpty == false else { return }
+        snapshots.forEach(applyBubbleSnapshot)
     }
 
     func onTranslate(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
@@ -561,8 +548,9 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
                                                text: event.text,
                                                sourceLangCode: event.sourceLangCode,
                                                targetLangCode: event.targetLangCode)
-        guard let snapshot = bubbleAssembler.consume(normalized) else { return }
-        applyBubbleSnapshot(snapshot)
+        let snapshots = bubbleAssembler.consume(normalized)
+        guard snapshots.isEmpty == false else { return }
+        snapshots.forEach(applyBubbleSnapshot)
     }
 
     func onAudioDataReceive(from engine: AbstractChannelEngine, result: TmkResult<String>, data: Data, channelCount: Int) {
@@ -578,7 +566,6 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
     func onError(_ error: TmkTranslationError) {
         let message = "错误[\(error.category.rawValue)] \(error.message)"
         updateStatus(message)
-        lingCastAspect.onSDKError(error)
         DispatchQueue.main.async {
             if self.downloadButtonState == .downloading {
                 self.downloadButtonState = .notDownloaded
@@ -589,7 +576,7 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
     }
 
     func onEvent(name: String, args: Any?) {
-        lingCastAspect.onEvent(name: name, args: args)
+        _ = (name, args)
     }
 
     func onOfflineModelEvent(name: String, args: Any?) {

@@ -1,8 +1,7 @@
 import Foundation
 import Combine
-import AVFAudio
-import CoreAudioTypes
 import OSLog
+import AVFoundation
 import TmkTranslationSDK
 
 final class NowListeningViewModel: NSObject {
@@ -39,8 +38,6 @@ final class NowListeningViewModel: NSObject {
     private var pcmFileHandle: FileHandle?
     private var hasPCMData = false
     private var isPCMRecordingEnabled = false
-    private let lingCastAspect = DemoLingCastAspect()
-
     func configureInitialLanguages(source: String?, target: String?) {
         if let source, source.isEmpty == false {
             selectedSourceLang = source
@@ -51,8 +48,6 @@ final class NowListeningViewModel: NSObject {
     }
 
     func onViewDidLoad() {
-        lingCastAspect.updateModeName("listen")
-        lingCastAspect.setTraceReportingEnabled(false)
         updateStateOnMain {
             $0.sourceLanguage = self.selectedSourceLang
             $0.targetLanguage = self.selectedTargetLang
@@ -62,7 +57,6 @@ final class NowListeningViewModel: NSObject {
     }
 
     func onViewWillClose() {
-        lingCastAspect.onConversationEnd()
         stopListeningIfNeeded()
     }
 
@@ -88,7 +82,7 @@ final class NowListeningViewModel: NSObject {
             return
         }
 
-        voiceIO.onInputPCM = { [weak self, weak channel] data, format in
+        voiceIO.onInputPCM = { [weak self, weak channel] data, format, _ in
             guard let self else { return }
             let captureChannels = Int(format.mChannelsPerFrame)
             self.updateCaptureAudioInfo(sampleRate: Int(format.mSampleRate), channels: captureChannels)
@@ -154,12 +148,6 @@ final class NowListeningViewModel: NSObject {
     func fetchSupportedLanguages(
         _ completion: @escaping (Result<TmkSupportedLanguagesResponse, TmkTranslationError>) -> Void
     ) {
-        guard isAuthVerified else {
-            let error = TmkTranslationError.caller(message: "请先完成鉴权后再获取支持语言")
-            updateStatus(error.localizedDescription)
-            completion(.failure(error))
-            return
-        }
         _ = TmkTranslationSDK.shared.getSupportedLanguages(source: .online) { [weak self] result in
             guard let self else {
                 completion(result)
@@ -223,14 +211,12 @@ private extension NowListeningViewModel {
                 self.createRoomAndChannel()
             case .failure(let error):
                 self.isAuthVerified = false
-                self.updateStatus("鉴权失败：\(error.localizedDescription)")
+                self.updateStatus(DemoSDKConfigurationFactory.authFailureMessage(error))
             }
         }
     }
 
     func createRoomAndChannel() {
-        lingCastAspect.updateLanguages(source: selectedSourceLang, target: selectedTargetLang)
-        lingCastAspect.onCreateRoomStarted()
         room = TmkTranslationSDK.shared.createTmkTranslationRoom(sourceLang: selectedSourceLang,
                                                                  targetLang: selectedTargetLang,
                                                                  scenario: .toSpeech,
@@ -238,10 +224,8 @@ private extension NowListeningViewModel {
             guard let self else { return }
             switch roomResult {
             case .success(let room):
-                self.lingCastAspect.onCreateRoomFinished(roomNo: room.channelDialogResponse?.roomNo ?? "", error: nil)
                 self.createTranslationChannel(room: room)
             case .failure(let error):
-                self.lingCastAspect.onCreateRoomFinished(roomNo: "", error: error)
                 self.updateStatus("房间创建失败：\(error.localizedDescription)")
             }
         }
@@ -267,22 +251,16 @@ private extension NowListeningViewModel {
             $0.configuredChannels = channelConfig.pcmChannels
         }
 
-        lingCastAspect.onJoinRoomStarted()
-        lingCastAspect.onSubscribeStarted()
         TmkTranslationSDK.shared.createTranslationChannel(channelConfig, listener: self) { [weak self] channelResult in
             guard let self else { return }
             switch channelResult {
             case .success(let channel):
                 self.channel = channel
-                self.lingCastAspect.onJoinRoomFinished(error: nil)
-                self.lingCastAspect.onSubscribeFinished(error: nil)
                 self.updateStateOnMain {
                     $0.canStartListening = true
                 }
                 self.updateStatus("在线通道已就绪，点击“开始收听”开始采集")
             case .failure(let error):
-                self.lingCastAspect.onJoinRoomFinished(error: error)
-                self.lingCastAspect.onSubscribeFinished(error: error)
                 self.updateStatus("通道启动失败：\(error.localizedDescription)")
             }
         }
@@ -305,7 +283,6 @@ private extension NowListeningViewModel {
         activePlaybackUID = nil
         updateStatus("已停止收听")
         Self.logger.info("channel stopped")
-        lingCastAspect.onConversationEnd()
         closeRoomIfNeeded(closingRoom)
     }
 
@@ -328,7 +305,6 @@ private extension NowListeningViewModel {
             $0.playbackChannels = 0
         }
         updateStatus("语言已切换，重新创建通道中...")
-        lingCastAspect.onConversationEnd()
         closeRoomIfNeeded(closingRoom)
         startOnlineListening()
     }
@@ -538,8 +514,9 @@ extension NowListeningViewModel: TmkTranslationListener {
                                                text: event.text,
                                                sourceLangCode: event.sourceLangCode,
                                                targetLangCode: event.targetLangCode)
-        guard let snapshot = bubbleAssembler.consume(normalized) else { return }
-        applyBubbleSnapshot(snapshot)
+        let snapshots = bubbleAssembler.consume(normalized)
+        guard snapshots.isEmpty == false else { return }
+        snapshots.forEach(applyBubbleSnapshot)
     }
 
     func onTranslate(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
@@ -553,8 +530,9 @@ extension NowListeningViewModel: TmkTranslationListener {
                                                text: event.text,
                                                sourceLangCode: event.sourceLangCode,
                                                targetLangCode: event.targetLangCode)
-        guard let snapshot = bubbleAssembler.consume(normalized) else { return }
-        applyBubbleSnapshot(snapshot)
+        let snapshots = bubbleAssembler.consume(normalized)
+        guard snapshots.isEmpty == false else { return }
+        snapshots.forEach(applyBubbleSnapshot)
     }
 
     func onAudioDataReceive(from engine: AbstractChannelEngine, result: TmkResult<String>, data: Data, channelCount: Int) {
@@ -593,12 +571,11 @@ extension NowListeningViewModel: TmkTranslationListener {
     }
 
     func onError(_ error: TmkTranslationError) {
-        lingCastAspect.onSDKError(error)
         updateStatus("错误[\(error.category.rawValue)] \(error.message)")
     }
 
     func onEvent(name: String, args: Any?) {
-        lingCastAspect.onEvent(name: name, args: args)
+        _ = args
         if name == "online_started" {
             updateStatus("在线通道已就绪，点击“开始收听”开始采集")
         }

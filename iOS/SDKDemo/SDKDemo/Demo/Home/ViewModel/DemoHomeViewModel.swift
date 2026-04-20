@@ -12,6 +12,8 @@ final class DemoHomeViewModel {
 
     private var requestID = 0
     private var hasLoadedOnce = false
+    private var shouldRetryOnlineLanguagesOnBecomeActive = false
+    private var lastOnlineLanguagesLoadFailed = false
 
     func onViewDidLoad() {
         loadSupportedLanguages()
@@ -19,6 +21,16 @@ final class DemoHomeViewModel {
 
     func onViewWillAppear() {
         guard hasLoadedOnce else { return }
+        loadSupportedLanguages()
+    }
+
+    func onAppDidBecomeActive() {
+        guard state.selectedMode.source == .online else { return }
+        guard shouldRetryOnlineLanguagesOnBecomeActive else { return }
+        guard state.isLoadingLanguages == false else { return }
+        guard state.languages.isEmpty || lastOnlineLanguagesLoadFailed else { return }
+        state.footerText = "检测到应用已恢复，正在重新获取在线语言列表..."
+        publishState()
         loadSupportedLanguages()
     }
 
@@ -31,6 +43,10 @@ final class DemoHomeViewModel {
     func selectMode(_ mode: DemoHomeMode) {
         guard mode.isSelectable, state.selectedMode != mode else { return }
         state.selectedMode = mode
+        if mode.source != .online {
+            shouldRetryOnlineLanguagesOnBecomeActive = false
+            lastOnlineLanguagesLoadFailed = false
+        }
         state.footerText = mode == .online ? "正在准备在线语言列表..." : "正在准备离线语言列表..."
         publishState()
         loadSupportedLanguages()
@@ -80,36 +96,40 @@ final class DemoHomeViewModel {
             guard let self, currentRequestID == self.requestID else { return }
             switch result {
             case .success(let response):
+                if source == .online {
+                    self.lastOnlineLanguagesLoadFailed = false
+                    self.shouldRetryOnlineLanguagesOnBecomeActive = false
+                }
                 let options = Self.makeLanguageOptions(from: response)
                 self.applyLoadedLanguages(options, source: source)
             case .failure(let error):
+                if source == .online {
+                    self.lastOnlineLanguagesLoadFailed = true
+                    self.shouldRetryOnlineLanguagesOnBecomeActive = true
+                }
                 self.state.isLoadingLanguages = false
                 self.state.languages = []
                 self.state.sourceLanguage = nil
                 self.state.targetLanguage = nil
-                self.state.footerText = "语言列表加载失败：\(error.localizedDescription)"
+                self.state.footerText = source == .online
+                    ? "在线语言列表加载失败，请检查网络或权限；应用恢复后会自动重试"
+                    : "语言列表加载失败：\(error.localizedDescription)"
                 self.publishState()
             }
         }
 
         switch source {
         case .online:
-            TmkTranslationSDK.shared.verifyAuth { result in
-                guard currentRequestID == self.requestID else { return }
-                switch result {
-                case .success:
-                    _ = TmkTranslationSDK.shared.getSupportedLanguages(source: .online, uiLocales: ["zh-CN"], handleResult)
-                case .failure(let error):
-                    self.state.isLoadingLanguages = false
-                    self.state.languages = []
-                    self.state.sourceLanguage = nil
-                    self.state.targetLanguage = nil
-                    self.state.footerText = "在线鉴权失败：\(error.localizedDescription)"
-                    self.publishState()
-                }
-            }
+            _ = TmkTranslationSDK.shared.getSupportedLanguages(source: .online, uiLocales: ["zh-CN"], handleResult)
         case .offline:
             _ = TmkTranslationSDK.shared.getSupportedLanguages(source: .offline, uiLocales: ["zh-CN"], handleResult)
+        @unknown default:
+            state.isLoadingLanguages = false
+            state.languages = []
+            state.sourceLanguage = nil
+            state.targetLanguage = nil
+            state.footerText = "当前语言源暂不支持"
+            publishState()
         }
     }
 

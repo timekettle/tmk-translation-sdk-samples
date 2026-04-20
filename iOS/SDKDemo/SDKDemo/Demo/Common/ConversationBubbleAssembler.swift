@@ -36,7 +36,7 @@ struct DemoConversationBubbleSnapshot {
 enum DemoConversationEventAdapter {
     static func makeRecognizedEvent(from result: TmkResult<String>, isFinal: Bool) -> DemoConversationEvent? {
         let text = normalized(result.data)
-        guard text.isEmpty == false || isFinal else { return nil }
+        guard isDisplayable(text, isFinal: isFinal) else { return nil }
         return DemoConversationEvent(bubbleId: bubbleId(from: result),
                                      sessionId: result.sessionId,
                                      lane: lane(from: result),
@@ -49,7 +49,7 @@ enum DemoConversationEventAdapter {
 
     static func makeTranslatedEvent(from result: TmkResult<String>, isFinal: Bool) -> DemoConversationEvent? {
         let text = normalized(result.data)
-        guard text.isEmpty == false || isFinal else { return nil }
+        guard isDisplayable(text, isFinal: isFinal) else { return nil }
         return DemoConversationEvent(bubbleId: bubbleId(from: result),
                                      sessionId: result.sessionId,
                                      lane: lane(from: result),
@@ -88,6 +88,29 @@ enum DemoConversationEventAdapter {
     private static func normalized(_ text: String?) -> String {
         (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    private static func isDisplayable(_ text: String, isFinal: Bool) -> Bool {
+        if text.isEmpty {
+            return isFinal
+        }
+        return containsMeaningfulContent(text)
+    }
+
+    private static func containsMeaningfulContent(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                continue
+            }
+            if CharacterSet.punctuationCharacters.contains(scalar) {
+                continue
+            }
+            if CharacterSet.symbols.contains(scalar) {
+                continue
+            }
+            return true
+        }
+        return false
+    }
 }
 
 final class DemoConversationBubbleAssembler {
@@ -109,13 +132,30 @@ final class DemoConversationBubbleAssembler {
     }
 
     private var aggregates: [String: BubbleAggregate] = [:]
+    private var activeBubbleIdByLane: [DemoConversationLane: String] = [:]
 
     func reset() {
         aggregates.removeAll()
+        activeBubbleIdByLane.removeAll()
     }
 
-    func consume(_ event: DemoConversationEvent) -> DemoConversationBubbleSnapshot? {
+    func consume(_ event: DemoConversationEvent) -> [DemoConversationBubbleSnapshot] {
         let key = DemoConversationBubbleAssembler.rowKey(bubbleId: event.bubbleId, lane: event.lane)
+        var snapshots: [DemoConversationBubbleSnapshot] = []
+
+        if let previousBubbleId = activeBubbleIdByLane[event.lane],
+           previousBubbleId != event.bubbleId {
+            let previousKey = DemoConversationBubbleAssembler.rowKey(bubbleId: previousBubbleId, lane: event.lane)
+            if let previousAggregate = aggregates[previousKey],
+               let previousSnapshot = makeSnapshot(bubbleId: previousBubbleId,
+                                                   lane: event.lane,
+                                                   aggregate: previousAggregate,
+                                                   isActiveBubble: false) {
+                snapshots.append(previousSnapshot)
+            }
+        }
+
+        activeBubbleIdByLane[event.lane] = event.bubbleId
         var aggregate = aggregates[key] ?? BubbleAggregate(sourceLangCode: event.sourceLangCode,
                                                            targetLangCode: event.targetLangCode)
         aggregate.latestSessionId = max(aggregate.latestSessionId, event.sessionId)
@@ -142,22 +182,39 @@ final class DemoConversationBubbleAssembler {
         }
 
         aggregates[key] = aggregate
-        let sourceText = composeText(order: aggregate.sourceSessionOrder, segments: aggregate.sourceBySession)
-        let translatedText = composeText(order: aggregate.translatedSessionOrder, segments: aggregate.translatedBySession)
-        if sourceText.isEmpty && translatedText.isEmpty {
-            return nil
-        }
-        return DemoConversationBubbleSnapshot(bubbleId: event.bubbleId,
-                                              sessionId: aggregate.latestSessionId,
+        if let currentSnapshot = makeSnapshot(bubbleId: event.bubbleId,
                                               lane: event.lane,
-                                              sourceLangCode: aggregate.sourceLangCode,
-                                              targetLangCode: aggregate.targetLangCode,
-                                              sourceText: sourceText,
-                                              translatedText: translatedText)
+                                              aggregate: aggregate,
+                                              isActiveBubble: true) {
+            snapshots.append(currentSnapshot)
+        }
+        return snapshots
     }
 
     static func rowKey(bubbleId: String, lane: DemoConversationLane) -> String {
         "\(bubbleId)_\(lane.rawValue)"
+    }
+
+    private func makeSnapshot(bubbleId: String,
+                              lane: DemoConversationLane,
+                              aggregate: BubbleAggregate,
+                              isActiveBubble: Bool) -> DemoConversationBubbleSnapshot? {
+        let sourceText = composeText(order: aggregate.sourceSessionOrder,
+                                     segments: aggregate.sourceBySession,
+                                     isActiveBubble: isActiveBubble)
+        let translatedText = composeText(order: aggregate.translatedSessionOrder,
+                                         segments: aggregate.translatedBySession,
+                                         isActiveBubble: isActiveBubble)
+        if sourceText.isEmpty && translatedText.isEmpty {
+            return nil
+        }
+        return DemoConversationBubbleSnapshot(bubbleId: bubbleId,
+                                              sessionId: aggregate.latestSessionId,
+                                              lane: lane,
+                                              sourceLangCode: aggregate.sourceLangCode,
+                                              targetLangCode: aggregate.targetLangCode,
+                                              sourceText: sourceText,
+                                              translatedText: translatedText)
     }
 
     private func update(segmentText: String?,
@@ -186,12 +243,12 @@ final class DemoConversationBubbleAssembler {
         sessionAliases[sessionId] = effectiveSessionId
     }
 
-    private func composeText(order: [Int], segments: [Int: SessionSegment]) -> String {
+    private func composeText(order: [Int], segments: [Int: SessionSegment], isActiveBubble: Bool) -> String {
         var orderedTexts: [String] = []
         var latestIsFinal = true
         for sessionId in order {
             guard let segment = segments[sessionId] else { continue }
-            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = normalizedDisplayText(segment.text, isFinal: segment.isFinal)
             guard text.isEmpty == false else { continue }
             orderedTexts.append(text)
             latestIsFinal = segment.isFinal
@@ -203,7 +260,10 @@ final class DemoConversationBubbleAssembler {
                 merged = mergeCumulativeText(merged, orderedTexts[idx])
             }
         }
-        return latestIsFinal ? merged : appendEllipsisIfNeeded(merged)
+        if latestIsFinal || isActiveBubble == false {
+            return removeTrailingEllipsis(merged)
+        }
+        return appendEllipsisIfNeeded(merged)
     }
 
     private func resolveIncrementalText(old: String, new: String) -> String {
@@ -251,6 +311,25 @@ final class DemoConversationBubbleAssembler {
     private func appendEllipsisIfNeeded(_ text: String) -> String {
         if text.hasSuffix("...") || text.hasSuffix("…") { return text }
         return text + "..."
+    }
+
+    private func normalizedDisplayText(_ text: String, isFinal: Bool) -> String {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isFinal else { return normalized }
+        return removeTrailingEllipsis(normalized)
+    }
+
+    private func removeTrailingEllipsis(_ text: String) -> String {
+        var normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while normalized.hasSuffix("...") || normalized.hasSuffix("…") {
+            if normalized.hasSuffix("...") {
+                normalized.removeLast(3)
+            } else {
+                normalized.removeLast()
+            }
+            normalized = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return normalized
     }
 
     private func isIncrementalTransition(old: String, new: String) -> Bool {
