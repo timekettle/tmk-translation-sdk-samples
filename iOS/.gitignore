@@ -4,6 +4,9 @@ Pods/
 # Xcode user-specific files
 xcuserdata/
 *.xcuserstate
+
+# Local secrets
+SDKDemo/Config/LocalSecrets.xcconfig
 SDKDemo/SDKDemo.xcworkspace/xcuserdata/
 SDKDemo/SDKDemo.xcworkspace/xcuserdata/**/*.xcuserstate
 
