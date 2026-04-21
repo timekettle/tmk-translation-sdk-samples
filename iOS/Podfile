@@ -1,0 +1,23 @@
+source 'https://cdn.cocoapods.org/'
+source 'https://github.com/timekettle/TmkTranslationSDK-iOS.git'
+
+platform :ios, '15.0'
+
+target 'SDKDemo' do
+  # Comment the next line if you don't want to use dynamic frameworks
+  use_frameworks!
+
+  # Pods for SDKDemo
+  pod 'TmkTranslationSDK', '1.0.0'
+  pod 'SnapKit'
+
+  target 'SDKDemoTests' do
+    inherit! :search_paths
+    # Pods for testing
+  end
+
+  target 'SDKDemoUITests' do
+    # Pods for testing
+  end
+
+end
