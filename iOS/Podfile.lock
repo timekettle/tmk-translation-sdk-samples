@@ -2,13 +2,13 @@ PODS:
   - AgoraAudio_Special_iOS (4.5.2.183.1)
   - AgoraRtm/RtmKit (2.2.6)
   - SnapKit (5.7.1)
-  - TmkTranslationSDK (1.0.0-beta26):
+  - TmkTranslationSDK (1.0.0):
     - AgoraAudio_Special_iOS (~> 4.5.2.4)
     - AgoraRtm/RtmKit (= 2.2.6)
 
 DEPENDENCIES:
   - SnapKit
-  - TmkTranslationSDK (= 1.0.0-beta26)
+  - TmkTranslationSDK (= 1.0.0)
 
 SPEC REPOS:
   https://github.com/timekettle/TmkTranslationSDK-iOS.git:
