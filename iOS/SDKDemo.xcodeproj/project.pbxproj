@@ -31,8 +31,8 @@
 
 /* Begin PBXFileReference section */
 		087244DBAC3D5645CC224E33 /* Pods_SDKDemo.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_SDKDemo.framework; sourceTree = BUILT_PRODUCTS_DIR; };
-		1A2B3C4D5E6F700100000001 /* SDKDemo/Config/Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = SDKDemo/Config/Debug.xcconfig; sourceTree = "<group>"; };
-		1A2B3C4D5E6F700100000002 /* SDKDemo/Config/Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = SDKDemo/Config/Release.xcconfig; sourceTree = "<group>"; };
+		1A2B3C4D5E6F700100000001 /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = SDKDemo/Config/Debug.xcconfig; sourceTree = "<group>"; };
+		1A2B3C4D5E6F700100000002 /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = SDKDemo/Config/Release.xcconfig; sourceTree = "<group>"; };
 		28F1EB9BCD766C69B3ECC0DD /* Pods_SDKDemoTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_SDKDemoTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		38DE459D5544B1118813492D /* Pods-SDKDemoTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SDKDemoTests.release.xcconfig"; path = "Target Support Files/Pods-SDKDemoTests/Pods-SDKDemoTests.release.xcconfig"; sourceTree = "<group>"; };
 		6856E771F5D6690413FDE74A /* Pods-SDKDemo.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SDKDemo.debug.xcconfig"; path = "Target Support Files/Pods-SDKDemo/Pods-SDKDemo.debug.xcconfig"; sourceTree = "<group>"; };
@@ -67,11 +67,15 @@
 		};
 		BAD1FF102F7506A9002B5CBA /* SDKDemoTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = SDKDemoTests;
 			sourceTree = "<group>";
 		};
 		BAD1FF1A2F7506A9002B5CBA /* SDKDemoUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = SDKDemoUITests;
 			sourceTree = "<group>";
 		};
@@ -118,8 +122,8 @@
 		BABC23992F9618550069335C /* Recovered References */ = {
 			isa = PBXGroup;
 			children = (
-				1A2B3C4D5E6F700100000001 /* SDKDemo/Config/Debug.xcconfig */,
-				1A2B3C4D5E6F700100000002 /* SDKDemo/Config/Release.xcconfig */,
+				1A2B3C4D5E6F700100000001 /* Debug.xcconfig */,
+				1A2B3C4D5E6F700100000002 /* Release.xcconfig */,
 			);
 			name = "Recovered References";
 			sourceTree = "<group>";
@@ -351,13 +355,9 @@
 			inputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-SDKDemo-SDKDemoUITests/Pods-SDKDemo-SDKDemoUITests-frameworks-${CONFIGURATION}-input-files.xcfilelist",
 			);
-			inputPaths = (
-			);
 			name = "[CP] Embed Pods Frameworks";
 			outputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-SDKDemo-SDKDemoUITests/Pods-SDKDemo-SDKDemoUITests-frameworks-${CONFIGURATION}-output-files.xcfilelist",
-			);
-			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
@@ -394,13 +394,9 @@
 			inputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-SDKDemo/Pods-SDKDemo-frameworks-${CONFIGURATION}-input-files.xcfilelist",
 			);
-			inputPaths = (
-			);
 			name = "[CP] Embed Pods Frameworks";
 			outputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-SDKDemo/Pods-SDKDemo-frameworks-${CONFIGURATION}-output-files.xcfilelist",
-			);
-			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
@@ -449,7 +445,7 @@
 /* Begin XCBuildConfiguration section */
 		BAD1FF212F7506A9002B5CBA /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 1A2B3C4D5E6F700100000001 /* SDKDemo/Config/Debug.xcconfig */;
+			baseConfigurationReference = 1A2B3C4D5E6F700100000001 /* Debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -485,7 +481,7 @@
 		};
 		BAD1FF222F7506A9002B5CBA /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 1A2B3C4D5E6F700100000002 /* SDKDemo/Config/Release.xcconfig */;
+			baseConfigurationReference = 1A2B3C4D5E6F700100000002 /* Release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
