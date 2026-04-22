@@ -77,6 +77,11 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
             guard let session = lookupSession(call.arguments, result: result) else { return }
             session.start()
             result(nil)
+        case "setOneToOnePlaybackMode":
+            guard let session = lookupSession(call.arguments, result: result) else { return }
+            let arguments = call.arguments as? [String: Any] ?? [:]
+            session.setOneToOnePlaybackMode(arguments["mode"] as? String ?? "left")
+            result(nil)
         case "stopSession":
             guard let session = lookupSession(call.arguments, result: result) else { return }
             session.stop()
@@ -267,6 +272,11 @@ private enum SessionScenario: String {
     case oneToOne = "one_to_one"
 }
 
+private enum OneToOnePlaybackMode: String {
+    case left
+    case right
+}
+
 private struct SessionConfig {
     let scenario: SessionScenario
     let mode: SessionMode
@@ -287,6 +297,14 @@ private class BaseSession: NSObject {
     let sessionId: String
     let config: SessionConfig
     let emitter: (String, String?, [String: Any?]) -> Void
+    private var roomNo: String = "-"
+    private var scenarioLabel: String
+    private var modeLabel: String
+    private var configuredSampleRate: Int
+    private var configuredChannels: Int
+    private var captureSampleRate: Int = 0
+    private var captureChannels: Int = 0
+    private var playbackChannels: Int = 0
 
     init(sessionId: String,
          config: SessionConfig,
@@ -294,7 +312,12 @@ private class BaseSession: NSObject {
         self.sessionId = sessionId
         self.config = config
         self.emitter = emitter
+        self.scenarioLabel = config.scenario == .oneToOne ? "oneToOne" : "listen"
+        self.modeLabel = config.mode.rawValue
+        self.configuredSampleRate = 16_000
+        self.configuredChannels = config.scenario == .oneToOne ? 2 : 1
         super.init()
+        emitMetrics()
     }
 
     func start() {}
@@ -304,6 +327,7 @@ private class BaseSession: NSObject {
         emitError(code: "unsupported_operation", message: "当前会话不支持离线模型下载")
     }
     func cancelOfflineDownload() {}
+    func setOneToOnePlaybackMode(_ mode: String) {}
 
     func getOfflineModelStatus() -> [String: Any] {
         [
@@ -327,6 +351,7 @@ private class BaseSession: NSObject {
     }
 
     func emitBubble(bubbleId: String,
+                    sdkSessionId: String,
                     sourceLangCode: String,
                     targetLangCode: String,
                     isFinal: Bool,
@@ -335,12 +360,70 @@ private class BaseSession: NSObject {
                     channel: String? = nil) {
         emitter("bubble", sessionId, [
             "bubbleId": bubbleId,
+            "sdkSessionId": sdkSessionId,
             "sourceLangCode": sourceLangCode,
             "targetLangCode": targetLangCode,
             "isFinal": isFinal,
             "sourceText": sourceText,
             "translatedText": translatedText,
             "channel": channel
+        ])
+    }
+
+    func emitConversationText(kind: String,
+                              result: TmkResult<String>,
+                              isFinal: Bool,
+                              text: String?,
+                              channel: String? = nil) {
+        let extraData = sanitizeExtraData(result.extraData)
+        emitter(kind, sessionId, [
+            "sdkSessionId": String(result.sessionId),
+            "sourceLangCode": result.srcCode,
+            "targetLangCode": result.dstCode,
+            "isFinal": isFinal,
+            "text": text,
+            "channel": channel ?? extraData["channel"] as? String,
+            "extraData": extraData
+        ])
+    }
+
+    func updateRoomNo(_ value: String?) {
+        let next = value?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "-"
+        guard roomNo != next else { return }
+        roomNo = next
+        emitMetrics()
+    }
+
+    func updateConfiguredAudio(sampleRate: Int, channels: Int) {
+        guard configuredSampleRate != sampleRate || configuredChannels != channels else { return }
+        configuredSampleRate = sampleRate
+        configuredChannels = channels
+        emitMetrics()
+    }
+
+    func updateCaptureAudio(sampleRate: Int, channels: Int) {
+        guard captureSampleRate != sampleRate || captureChannels != channels else { return }
+        captureSampleRate = sampleRate
+        captureChannels = channels
+        emitMetrics()
+    }
+
+    func updatePlaybackChannels(_ channels: Int) {
+        guard playbackChannels != channels else { return }
+        playbackChannels = channels
+        emitMetrics()
+    }
+
+    func emitMetrics() {
+        emitter("metrics", sessionId, [
+            "roomNo": roomNo,
+            "scenario": scenarioLabel,
+            "mode": modeLabel,
+            "configuredSampleRate": configuredSampleRate,
+            "configuredChannels": configuredChannels,
+            "captureSampleRate": captureSampleRate,
+            "captureChannels": captureChannels,
+            "playbackChannels": playbackChannels
         ])
     }
 
@@ -365,6 +448,9 @@ private class BaseSession: NSObject {
     }
 
     func bubbleId(from result: TmkResult<String>) -> String {
+        if let extraBubbleId = result.extraData["bubble_id"] as? String, extraBubbleId.isEmpty == false {
+            return extraBubbleId
+        }
         if let extraBubbleId = result.extraData["bubbleId"] as? String, extraBubbleId.isEmpty == false {
             return extraBubbleId
         }
@@ -375,6 +461,32 @@ private class BaseSession: NSObject {
             return bubbleId
         }
         return String(result.sessionId)
+    }
+
+    private func sanitizeExtraData(_ extraData: [AnyHashable: Any]) -> [String: Any] {
+        var sanitized: [String: Any] = [:]
+        for (key, value) in extraData {
+            guard let key = key as? String else { continue }
+            sanitized[key] = sanitizeEventValue(value)
+        }
+        return sanitized
+    }
+
+    private func sanitizeEventValue(_ value: Any) -> Any {
+        switch value {
+        case let string as String:
+            return string
+        case let number as NSNumber:
+            return number
+        case let dictionary as [AnyHashable: Any]:
+            return sanitizeExtraData(dictionary)
+        case let array as [Any]:
+            return array.map(sanitizeEventValue)
+        case is NSNull:
+            return NSNull()
+        default:
+            return String(describing: value)
+        }
     }
 }
 
@@ -405,6 +517,8 @@ private final class OnlineListenSession: BaseSession, TmkTranslationListener {
         channel = nil
         room = nil
         closingRoom.flatMap(closeRoom)
+        updateCaptureAudio(sampleRate: 0, channels: 0)
+        updatePlaybackChannels(0)
         emitSessionState(statusText: "翻译已停止", isStarted: false, isStarting: false)
     }
 
@@ -418,6 +532,8 @@ private final class OnlineListenSession: BaseSession, TmkTranslationListener {
             guard let self else { return }
             switch roomResult {
             case .success(let room):
+                self.updateRoomNo(room.channelDialogResponse?.roomNo)
+                self.updateConfiguredAudio(sampleRate: 16_000, channels: 1)
                 let channelConfig = TmkTranslationChannelConfig.Builder()
                     .setRoom(room)
                     .setScenario(.listen)
@@ -463,7 +579,8 @@ private final class OnlineListenSession: BaseSession, TmkTranslationListener {
             return
         }
         voiceIO.onInputPCM = { [weak self, weak channel] data, format, _ in
-            _ = format
+            self?.updateCaptureAudio(sampleRate: Int(format.mSampleRate),
+                                     channels: Int(format.mChannelsPerFrame))
             self?.emitSessionState(statusText: "翻译中...", isStarted: true, isStarting: false)
             channel?.pushStreamAudioData(data, channelCount: 1, extraChunk: nil)
         }
@@ -483,24 +600,23 @@ private final class OnlineListenSession: BaseSession, TmkTranslationListener {
 
     func onRecognized(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        emitBubble(bubbleId: bubbleId(from: result),
-                   sourceLangCode: result.srcCode,
-                   targetLangCode: result.dstCode,
-                   isFinal: isFinal,
-                   sourceText: result.data)
+        emitConversationText(kind: "recognized",
+                             result: result,
+                             isFinal: isFinal,
+                             text: result.data)
     }
 
     func onTranslate(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        emitBubble(bubbleId: bubbleId(from: result),
-                   sourceLangCode: result.srcCode,
-                   targetLangCode: result.dstCode,
-                   isFinal: isFinal,
-                   translatedText: result.data)
+        emitConversationText(kind: "translated",
+                             result: result,
+                             isFinal: isFinal,
+                             text: result.data)
     }
 
     func onAudioDataReceive(from engine: AbstractChannelEngine, result: TmkResult<String>, data: Data, channelCount: Int) {
-        _ = (engine, result, channelCount)
+        _ = (engine, result)
+        updatePlaybackChannels(channelCount)
         voiceIO?.enqueuePlaybackPCM(data)
     }
 
@@ -520,6 +636,7 @@ private final class OnlineOneToOneSession: BaseSession, TmkTranslationListener {
     private var voiceIO: TmkVoiceProcessingIO?
     private lazy var fixedPCMData: Data? = FixedAudioAssetResolver.fixedPCMData()
     private var fixedPCMOffset = 0
+    private var playbackMode: OneToOnePlaybackMode = .left
 
     override func start() {
         emitSessionState(statusText: "开始鉴权...", isStarting: true)
@@ -544,7 +661,14 @@ private final class OnlineOneToOneSession: BaseSession, TmkTranslationListener {
         room = nil
         closingRoom.flatMap(closeRoom)
         fixedPCMOffset = 0
+        updateCaptureAudio(sampleRate: 0, channels: 0)
+        updatePlaybackChannels(0)
         emitSessionState(statusText: "翻译已停止", isStarted: false, isStarting: false)
+    }
+
+    override func setOneToOnePlaybackMode(_ mode: String) {
+        playbackMode = OneToOnePlaybackMode(rawValue: mode) ?? .left
+        voiceIO?.clearPlaybackBuffer()
     }
 
     private func createRoomAndChannel() {
@@ -557,6 +681,8 @@ private final class OnlineOneToOneSession: BaseSession, TmkTranslationListener {
             guard let self else { return }
             switch roomResult {
             case .success(let room):
+                self.updateRoomNo(room.channelDialogResponse?.roomNo)
+                self.updateConfiguredAudio(sampleRate: 16_000, channels: 2)
                 let channelConfig = TmkTranslationChannelConfig.Builder()
                     .setRoom(room)
                     .setScenario(.oneToOne)
@@ -603,6 +729,7 @@ private final class OnlineOneToOneSession: BaseSession, TmkTranslationListener {
         }
         voiceIO.onInputPCM = { [weak self, weak channel] data, _, _ in
             guard let self else { return }
+            self.updateCaptureAudio(sampleRate: 16_000, channels: 2)
             let rightAudio = self.nextFixedAudioChunk(expectedLength: data.count)
             let mixed = TmkTranslationPCMTools.mixStereo16LE(left: rightAudio, right: data) ?? data
             channel?.pushStreamAudioData(mixed, channelCount: 2, extraChunk: nil)
@@ -636,33 +763,37 @@ private final class OnlineOneToOneSession: BaseSession, TmkTranslationListener {
 
     func onRecognized(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        emitBubble(bubbleId: bubbleId(from: result),
-                   sourceLangCode: result.srcCode,
-                   targetLangCode: result.dstCode,
-                   isFinal: isFinal,
-                   sourceText: result.data,
-                   channel: result.extraData["channel"] as? String)
+        emitConversationText(kind: "recognized",
+                             result: result,
+                             isFinal: isFinal,
+                             text: result.data,
+                             channel: result.extraData["channel"] as? String)
     }
 
     func onTranslate(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        emitBubble(bubbleId: bubbleId(from: result),
-                   sourceLangCode: result.srcCode,
-                   targetLangCode: result.dstCode,
-                   isFinal: isFinal,
-                   translatedText: result.data,
-                   channel: result.extraData["channel"] as? String)
+        emitConversationText(kind: "translated",
+                             result: result,
+                             isFinal: isFinal,
+                             text: result.data,
+                             channel: result.extraData["channel"] as? String)
     }
 
     func onAudioDataReceive(from engine: AbstractChannelEngine, result: TmkResult<String>, data: Data, channelCount: Int) {
-        _ = (engine, result)
-        if channelCount == 2 {
-            voiceIO?.enqueuePlaybackPCM(data)
-        } else if let stereo = TmkTranslationPCMTools.mixStereo16LE(left: data, right: data) {
-            voiceIO?.enqueuePlaybackPCM(stereo)
+        _ = engine
+        updatePlaybackChannels(channelCount)
+        let lane = OneToOnePlaybackMode(rawValue: (result.extraData["channel"] as? String) ?? "")
+        if playbackMode == .left, lane == .right { return }
+        if playbackMode == .right, lane == .left { return }
+        let playbackData: Data
+        if channelCount >= 2,
+           let lane,
+           let split = TmkTranslationPCMTools.splitStereoInterleaved16LE(data) {
+            playbackData = lane == .left ? split.left : split.right
         } else {
-            voiceIO?.enqueuePlaybackPCM(data)
+            playbackData = data
         }
+        voiceIO?.enqueuePlaybackPCM(playbackData)
     }
 
     func onError(_ error: TmkTranslationError) {
@@ -729,6 +860,8 @@ private final class OfflineListenSession: BaseSession, TmkTranslationListener, T
             .setPCMChannels(1)
             .setModelRootDirectory(modelRootDirectory)
             .build()
+        updateRoomNo("-")
+        updateConfiguredAudio(sampleRate: 16_000, channels: 1)
         TmkTranslationSDK.shared.createTranslationChannel(channelConfig, listener: self) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -747,6 +880,8 @@ private final class OfflineListenSession: BaseSession, TmkTranslationListener, T
         voiceIO = nil
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
+        updateCaptureAudio(sampleRate: 0, channels: 0)
+        updatePlaybackChannels(0)
         emitSessionState(statusText: "翻译已停止", isStarted: false, isStarting: false)
     }
 
@@ -767,7 +902,9 @@ private final class OfflineListenSession: BaseSession, TmkTranslationListener, T
             emitError(code: "audio_session_failed", message: error.localizedDescription)
             return
         }
-        voiceIO.onInputPCM = { [weak channel] data, _, _ in
+        voiceIO.onInputPCM = { [weak self, weak channel] data, format, _ in
+            self?.updateCaptureAudio(sampleRate: Int(format.mSampleRate),
+                                     channels: Int(format.mChannelsPerFrame))
             channel?.pushStreamAudioData(data, channelCount: 1, extraChunk: nil)
         }
         voiceIO.requestRecordPermission { [weak self] granted in
@@ -786,24 +923,23 @@ private final class OfflineListenSession: BaseSession, TmkTranslationListener, T
 
     func onRecognized(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        emitBubble(bubbleId: bubbleId(from: result),
-                   sourceLangCode: result.srcCode,
-                   targetLangCode: result.dstCode,
-                   isFinal: isFinal,
-                   sourceText: result.data)
+        emitConversationText(kind: "recognized",
+                             result: result,
+                             isFinal: isFinal,
+                             text: result.data)
     }
 
     func onTranslate(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        emitBubble(bubbleId: bubbleId(from: result),
-                   sourceLangCode: result.srcCode,
-                   targetLangCode: result.dstCode,
-                   isFinal: isFinal,
-                   translatedText: result.data)
+        emitConversationText(kind: "translated",
+                             result: result,
+                             isFinal: isFinal,
+                             text: result.data)
     }
 
     func onAudioDataReceive(from engine: AbstractChannelEngine, result: TmkResult<String>, data: Data, channelCount: Int) {
-        _ = (engine, result, channelCount)
+        _ = (engine, result)
+        updatePlaybackChannels(channelCount)
         voiceIO?.enqueuePlaybackPCM(data)
     }
 
@@ -853,6 +989,7 @@ private final class OfflineOneToOneSession: BaseSession, TmkTranslationListener,
     }()
     private lazy var fixedPCMData: Data? = FixedAudioAssetResolver.fixedPCMData()
     private var fixedPCMOffset = 0
+    private var playbackMode: OneToOnePlaybackMode = .left
 
     override func getOfflineModelStatus() -> [String: Any] {
         let forward = TmkTranslationSDK.shared.isOfflineModelReady(srcLang: config.sourceLanguage,
@@ -909,6 +1046,8 @@ private final class OfflineOneToOneSession: BaseSession, TmkTranslationListener,
             .setPCMChannels(2)
             .setModelRootDirectory(modelRootDirectory)
             .build()
+        updateRoomNo("-")
+        updateConfiguredAudio(sampleRate: 16_000, channels: 2)
         TmkTranslationSDK.shared.createTranslationChannel(channelConfig, listener: self) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -928,7 +1067,14 @@ private final class OfflineOneToOneSession: BaseSession, TmkTranslationListener,
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         fixedPCMOffset = 0
+        updateCaptureAudio(sampleRate: 0, channels: 0)
+        updatePlaybackChannels(0)
         emitSessionState(statusText: "翻译已停止", isStarted: false, isStarting: false)
+    }
+
+    override func setOneToOnePlaybackMode(_ mode: String) {
+        playbackMode = OneToOnePlaybackMode(rawValue: mode) ?? .left
+        voiceIO?.clearPlaybackBuffer()
     }
 
     private func startListening() {
@@ -950,6 +1096,7 @@ private final class OfflineOneToOneSession: BaseSession, TmkTranslationListener,
         }
         voiceIO.onInputPCM = { [weak self, weak channel] data, _, _ in
             guard let self else { return }
+            self.updateCaptureAudio(sampleRate: 16_000, channels: 2)
             let rightAudio = self.nextFixedAudioChunk(expectedLength: data.count)
             let mixed = TmkTranslationPCMTools.mixStereo16LE(left: rightAudio, right: data) ?? data
             channel?.pushStreamAudioData(mixed, channelCount: 2, extraChunk: nil)
@@ -983,33 +1130,37 @@ private final class OfflineOneToOneSession: BaseSession, TmkTranslationListener,
 
     func onRecognized(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        emitBubble(bubbleId: bubbleId(from: result),
-                   sourceLangCode: result.srcCode,
-                   targetLangCode: result.dstCode,
-                   isFinal: isFinal,
-                   sourceText: result.data,
-                   channel: result.extraData["channel"] as? String)
+        emitConversationText(kind: "recognized",
+                             result: result,
+                             isFinal: isFinal,
+                             text: result.data,
+                             channel: result.extraData["channel"] as? String)
     }
 
     func onTranslate(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        emitBubble(bubbleId: bubbleId(from: result),
-                   sourceLangCode: result.srcCode,
-                   targetLangCode: result.dstCode,
-                   isFinal: isFinal,
-                   translatedText: result.data,
-                   channel: result.extraData["channel"] as? String)
+        emitConversationText(kind: "translated",
+                             result: result,
+                             isFinal: isFinal,
+                             text: result.data,
+                             channel: result.extraData["channel"] as? String)
     }
 
     func onAudioDataReceive(from engine: AbstractChannelEngine, result: TmkResult<String>, data: Data, channelCount: Int) {
-        _ = (engine, result, channelCount)
-        if channelCount == 2 {
-            voiceIO?.enqueuePlaybackPCM(data)
-        } else if let stereo = TmkTranslationPCMTools.mixStereo16LE(left: data, right: data) {
-            voiceIO?.enqueuePlaybackPCM(stereo)
+        _ = engine
+        updatePlaybackChannels(channelCount)
+        let lane = OneToOnePlaybackMode(rawValue: (result.extraData["channel"] as? String) ?? "")
+        if playbackMode == .left, lane == .right { return }
+        if playbackMode == .right, lane == .left { return }
+        let playbackData: Data
+        if channelCount >= 2,
+           let lane,
+           let split = TmkTranslationPCMTools.splitStereoInterleaved16LE(data) {
+            playbackData = lane == .left ? split.left : split.right
         } else {
-            voiceIO?.enqueuePlaybackPCM(data)
+            playbackData = data
         }
+        voiceIO?.enqueuePlaybackPCM(playbackData)
     }
 
     func onError(_ error: TmkTranslationError) {

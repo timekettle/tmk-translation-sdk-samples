@@ -1,41 +1,55 @@
-import 'package:tmk_translation_flutter/tmk_translation_flutter.dart';
+enum ConversationLane {
+  left('left'),
+  right('right');
+
+  const ConversationLane(this.value);
+
+  final String value;
+}
 
 class ConversationBubble {
   ConversationBubble({
     required this.id,
+    required this.bubbleId,
+    required this.sdkSessionId,
+    required this.lane,
     required this.sourceLangCode,
     required this.targetLangCode,
-    this.channel,
     this.sourceText,
     this.translatedText,
-    this.isFinal = false,
   });
 
   final String id;
+  final String bubbleId;
+  final String sdkSessionId;
+  final ConversationLane lane;
   final String sourceLangCode;
   final String targetLangCode;
-  final String? channel;
   final String? sourceText;
   final String? translatedText;
-  final bool isFinal;
 
-  ConversationBubble copyWith({
-    String? sourceText,
-    String? translatedText,
-    bool? isFinal,
-  }) {
+  bool get isRightLane => lane == ConversationLane.right;
+
+  String get sourceDisplay =>
+      (sourceText ?? '').trim().isEmpty ? '...' : sourceText!.trim();
+
+  String get translatedDisplay =>
+      (translatedText ?? '').trim().isEmpty ? '...' : translatedText!.trim();
+
+  ConversationBubble copyWith({String? sourceText, String? translatedText}) {
     return ConversationBubble(
       id: id,
+      bubbleId: bubbleId,
+      sdkSessionId: sdkSessionId,
+      lane: lane,
       sourceLangCode: sourceLangCode,
       targetLangCode: targetLangCode,
-      channel: channel,
       sourceText: sourceText ?? this.sourceText,
       translatedText: translatedText ?? this.translatedText,
-      isFinal: isFinal ?? this.isFinal,
     );
   }
 
-  static String compositeId(TmkBubbleEvent event) {
-    return '${event.bubbleId}::${event.channel ?? 'mono'}';
+  static String rowId(String bubbleId, ConversationLane lane) {
+    return '$bubbleId::${lane.value}';
   }
 }
