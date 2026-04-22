@@ -154,6 +154,20 @@ class MethodChannelTmkTranslationPlatform extends TmkTranslationPlatform {
   }
 
   @override
+  Future<void> setOneToOnePlaybackMode(
+    String sessionId,
+    TmkOneToOnePlaybackMode mode,
+  ) {
+    return _methodChannel.invokeMethod<void>(
+      'setOneToOnePlaybackMode',
+      <String, Object?>{
+        'sessionId': sessionId,
+        'mode': mode.value,
+      },
+    );
+  }
+
+  @override
   Future<void> stopSession(String sessionId) {
     return _methodChannel.invokeMethod<void>(
       'stopSession',

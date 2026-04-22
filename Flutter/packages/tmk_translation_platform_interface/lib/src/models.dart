@@ -34,6 +34,31 @@ enum TmkTranslationMode {
   }
 }
 
+enum TmkOneToOnePlaybackMode {
+  left('left'),
+  right('right');
+
+  const TmkOneToOnePlaybackMode(this.value);
+
+  final String value;
+
+  String get title {
+    switch (this) {
+      case TmkOneToOnePlaybackMode.left:
+        return '目标语言翻译';
+      case TmkOneToOnePlaybackMode.right:
+        return '源语言翻译';
+    }
+  }
+
+  static TmkOneToOnePlaybackMode fromValue(String value) {
+    return TmkOneToOnePlaybackMode.values.firstWhere(
+      (item) => item.value == value,
+      orElse: () => TmkOneToOnePlaybackMode.left,
+    );
+  }
+}
+
 enum TmkLanguageSource {
   online('online'),
   offline('offline');
@@ -152,11 +177,11 @@ class TmkSettingsDraft {
 
   @override
   int get hashCode => Object.hash(
-        diagnosisEnabled,
-        consoleLogEnabled,
-        networkEnvironment,
-        mockEngineEnabled,
-      );
+    diagnosisEnabled,
+    consoleLogEnabled,
+    networkEnvironment,
+    mockEngineEnabled,
+  );
 }
 
 @immutable
@@ -383,10 +408,7 @@ class TmkOfflineModelStatus {
 
 @immutable
 abstract class TmkPluginEvent {
-  const TmkPluginEvent({
-    required this.kind,
-    required this.sessionId,
-  });
+  const TmkPluginEvent({required this.kind, required this.sessionId});
 
   final String kind;
   final String? sessionId;
@@ -396,6 +418,12 @@ abstract class TmkPluginEvent {
     switch (kind) {
       case 'session_state':
         return TmkSessionStateEvent.fromMap(map);
+      case 'metrics':
+        return TmkSessionMetricsEvent.fromMap(map);
+      case 'recognized':
+        return TmkRecognizedEvent.fromMap(map);
+      case 'translated':
+        return TmkTranslatedEvent.fromMap(map);
       case 'bubble':
         return TmkBubbleEvent.fromMap(map);
       case 'download':
@@ -406,6 +434,59 @@ abstract class TmkPluginEvent {
       default:
         return TmkLogEvent.fromMap(map);
     }
+  }
+}
+
+Map<String, Object?> _readStringKeyedMap(
+  Map<Object?, Object?> map,
+  String key,
+) {
+  final raw = map[key];
+  if (raw is! Map<Object?, Object?>) {
+    return const <String, Object?>{};
+  }
+  return Map<String, Object?>.fromEntries(
+    raw.entries.where((entry) => entry.key is String).map(
+      (entry) => MapEntry(entry.key as String, entry.value),
+    ),
+  );
+}
+
+@immutable
+class TmkSessionMetricsEvent extends TmkPluginEvent {
+  const TmkSessionMetricsEvent({
+    required super.sessionId,
+    required this.roomNo,
+    required this.scenario,
+    required this.mode,
+    required this.configuredSampleRate,
+    required this.configuredChannels,
+    required this.captureSampleRate,
+    required this.captureChannels,
+    required this.playbackChannels,
+  }) : super(kind: 'metrics');
+
+  final String roomNo;
+  final String scenario;
+  final String mode;
+  final int configuredSampleRate;
+  final int configuredChannels;
+  final int captureSampleRate;
+  final int captureChannels;
+  final int playbackChannels;
+
+  factory TmkSessionMetricsEvent.fromMap(Map<Object?, Object?> map) {
+    return TmkSessionMetricsEvent(
+      sessionId: map['sessionId'] as String?,
+      roomNo: map['roomNo'] as String? ?? '-',
+      scenario: map['scenario'] as String? ?? 'listen',
+      mode: map['mode'] as String? ?? 'online',
+      configuredSampleRate: map['configuredSampleRate'] as int? ?? 16000,
+      configuredChannels: map['configuredChannels'] as int? ?? 1,
+      captureSampleRate: map['captureSampleRate'] as int? ?? 0,
+      captureChannels: map['captureChannels'] as int? ?? 0,
+      playbackChannels: map['playbackChannels'] as int? ?? 0,
+    );
   }
 }
 
@@ -440,6 +521,7 @@ class TmkBubbleEvent extends TmkPluginEvent {
   const TmkBubbleEvent({
     required super.sessionId,
     required this.bubbleId,
+    required this.sdkSessionId,
     required this.sourceLangCode,
     required this.targetLangCode,
     required this.isFinal,
@@ -449,6 +531,7 @@ class TmkBubbleEvent extends TmkPluginEvent {
   }) : super(kind: 'bubble');
 
   final String bubbleId;
+  final String sdkSessionId;
   final String sourceLangCode;
   final String targetLangCode;
   final bool isFinal;
@@ -460,12 +543,90 @@ class TmkBubbleEvent extends TmkPluginEvent {
     return TmkBubbleEvent(
       sessionId: map['sessionId'] as String?,
       bubbleId: map['bubbleId'] as String? ?? '',
+      sdkSessionId: map['sdkSessionId'] as String? ?? '',
       sourceLangCode: map['sourceLangCode'] as String? ?? '',
       targetLangCode: map['targetLangCode'] as String? ?? '',
       isFinal: map['isFinal'] as bool? ?? false,
       channel: map['channel'] as String?,
       sourceText: map['sourceText'] as String?,
       translatedText: map['translatedText'] as String?,
+    );
+  }
+}
+
+@immutable
+abstract class TmkConversationTextEvent extends TmkPluginEvent {
+  const TmkConversationTextEvent({
+    required super.kind,
+    required super.sessionId,
+    required this.sdkSessionId,
+    required this.sourceLangCode,
+    required this.targetLangCode,
+    required this.isFinal,
+    required this.extraData,
+    this.text,
+    this.channel,
+  });
+
+  final String sdkSessionId;
+  final String sourceLangCode;
+  final String targetLangCode;
+  final bool isFinal;
+  final String? text;
+  final String? channel;
+  final Map<String, Object?> extraData;
+}
+
+@immutable
+class TmkRecognizedEvent extends TmkConversationTextEvent {
+  const TmkRecognizedEvent({
+    required super.sessionId,
+    required super.sdkSessionId,
+    required super.sourceLangCode,
+    required super.targetLangCode,
+    required super.isFinal,
+    required super.extraData,
+    super.text,
+    super.channel,
+  }) : super(kind: 'recognized');
+
+  factory TmkRecognizedEvent.fromMap(Map<Object?, Object?> map) {
+    return TmkRecognizedEvent(
+      sessionId: map['sessionId'] as String?,
+      sdkSessionId: map['sdkSessionId'] as String? ?? '',
+      sourceLangCode: map['sourceLangCode'] as String? ?? '',
+      targetLangCode: map['targetLangCode'] as String? ?? '',
+      isFinal: map['isFinal'] as bool? ?? false,
+      text: map['text'] as String?,
+      channel: map['channel'] as String?,
+      extraData: _readStringKeyedMap(map, 'extraData'),
+    );
+  }
+}
+
+@immutable
+class TmkTranslatedEvent extends TmkConversationTextEvent {
+  const TmkTranslatedEvent({
+    required super.sessionId,
+    required super.sdkSessionId,
+    required super.sourceLangCode,
+    required super.targetLangCode,
+    required super.isFinal,
+    required super.extraData,
+    super.text,
+    super.channel,
+  }) : super(kind: 'translated');
+
+  factory TmkTranslatedEvent.fromMap(Map<Object?, Object?> map) {
+    return TmkTranslatedEvent(
+      sessionId: map['sessionId'] as String?,
+      sdkSessionId: map['sdkSessionId'] as String? ?? '',
+      sourceLangCode: map['sourceLangCode'] as String? ?? '',
+      targetLangCode: map['targetLangCode'] as String? ?? '',
+      isFinal: map['isFinal'] as bool? ?? false,
+      text: map['text'] as String?,
+      channel: map['channel'] as String?,
+      extraData: _readStringKeyedMap(map, 'extraData'),
     );
   }
 }

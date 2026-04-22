@@ -52,6 +52,11 @@ abstract class TmkTranslationPlatform extends PlatformInterface {
 
   Future<void> startSession(String sessionId);
 
+  Future<void> setOneToOnePlaybackMode(
+    String sessionId,
+    TmkOneToOnePlaybackMode mode,
+  );
+
   Future<void> stopSession(String sessionId);
 
   Future<void> disposeSession(String sessionId);
@@ -132,6 +137,14 @@ class _PlaceholderPlatform extends TmkTranslationPlatform {
 
   @override
   Future<void> startSession(String sessionId) async {
+    _unsupported();
+  }
+
+  @override
+  Future<void> setOneToOnePlaybackMode(
+    String sessionId,
+    TmkOneToOnePlaybackMode mode,
+  ) async {
     _unsupported();
   }
 
