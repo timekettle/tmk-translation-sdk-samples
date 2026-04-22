@@ -30,6 +30,10 @@ android {
         versionName = sampleSdkVersion
         buildConfigField("String", "TMK_SDK_VERSION", "\"$sampleSdkVersion\"")
 
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "TMK_SAMPLE_APP_ID", "\"$sampleAppId\"")
         buildConfigField("String", "TMK_SAMPLE_APP_SECRET", "\"$sampleAppSecret\"")
@@ -48,12 +52,21 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
-    kotlinOptions {
-        jvmTarget = "11"
+    applicationVariants.all {
+        outputs.all {
+            val apkOutput = this as com.android.build.gradle.internal.api.ApkVariantOutputImpl
+            apkOutput.outputFileName = "tmk-translation-sdk-samples-${versionName ?: "1.0.0"}.apk"
+        }
     }
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
     }
 }
 

@@ -80,6 +80,13 @@ class TmkTranslationFlutter {
     return _platform.startSession(sessionId);
   }
 
+  static Future<void> setOneToOnePlaybackMode(
+    String sessionId,
+    TmkOneToOnePlaybackMode mode,
+  ) {
+    return _platform.setOneToOnePlaybackMode(sessionId, mode);
+  }
+
   static Future<void> stopSession(String sessionId) {
     return _platform.stopSession(sessionId);
   }
