@@ -310,7 +310,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         builder: (_) => SessionScreen(
           title: _scenario == TmkScenario.listen
               ? (_mode == TmkTranslationMode.online ? '在线收听' : '离线收听')
-              : (_mode == TmkTranslationMode.online ? '在线 1v1' : '离线 1v1'),
+              : (_mode == TmkTranslationMode.online ? '一对一' : '离线一对一'),
           config: TmkSessionConfig(
             scenario: _scenario,
             mode: _mode,

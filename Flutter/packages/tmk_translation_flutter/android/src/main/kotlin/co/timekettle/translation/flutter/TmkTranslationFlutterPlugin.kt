@@ -113,6 +113,10 @@ class TmkTranslationFlutterPlugin :
                 session.start()
                 result.success(null)
             }
+            "setOneToOnePlaybackMode" -> withSession(call, result) { session ->
+                session.setOneToOnePlaybackMode(call.argument<String>("mode") ?: "left")
+                result.success(null)
+            }
             "stopSession" -> withSession(call, result) { session ->
                 session.stop()
                 result.success(null)
@@ -310,6 +314,45 @@ class TmkTranslationFlutterPlugin :
     }
 }
 
+private fun extractRoomNo(room: Any): String {
+    val dialog = readMember(room, "channelDialogResponse")
+    val roomNo = readMember(dialog, "roomNo")?.toString()?.trim().orEmpty()
+    if (roomNo.isNotEmpty()) {
+        return roomNo
+    }
+    val roomId = readMember(room, "roomId")?.toString()?.trim().orEmpty()
+    if (roomId.isNotEmpty()) {
+        return roomId
+    }
+    return "-"
+}
+
+private fun readMember(target: Any?, name: String): Any? {
+    if (target == null) {
+        return null
+    }
+    val suffix = name.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+    val methodNames = listOf("get$suffix", name)
+    for (methodName in methodNames) {
+        val value = runCatching {
+            val method = target.javaClass.methods.firstOrNull {
+                it.parameterCount == 0 && it.name == methodName
+            } ?: return@runCatching null
+            method.invoke(target)
+        }.getOrNull()
+        if (value != null) {
+            return value
+        }
+    }
+    return runCatching {
+        val field = target.javaClass.fields.firstOrNull { it.name == name }
+            ?: target.javaClass.declaredFields.firstOrNull { it.name == name }
+            ?: return@runCatching null
+        field.isAccessible = true
+        field.get(target)
+    }.getOrNull()
+}
+
 private data class SessionConfig(
     val scenario: String,
     val mode: String,
@@ -337,6 +380,18 @@ private abstract class BaseSessionManager(
     private val emitEvent: (String, String?, Map<String, Any?>) -> Unit,
 ) {
     protected val application = context as Application
+    private var roomNo: String = "-"
+    private var scenarioLabel: String = if (config.scenario == "one_to_one") "oneToOne" else "listen"
+    private var modeLabel: String = if (config.mode == "offline") "offline" else "online"
+    private var configuredSampleRate: Int = 16_000
+    private var configuredChannels: Int = if (config.scenario == "one_to_one") 2 else 1
+    private var captureSampleRate: Int = 0
+    private var captureChannels: Int = 0
+    private var playbackChannels: Int = 0
+
+    init {
+        emitMetrics()
+    }
 
     abstract fun start()
     abstract fun stop()
@@ -362,6 +417,10 @@ private abstract class BaseSessionManager(
         log("当前 Android SDK 示例未提供离线下载取消能力", "warning")
     }
 
+    open fun setOneToOnePlaybackMode(mode: String) {
+        log("setOneToOnePlaybackMode is ignored for this session: $mode", "warning")
+    }
+
     protected fun emitSessionState(
         statusText: String,
         isStarted: Boolean? = null,
@@ -380,8 +439,32 @@ private abstract class BaseSessionManager(
         )
     }
 
+    protected fun emitConversationText(
+        kind: String,
+        result: co.timekettle.translation.model.Result<String>?,
+        isFinal: Boolean,
+        text: String?,
+        channel: String? = null,
+    ) {
+        val extraData = sanitizeExtraData(result?.extraData)
+        emitEvent(
+            kind,
+            sessionId,
+            mapOf(
+                "sdkSessionId" to result?.sessionId?.toString().orEmpty(),
+                "sourceLangCode" to (result?.srcCode?.takeIf { it.isNotEmpty() } ?: config.sourceLanguage),
+                "targetLangCode" to (result?.dstCode?.takeIf { it.isNotEmpty() } ?: config.targetLanguage),
+                "isFinal" to isFinal,
+                "text" to text,
+                "channel" to (channel ?: extraData["channel"]?.toString()),
+                "extraData" to extraData,
+            ),
+        )
+    }
+
     protected fun emitBubble(
         bubbleId: String,
+        sdkSessionId: String,
         sourceLangCode: String,
         targetLangCode: String,
         isFinal: Boolean,
@@ -394,12 +477,101 @@ private abstract class BaseSessionManager(
             sessionId,
             mapOf(
                 "bubbleId" to bubbleId,
+                "sdkSessionId" to sdkSessionId,
                 "sourceLangCode" to sourceLangCode,
                 "targetLangCode" to targetLangCode,
                 "isFinal" to isFinal,
                 "sourceText" to sourceText,
                 "translatedText" to translatedText,
                 "channel" to channel,
+            ),
+        )
+    }
+
+    private fun sanitizeExtraData(extraData: Map<*, *>?): Map<String, Any?> {
+        if (extraData.isNullOrEmpty()) {
+            return emptyMap()
+        }
+        return buildMap {
+            extraData.forEach { (key, value) ->
+                val stringKey = key as? String ?: return@forEach
+                put(stringKey, sanitizeEventValue(value))
+            }
+        }
+    }
+
+    private fun sanitizeEventValue(value: Any?): Any? =
+        when (value) {
+            null,
+            is String,
+            is Boolean,
+            is Int,
+            is Long,
+            is Double,
+            -> value
+            is Float -> value.toDouble()
+            is Short -> value.toInt()
+            is Byte -> value.toInt()
+            is Map<*, *> ->
+                buildMap<String, Any?> {
+                    value.forEach { (nestedKey, nestedValue) ->
+                        val stringKey = nestedKey as? String ?: return@forEach
+                        put(stringKey, sanitizeEventValue(nestedValue))
+                    }
+                }
+            is Iterable<*> -> value.map(::sanitizeEventValue)
+            is Array<*> -> value.map(::sanitizeEventValue)
+            else -> value.toString()
+        }
+
+    protected fun updateRoomNo(value: String?) {
+        val next = value?.trim().takeUnless { it.isNullOrEmpty() } ?: "-"
+        if (roomNo == next) {
+            return
+        }
+        roomNo = next
+        emitMetrics()
+    }
+
+    protected fun updateConfiguredAudio(sampleRate: Int, channels: Int) {
+        if (configuredSampleRate == sampleRate && configuredChannels == channels) {
+            return
+        }
+        configuredSampleRate = sampleRate
+        configuredChannels = channels
+        emitMetrics()
+    }
+
+    protected fun updateCaptureAudio(sampleRate: Int, channels: Int) {
+        if (captureSampleRate == sampleRate && captureChannels == channels) {
+            return
+        }
+        captureSampleRate = sampleRate
+        captureChannels = channels
+        emitMetrics()
+    }
+
+    protected fun updatePlaybackChannels(channels: Int) {
+        if (playbackChannels == channels) {
+            return
+        }
+        playbackChannels = channels
+        emitMetrics()
+    }
+
+    protected fun emitMetrics() {
+        emitEvent(
+            "metrics",
+            sessionId,
+            mapOf(
+                "roomNo" to roomNo,
+                "scenario" to scenarioLabel,
+                "mode" to modeLabel,
+                "configuredSampleRate" to configuredSampleRate,
+                "configuredChannels" to configuredChannels,
+                "captureSampleRate" to captureSampleRate,
+                "captureChannels" to captureChannels,
+                "playbackChannels" to playbackChannels,
             ),
         )
     }
@@ -713,10 +885,14 @@ private abstract class BaseAudioListenSession(
         channel?.stop()
         channel?.destroy()
         channel = null
+        updateCaptureAudio(0, 0)
+        updatePlaybackChannels(0)
         emitSessionState("翻译已停止", isStarted = false, isStarting = false)
     }
 
     private fun createChannel(room: TmkTranslationRoom) {
+        updateRoomNo(if (config.mode == "offline") "-" else extractRoomNo(room))
+        updateConfiguredAudio(16_000, 1)
         val builder = TmkTransChannelConfig.Builder()
             .setRoom(room)
             .setMode(mode)
@@ -750,34 +926,20 @@ private abstract class BaseAudioListenSession(
 
     private val listener = object : TmkTranslationListener {
         override fun onRecognized(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
-            val manager = bubbleManager
-            val bubbleId = when (manager) {
-                is OnlineBubbleManager -> manager.extractBubbleId(r)
-                is OfflineBubbleManager -> manager.extractBubbleId(r)
-                else -> ""
-            }
-            emitBubble(
-                bubbleId = bubbleId,
-                sourceLangCode = r?.srcCode?.takeIf { it.isNotEmpty() } ?: config.sourceLanguage,
-                targetLangCode = r?.dstCode?.takeIf { it.isNotEmpty() } ?: config.targetLanguage,
+            emitConversationText(
+                kind = "recognized",
+                result = r,
                 isFinal = isFinal,
-                sourceText = r?.data,
+                text = r?.data,
             )
         }
 
         override fun onTranslate(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
-            val manager = bubbleManager
-            val bubbleId = when (manager) {
-                is OnlineBubbleManager -> manager.extractBubbleId(r)
-                is OfflineBubbleManager -> manager.extractBubbleId(r)
-                else -> ""
-            }
-            emitBubble(
-                bubbleId = bubbleId,
-                sourceLangCode = r?.srcCode?.takeIf { it.isNotEmpty() } ?: config.sourceLanguage,
-                targetLangCode = r?.dstCode?.takeIf { it.isNotEmpty() } ?: config.targetLanguage,
+            emitConversationText(
+                kind = "translated",
+                result = r,
                 isFinal = isFinal,
-                translatedText = r?.data,
+                text = r?.data,
             )
         }
 
@@ -787,6 +949,7 @@ private abstract class BaseAudioListenSession(
             data: ByteArray,
             channelCount: Int,
         ) {
+            updatePlaybackChannels(channelCount)
             playAudio(data, channelCount)
         }
 
@@ -812,6 +975,7 @@ private abstract class BaseAudioListenSession(
             bufferSize,
         )
         audioRecord?.startRecording()
+        updateCaptureAudio(16_000, 1)
         isRecording = true
         Thread {
             val buffer = ByteArray(bufferSize)
@@ -868,6 +1032,8 @@ private abstract class BaseOneToOneSession(
     private var audioTrack: AudioTrack? = null
     private var assetPcmStream: InputStream? = null
     @Volatile
+    private var playbackMode: String = "left"
+    @Volatile
     private var isStreaming = false
 
     override fun start() {
@@ -916,10 +1082,23 @@ private abstract class BaseOneToOneSession(
         channel?.stop()
         channel?.destroy()
         channel = null
+        updateCaptureAudio(0, 0)
+        updatePlaybackChannels(0)
         emitSessionState("翻译已停止", isStarted = false, isStarting = false)
     }
 
+    override fun setOneToOnePlaybackMode(mode: String) {
+        playbackMode = if (mode == "right") "right" else "left"
+        try {
+            audioTrack?.pause()
+            audioTrack?.flush()
+        } catch (_: Throwable) {
+        }
+    }
+
     private fun createChannel(room: TmkTranslationRoom) {
+        updateRoomNo(if (config.mode == "offline") "-" else extractRoomNo(room))
+        updateConfiguredAudio(16_000, 2)
         val builder = TmkTransChannelConfig.Builder()
             .setRoom(room)
             .setMode(mode)
@@ -953,35 +1132,21 @@ private abstract class BaseOneToOneSession(
 
     private val listener = object : TmkTranslationListener {
         override fun onRecognized(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
-            val manager = bubbleManager
-            val bubbleId = when (manager) {
-                is OnlineBubbleManager -> manager.extractBubbleId(r)
-                is OfflineBubbleManager -> manager.extractBubbleId(r)
-                else -> ""
-            }
-            emitBubble(
-                bubbleId = bubbleId,
-                sourceLangCode = r?.srcCode?.takeIf { it.isNotEmpty() } ?: config.sourceLanguage,
-                targetLangCode = r?.dstCode?.takeIf { it.isNotEmpty() } ?: config.targetLanguage,
+            emitConversationText(
+                kind = "recognized",
+                result = r,
                 isFinal = isFinal,
-                sourceText = r?.data,
+                text = r?.data,
                 channel = r?.extraData?.get("channel")?.toString(),
             )
         }
 
         override fun onTranslate(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
-            val manager = bubbleManager
-            val bubbleId = when (manager) {
-                is OnlineBubbleManager -> manager.extractBubbleId(r)
-                is OfflineBubbleManager -> manager.extractBubbleId(r)
-                else -> ""
-            }
-            emitBubble(
-                bubbleId = bubbleId,
-                sourceLangCode = r?.srcCode?.takeIf { it.isNotEmpty() } ?: config.sourceLanguage,
-                targetLangCode = r?.dstCode?.takeIf { it.isNotEmpty() } ?: config.targetLanguage,
+            emitConversationText(
+                kind = "translated",
+                result = r,
                 isFinal = isFinal,
-                translatedText = r?.data,
+                text = r?.data,
                 channel = r?.extraData?.get("channel")?.toString(),
             )
         }
@@ -992,28 +1157,21 @@ private abstract class BaseOneToOneSession(
             data: ByteArray,
             channelCount: Int,
         ) {
-            val channelMask = if (channelCount == 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
-            if (audioTrack == null || audioTrack?.state == AudioTrack.STATE_UNINITIALIZED) {
-                audioTrack = AudioTrack.Builder()
-                    .setAudioFormat(
-                        AudioFormat.Builder()
-                            .setSampleRate(16_000)
-                            .setChannelMask(channelMask)
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .build(),
-                    )
-                    .setBufferSizeInBytes(
-                        AudioTrack.getMinBufferSize(
-                            16_000,
-                            channelMask,
-                            AudioFormat.ENCODING_PCM_16BIT,
-                        ),
-                    )
-                    .setTransferMode(AudioTrack.MODE_STREAM)
-                    .build()
-                audioTrack?.play()
+            updatePlaybackChannels(channelCount)
+            val lane = normalizeLane(r?.extraData?.get("channel")?.toString())
+            if (playbackMode == "left" && lane == "right") {
+                return
             }
-            audioTrack?.write(data, 0, data.size)
+            if (playbackMode == "right" && lane == "left") {
+                return
+            }
+            val playbackData = if (channelCount >= 2 && lane != null) {
+                extractStereoLane(data, lane == "left")
+            } else {
+                data
+            }
+            val playbackChannelCount = if (channelCount >= 2 && lane != null) 1 else channelCount
+            playAudio(playbackData, playbackChannelCount)
         }
 
         override fun onError(code: Int, msg: String) {
@@ -1038,6 +1196,7 @@ private abstract class BaseOneToOneSession(
             bufferSize,
         )
         audioRecord?.startRecording()
+        updateCaptureAudio(16_000, 2)
         assetPcmStream = if (config.useFixedAudio) {
             runCatching { context.assets.open("16k16b_en-US.pcm") }.getOrNull()
         } else {
@@ -1065,5 +1224,54 @@ private abstract class BaseOneToOneSession(
                 channel?.pushStreamAudioData(stereoBuffer.copyOf(micRead * 2), 2, null)
             }
         }.start()
+    }
+
+    private fun normalizeLane(raw: String?): String? {
+        return when (raw?.trim()?.lowercase()) {
+            "left" -> "left"
+            "right" -> "right"
+            else -> null
+        }
+    }
+
+    private fun extractStereoLane(data: ByteArray, useLeftChannel: Boolean): ByteArray {
+        if (data.size < 4) {
+            return data
+        }
+        val mono = ByteArray(data.size / 2)
+        var readIndex = if (useLeftChannel) 0 else 2
+        var writeIndex = 0
+        while (readIndex + 1 < data.size && writeIndex + 1 < mono.size) {
+            mono[writeIndex] = data[readIndex]
+            mono[writeIndex + 1] = data[readIndex + 1]
+            readIndex += 4
+            writeIndex += 2
+        }
+        return mono
+    }
+
+    private fun playAudio(data: ByteArray, channelCount: Int) {
+        val channelMask = if (channelCount == 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
+        if (audioTrack == null || audioTrack?.state == AudioTrack.STATE_UNINITIALIZED) {
+            audioTrack = AudioTrack.Builder()
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setSampleRate(16_000)
+                        .setChannelMask(channelMask)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .build(),
+                )
+                .setBufferSizeInBytes(
+                    AudioTrack.getMinBufferSize(
+                        16_000,
+                        channelMask,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                    ),
+                )
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+            audioTrack?.play()
+        }
+        audioTrack?.write(data, 0, data.size)
     }
 }
