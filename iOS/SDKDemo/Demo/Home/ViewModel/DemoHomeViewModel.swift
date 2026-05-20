@@ -123,13 +123,6 @@ final class DemoHomeViewModel {
             _ = TmkTranslationSDK.shared.getSupportedLanguages(source: .online, uiLocales: ["zh-CN"], handleResult)
         case .offline:
             _ = TmkTranslationSDK.shared.getSupportedLanguages(source: .offline, uiLocales: ["zh-CN"], handleResult)
-        @unknown default:
-            state.isLoadingLanguages = false
-            state.languages = []
-            state.sourceLanguage = nil
-            state.targetLanguage = nil
-            state.footerText = "当前语言源暂不支持"
-            publishState()
         }
     }
 

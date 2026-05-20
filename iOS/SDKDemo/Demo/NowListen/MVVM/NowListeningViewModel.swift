@@ -1,13 +1,14 @@
 import Foundation
 import Combine
 import OSLog
-import AVFoundation
 import TmkTranslationSDK
+import AVFoundation
 
 final class NowListeningViewModel: NSObject {
     private static let logger = Logger(subsystem: "co.timekettle.demo", category: "NowListening")
     @Published private(set) var state = NowListeningViewState()
     let rowMutation = PassthroughSubject<ChatListMutation<NowListeningRowViewData>, Never>()
+    let remoteCloseRoomPrompt = PassthroughSubject<DemoConversationPrompt, Never>()
 
     private var room: TmkTranslationRoom?
     private var channel: TmkTranslationChannel?
@@ -23,6 +24,7 @@ final class NowListeningViewModel: NSObject {
     private var activePlaybackUID: Int?
     private var selectedSourceLang = "zh-CN"
     private var selectedTargetLang = "en-US"
+    private var selectedSpeakerGender: TmkSpeakerGender = .female
     private var supportedLanguages: Set<String> = []
     private var isAuthVerified = false
 
@@ -38,6 +40,8 @@ final class NowListeningViewModel: NSObject {
     private var pcmFileHandle: FileHandle?
     private var hasPCMData = false
     private var isPCMRecordingEnabled = false
+    private let networkEventPolicy = DemoOnlineNetworkEventPolicy()
+
     func configureInitialLanguages(source: String?, target: String?) {
         if let source, source.isEmpty == false {
             selectedSourceLang = source
@@ -58,6 +62,13 @@ final class NowListeningViewModel: NSObject {
 
     func onViewWillClose() {
         stopListeningIfNeeded()
+    }
+
+    func recreateAfterRemoteClose() {
+        guard hasStoppedListening else { return }
+        hasStoppedListening = false
+        updateStatus("正在重新创建通道...")
+        startOnlineListening()
     }
 
     func startListening() {
@@ -174,15 +185,8 @@ final class NowListeningViewModel: NSObject {
             updateStatus("语言不在支持列表中")
             return
         }
-        selectedSourceLang = source
-        selectedTargetLang = target
-        updateStateOnMain {
-            $0.sourceLanguage = source
-            $0.targetLanguage = target
-            $0.rows = []
-        }
-        resetRows()
-        recreateRoomAndChannel()
+        guard source != selectedSourceLang || target != selectedTargetLang else { return }
+        updateListeningLanguages(source: source, target: target)
     }
 
     func setCaptureEnabled(_ enabled: Bool) {
@@ -197,6 +201,24 @@ final class NowListeningViewModel: NSObject {
             closePCMFile()
         }
         updateStateOnMain { $0.isCaptureEnabled = enabled }
+    }
+
+    func updateSpeaker(gender: TmkSpeakerGender) {
+        selectedSpeakerGender = gender
+        let speaker = TmkSpeaker(channel: .left, gender: gender)
+        guard let channel else {
+            updateStatus("音色已保存，将在在线房间创建时生效")
+            return
+        }
+        updateStatus("正在切换在线音色...")
+        channel.updateSpeaker(speakers: [speaker]) { [weak self] result in
+            switch result {
+            case .success:
+                self?.updateStatus("在线音色已切换，下一次合成生效")
+            case .failure(let error):
+                self?.updateStatus("在线音色切换失败：\(error.localizedDescription)")
+            }
+        }
     }
 }
 
@@ -220,7 +242,8 @@ private extension NowListeningViewModel {
         room = TmkTranslationSDK.shared.createTmkTranslationRoom(sourceLang: selectedSourceLang,
                                                                  targetLang: selectedTargetLang,
                                                                  scenario: .toSpeech,
-                                                                 channelScenario: .listen) { [weak self] roomResult in
+                                                                 channelScenario: .listen,
+                                                                 speakers: configuredSpeakers()) { [weak self] roomResult in
             guard let self else { return }
             switch roomResult {
             case .success(let room):
@@ -241,6 +264,7 @@ private extension NowListeningViewModel {
             .setMode(.online)
             .setSourceLang(selectedSourceLang)
             .setTargetLang(selectedTargetLang)
+            .setSpeakers(configuredSpeakers())
             .setPCMSampleRate(16_000)
             .setPCMChannels(1)
             .build()
@@ -286,27 +310,55 @@ private extension NowListeningViewModel {
         closeRoomIfNeeded(closingRoom)
     }
 
-    func recreateRoomAndChannel() {
-        let closingRoom = room
-        voiceIO?.stop()
-        closePCMFile()
-        setListeningActive(false)
-        activePlaybackUID = nil
-        targetPlaybackUIDs.removeAll()
-        channel?.stop()
-        channel = nil
-        room = nil
-        hasStoppedListening = false
-        isPCMRecordingEnabled = false
-        updateStateOnMain {
-            $0.canStartListening = false
-            $0.canStopListening = false
-            $0.canSharePCM = false
-            $0.playbackChannels = 0
+    func updateListeningLanguages(source: String, target: String) {
+        guard let room else {
+            selectedSourceLang = source
+            selectedTargetLang = target
+            activePlaybackUID = nil
+            targetPlaybackUIDs.removeAll()
+            cachedPlaybackChannels = -1
+            updateStateOnMain {
+                $0.playbackChannels = 0
+                $0.sourceLanguage = source
+                $0.targetLanguage = target
+            }
+            updateStatus("语言已切换，将在下次创建房间后生效")
+            return
         }
-        updateStatus("语言已切换，重新创建通道中...")
-        closeRoomIfNeeded(closingRoom)
-        startOnlineListening()
+        updateStatus("语言已切换，正在更新房间语言，下一句话生效...")
+        _ = updateListeningRoomLocale(room: room,
+                                      sourceLang: source,
+                                      targetLang: target) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.selectedSourceLang = source
+                self.selectedTargetLang = target
+                self.activePlaybackUID = nil
+                self.targetPlaybackUIDs.removeAll()
+                self.cachedPlaybackChannels = -1
+                self.updateStateOnMain {
+                    $0.playbackChannels = 0
+                    $0.sourceLanguage = source
+                    $0.targetLanguage = target
+                }
+                self.channel?.updateLanguages(sourceLang: source,
+                                              targetLang: target)
+                self.updateStatus("房间语言已更新，下一句话生效")
+            case .failure(let error):
+                self.updateStatus("更新房间语言失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    @discardableResult
+    private func updateListeningRoomLocale(room: TmkTranslationRoom,
+                                           sourceLang: String,
+                                           targetLang: String,
+                                           completion: @escaping (Result<Void, TmkTranslationError>) -> Void) -> TmkSDKCancellable? {
+        room.updateRoomLocale(sourceLocales: [sourceLang],
+                              targetLocales: [targetLang],
+                              completion: completion)
     }
 
     func updateStatus(_ text: String) {
@@ -430,6 +482,10 @@ private extension NowListeningViewModel {
         activePlaybackUID = fallback.first
     }
 
+    func configuredSpeakers() -> [TmkSpeaker] {
+        [TmkSpeaker(channel: .left, gender: selectedSpeakerGender)]
+    }
+
     func durationMs(since startAt: Date) -> Int {
         Int(Date().timeIntervalSince(startAt) * 1000)
     }
@@ -498,6 +554,57 @@ private extension NowListeningViewModel {
                 Self.logger.error("close room failed: \(error.localizedDescription, privacy: .public)")
             }
         }
+    }
+
+    func applyRuntimeAction(_ action: DemoConversationRuntimeAction) {
+        switch action {
+        case .none, .ignore:
+            return
+        case .status(let text),
+             .weakNetwork(let text),
+             .reconnecting(let text):
+            updateStatus(text)
+        case .prompt(let prompt):
+            stopConversationForPrompt(status: prompt.title, closeRoom: true)
+            DispatchQueue.main.async { [weak self] in
+                self?.remoteCloseRoomPrompt.send(prompt)
+            }
+        }
+    }
+
+    func stopConversationForPrompt(status: String, closeRoom: Bool) {
+        guard hasStoppedListening == false else {
+            updateStatus(status)
+            return
+        }
+        hasStoppedListening = true
+        let closingRoom = closeRoom ? room : nil
+        pendingRowsPublishWorkItem?.cancel()
+        pendingRowsPublishWorkItem = nil
+        setListeningActive(false)
+        voiceIO?.stop()
+        closePCMFile()
+        voiceIO = nil
+        isPCMRecordingEnabled = false
+        channel?.stop()
+        channel = nil
+        room = nil
+        activePlaybackUID = nil
+        targetPlaybackUIDs.removeAll()
+        cachedCaptureSampleRate = -1
+        cachedCaptureChannels = -1
+        cachedPlaybackChannels = -1
+        updateStateOnMain {
+            $0.canStartListening = false
+            $0.canStopListening = false
+            $0.canSharePCM = self.hasPCMData
+            $0.currentRoomNo = "-"
+            $0.captureSampleRate = 0
+            $0.captureChannels = 0
+            $0.playbackChannels = 0
+        }
+        updateStatus(status)
+        closeRoomIfNeeded(closingRoom)
     }
 
 }
@@ -571,13 +678,65 @@ extension NowListeningViewModel: TmkTranslationListener {
     }
 
     func onError(_ error: TmkTranslationError) {
-        updateStatus("错误[\(error.category.rawValue)] \(error.message)")
+        applyRuntimeAction(DemoConversationRuntimePolicy.action(for: error))
     }
 
     func onEvent(name: String, args: Any?) {
-        _ = args
+        if DemoConversationRuntimePolicy.isCloseRoomEvent(name: name, args: args) {
+            handleRemoteCloseRoom()
+            return
+        }
+        let networkAction = networkEventPolicy.action(forEvent: name, args: args)
+        if networkAction != .none {
+            applyRuntimeAction(networkAction)
+            return
+        }
         if name == "online_started" {
             updateStatus("在线通道已就绪，点击“开始收听”开始采集")
+        }
+    }
+
+    func onStateChanged(from engine: AbstractChannelEngine, snapshot: TmkTranslationChannelStateSnapshot) {
+        _ = engine
+        applyRuntimeAction(DemoConversationRuntimePolicy.action(for: snapshot))
+    }
+
+    private func handleRemoteCloseRoom() {
+        guard hasStoppedListening == false else { return }
+        hasStoppedListening = true
+        pendingRowsPublishWorkItem?.cancel()
+        pendingRowsPublishWorkItem = nil
+        setListeningActive(false)
+        voiceIO?.stop()
+        closePCMFile()
+        voiceIO = nil
+        isPCMRecordingEnabled = false
+        channel?.stop()
+        channel = nil
+        room = nil
+        activePlaybackUID = nil
+        targetPlaybackUIDs.removeAll()
+        cachedCaptureSampleRate = -1
+        cachedCaptureChannels = -1
+        cachedPlaybackChannels = -1
+        updateStateOnMain {
+            $0.canStartListening = false
+            $0.canStopListening = false
+            $0.canSharePCM = self.hasPCMData
+            $0.currentRoomNo = "-"
+            $0.captureSampleRate = 0
+            $0.captureChannels = 0
+            $0.playbackChannels = 0
+        }
+        updateStatus("房间已关闭")
+        Self.logger.info("nowListening remote close_room received, waiting for user decision")
+        let prompt = DemoConversationPrompt(
+            title: "房间已关闭",
+            message: "服务端已关闭当前房间，是否重新创建对话通道？",
+            style: .restart
+        )
+        DispatchQueue.main.async { [weak self] in
+            self?.remoteCloseRoomPrompt.send(prompt)
         }
     }
 }

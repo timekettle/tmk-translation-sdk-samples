@@ -7,8 +7,8 @@
 
 import Foundation
 import Combine
-import AVFoundation
 import TmkTranslationSDK
+import AVFoundation
 
 typealias OfflineOneToOneLanguageOption = (code: String, name: String)
 
@@ -51,6 +51,7 @@ final class Offline1V1ViewModel: NSObject {
     @Published private(set) var showCancelButton: Bool = false
     @Published private(set) var modelPackageInfos: [TmkOfflineModelPackageInfo] = []
     @Published private(set) var supportedLanguages: [OfflineOneToOneLanguageOption] = []
+    let runtimePrompt = PassthroughSubject<DemoConversationPrompt, Never>()
 
     private var channel: TmkTranslationChannel?
     private var voiceIO: TmkVoiceProcessingIO?
@@ -63,16 +64,28 @@ final class Offline1V1ViewModel: NSObject {
     private var lastPublishedRows: [OneToOneRowViewData] = []
     private var selectedSourceLang = "zh"
     private var selectedTargetLang = "en"
+    private var selectedLeftSpeakerGender: TmkSpeakerGender? = .male
+    private var selectedRightSpeakerGender: TmkSpeakerGender? = .female
+    @Published private(set) var offlineAudioChannelMode: TmkOfflineAudioChannelMode = .stereo
     private let maxDisplayedRows = 200
     private var downloadStatusHeader = ""
 
     private let stateLock = NSLock()
     private var isListeningActive = false
     private var playbackMode: OneToOnePlaybackMode = .left
+
     /// 模型根目录（App Documents/tmkOfflineModel/）。
     private var modelRootDirectory: String {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         return docs.appendingPathComponent("tmkOfflineModel").path
+    }
+
+    var currentLeftSpeakerGender: TmkSpeakerGender {
+        selectedLeftSpeakerGender ?? .male
+    }
+
+    var currentRightSpeakerGender: TmkSpeakerGender {
+        selectedRightSpeakerGender ?? .female
     }
 
     /// 本地 PCM 文件数据（预加载），用于左声道输入。
@@ -261,6 +274,17 @@ final class Offline1V1ViewModel: NSObject {
         updateStateOnMain { $0.playbackMode = mode }
     }
 
+    func setOfflineAudioChannelMode(_ mode: TmkOfflineAudioChannelMode) {
+        guard offlineAudioChannelMode != mode else { return }
+        offlineAudioChannelMode = mode
+        let title = mode == .stereo ? "Stereo" : "Mono"
+        guard channel != nil else {
+            updateStatus("离线一对一 TTS 输出模式已切换为 \(title)，将在通道创建后生效")
+            return
+        }
+        resetAndRecreateChannel(reason: "离线一对一 TTS 输出模式已切换为 \(title)，正在重启离线通道...")
+    }
+
     func applySourceLanguage(_ code: String) {
         guard code != selectedTargetLang else {
             updateStatus("源语言和目标语言不能相同")
@@ -269,6 +293,58 @@ final class Offline1V1ViewModel: NSObject {
         selectedSourceLang = code
         updateStateOnMain { $0.sourceLanguage = code }
         resetAndRecreateChannel()
+    }
+
+    func updateSpeaker(channel speakerChannel: TmkSpeakerChannel, gender: TmkSpeakerGender) {
+        switch speakerChannel {
+        case .left:
+            selectedLeftSpeakerGender = gender
+        case .right:
+            selectedRightSpeakerGender = gender
+        }
+
+        let speaker = TmkSpeaker(channel: speakerChannel, gender: gender)
+        guard let channel else {
+            updateStatus("音色已保存，将在离线通道创建后生效")
+            return
+        }
+        updateStatus("正在切换离线音色...")
+        channel.updateSpeaker(speakers: [speaker]) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.updateStatus("离线音色已切换，下一次合成生效")
+            case .failure(let error):
+                self.updateStatus("离线音色切换失败：\(error.message)")
+            }
+        }
+    }
+
+    func updateSpeakers(left: TmkSpeakerGender, right: TmkSpeakerGender) {
+        selectedLeftSpeakerGender = left
+        selectedRightSpeakerGender = right
+        let speakers = [
+            TmkSpeaker(channel: .left, gender: left),
+            TmkSpeaker(channel: .right, gender: right)
+        ]
+        guard let channel else {
+            updateStatus("音色已保存，将在离线通道创建后生效")
+            return
+        }
+        updateStatus("正在切换离线音色...")
+        channel.updateSpeaker(speakers: speakers) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.updateStatus("离线左右声道音色已切换，下一次合成生效")
+            case .failure(let error):
+                self.updateStatus("离线音色切换失败：\(error.message)")
+            }
+        }
+    }
+
+    func restartAfterRuntimePrompt() {
+        resetAndRecreateChannel(reason: "正在重新初始化离线一对一通道...")
     }
 }
 
@@ -386,15 +462,20 @@ private extension Offline1V1ViewModel {
             self.updateDownloadPackageListStatusText(header: "模型校验中...")
             self.showCancelButton = false
         }
-        let config = TmkTranslationChannelConfig.Builder()
+        let builder = TmkTranslationChannelConfig.Builder()
             .setMode(.offline)
             .setScenario(.oneToOne)
             .setSourceLang(selectedSourceLang)
             .setTargetLang(selectedTargetLang)
             .setPCMSampleRate(16_000)
             .setPCMChannels(2)
+            .setOfflineAudioChannelMode(offlineAudioChannelMode)
             .setModelRootDirectory(modelRootDirectory)
-            .build()
+        let speakers = configuredSpeakers()
+        if speakers.isEmpty == false {
+           _ = builder.setSpeakers(speakers)
+        }
+        let config = builder.build()
         updateStateOnMain {
             $0.configuredSampleRate = config.pcmSampleRate
             $0.configuredChannels = config.pcmChannels
@@ -416,8 +497,9 @@ private extension Offline1V1ViewModel {
             }
         }
     }
+    
 
-    func resetAndRecreateChannel() {
+    func resetAndRecreateChannel(reason: String = "语言已切换，正在重新鉴权并检测离线能力...") {
         voiceIO?.stop()
         resetLocalPCMPlaybackState()
         setListeningActive(false)
@@ -432,8 +514,19 @@ private extension Offline1V1ViewModel {
         }
         offlineSupportChecked = false
         offlineTranslationSupported = false
-        updateStatus("语言已切换，正在重新鉴权并检测离线能力...")
+        updateStatus(reason)
         verifyAuthThenRefreshOfflineState(autoStartIfReady: true)
+    }
+
+    func configuredSpeakers() -> [TmkSpeaker] {
+        var speakers: [TmkSpeaker] = []
+        if let selectedLeftSpeakerGender {
+            speakers.append(TmkSpeaker(channel: .left, gender: selectedLeftSpeakerGender))
+        }
+        if let selectedRightSpeakerGender {
+            speakers.append(TmkSpeaker(channel: .right, gender: selectedRightSpeakerGender))
+        }
+        return speakers
     }
 
     func stopListeningIfNeeded() {
@@ -448,6 +541,37 @@ private extension Offline1V1ViewModel {
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         updateStatus("已停止收听")
+    }
+
+    func stopConversationForRuntimePrompt(status: String) {
+        pendingRowsPublishWorkItem?.cancel()
+        pendingRowsPublishWorkItem = nil
+        voiceIO?.stop()
+        resetLocalPCMPlaybackState()
+        setListeningActive(false)
+        voiceIO = nil
+        TmkTranslationSDK.shared.releaseChannel()
+        channel = nil
+        updateStateOnMain {
+            $0.canStartListening = false
+            $0.canStopListening = false
+            $0.playbackChannels = 0
+            $0.statusText = status
+        }
+    }
+
+    func applyRuntimeAction(_ action: DemoConversationRuntimeAction) {
+        switch action {
+        case .none, .ignore:
+            return
+        case .status(let text), .weakNetwork(let text), .reconnecting(let text):
+            updateStatus(text)
+        case .prompt(let prompt):
+            stopConversationForRuntimePrompt(status: prompt.title)
+            DispatchQueue.main.async {
+                self.runtimePrompt.send(prompt)
+            }
+        }
     }
 
     func stopCurrentChannelForMissingModels() {
@@ -556,6 +680,8 @@ private extension Offline1V1ViewModel {
         defer { stateLock.unlock() }
         return isListeningActive
     }
+
+
 
     func extractChannel(from result: TmkResult<String>) -> OneToOneRowViewData.Lane {
         if let ch = result.extraData["channel"] as? String {
@@ -678,8 +804,7 @@ extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadLi
     }
 
     func onError(_ error: TmkTranslationError) {
-        let message = "错误[\(error.category.rawValue)] \(error.message)"
-        updateStatus(message)
+        applyRuntimeAction(DemoConversationRuntimePolicy.action(for: error))
         // 下载错误时恢复按钮状态。
         DispatchQueue.main.async {
             if self.downloadButtonState == .downloading {
@@ -691,7 +816,13 @@ extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadLi
     }
 
     func onEvent(name: String, args: Any?) {
-        _ = (name, args)
+        _ = args
+    }
+
+    func onStateChanged(from engine: AbstractChannelEngine, snapshot: TmkTranslationChannelStateSnapshot) {
+        _ = engine
+        applyRuntimeAction(DemoConversationRuntimePolicy.action(for: snapshot,
+                                                                readyMessage: #"离线一对一通道已就绪，点击"开始收听"开始采集"#))
     }
 
     func onOfflineModelEvent(name: String, args: Any?) {

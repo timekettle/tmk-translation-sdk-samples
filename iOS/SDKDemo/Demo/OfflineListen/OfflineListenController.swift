@@ -41,10 +41,6 @@ final class OfflineListenController: UIViewController {
     private let pickerContainerView = UIView()
     private let languagePickerView = UIPickerView()
     private var pickerBottomConstraint: Constraint?
-    private lazy var languageBarButtonItem = UIBarButtonItem(title: "语言",
-                                                             style: .plain,
-                                                             target: self,
-                                                             action: #selector(onTapChangeLanguage))
 
     init(initialSourceLanguage: String? = nil, initialTargetLanguage: String? = nil) {
         self.initialSourceLanguage = initialSourceLanguage
@@ -81,7 +77,10 @@ private extension OfflineListenController {
                                                            style: .plain,
                                                            target: self,
                                                            action: #selector(onClose))
-        navigationItem.rightBarButtonItem = languageBarButtonItem
+        navigationItem.rightBarButtonItem = UIBarButtonItem(title: "设置",
+                                                            image: nil,
+                                                            primaryAction: nil,
+                                                            menu: makeSettingsMenu())
 
         statusLabel.numberOfLines = 0
         statusLabel.font = .systemFont(ofSize: 13)
@@ -170,6 +169,17 @@ private extension OfflineListenController {
         button.addTarget(self, action: action, for: .touchUpInside)
     }
 
+    func makeSettingsMenu() -> UIMenu {
+        UIMenu(title: "", children: [
+            UIAction(title: "语言") { [weak self] _ in
+                self?.showLanguagePicker()
+            },
+            UIAction(title: "音色") { [weak self] _ in
+                self?.showSpeakerMenu()
+            }
+        ])
+    }
+
     /// 从 ViewModel 当前语言列表刷新语言选项。
     func loadLocalLanguageOptions() {
         supportedLanguageOptions = viewModel.supportedLanguages.map {
@@ -247,6 +257,13 @@ private extension OfflineListenController {
                 self.modelPackageListView.render(packages: packages)
                 self.refreshModelDetailButtonTitle()
                 self.applyDownloadButtonStatusText(self.modelPackageListView.currentSummaryText())
+            }
+            .store(in: &cancellables)
+
+        viewModel.runtimePrompt
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] prompt in
+                self?.presentRuntimePrompt(prompt)
             }
             .store(in: &cancellables)
     }
@@ -365,9 +382,44 @@ private extension OfflineListenController {
         showLanguagePicker()
     }
 
+    @objc func onTapSpeaker() {
+        showSpeakerMenu()
+    }
+
+    func showSpeakerMenu() {
+        let alert = UIAlertController(title: "离线收听音色",
+                                      message: "现场收听仅支持设置 left 声道音色，下一次 TTS 合成生效。",
+                                      preferredStyle: .actionSheet)
+        alert.addAction(UIAlertAction(title: "男声", style: .default) { [weak self] _ in
+            self?.viewModel.updateSpeaker(gender: .male)
+        })
+        alert.addAction(UIAlertAction(title: "女声", style: .default) { [weak self] _ in
+            self?.viewModel.updateSpeaker(gender: .female)
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
+        present(alert, animated: true)
+    }
+
     @objc func onClose() {
         viewModel.onViewWillClose()
         dismiss(animated: true)
+    }
+
+    func presentRuntimePrompt(_ prompt: DemoConversationPrompt) {
+        guard presentedViewController == nil else { return }
+        let alert = UIAlertController(title: prompt.title,
+                                      message: prompt.message,
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
+            self?.onClose()
+        })
+        if prompt.style == .restart {
+            alert.addAction(UIAlertAction(title: "重新初始化", style: .default) { [weak self] _ in
+                self?.viewModel.restartAfterRuntimePrompt()
+            })
+        }
+        present(alert, animated: true)
     }
 
     func showLanguagePicker() {

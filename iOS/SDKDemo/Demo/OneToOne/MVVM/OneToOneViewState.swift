@@ -6,8 +6,8 @@ enum OneToOnePlaybackMode: String, CaseIterable, Equatable {
 
     var title: String {
         switch self {
-        case .left: return "目标语言翻译"
-        case .right: return "源语言翻译"
+        case .left: return "左声道翻译"
+        case .right: return "右声道翻译"
         }
     }
 }

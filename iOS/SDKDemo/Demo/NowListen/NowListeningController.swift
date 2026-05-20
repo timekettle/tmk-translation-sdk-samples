@@ -31,10 +31,10 @@ final class NowListeningController: UIViewController {
     private let pickerContainerView = UIView()
     private let languagePickerView = UIPickerView()
     private var pickerBottomConstraint: Constraint?
-    private lazy var languageBarButtonItem = UIBarButtonItem(title: "语言",
-                                                             style: .plain,
-                                                             target: self,
-                                                             action: #selector(onTapChangeLanguage))
+    private lazy var settingsBarButtonItem = UIBarButtonItem(title: "设置",
+                                                             image: nil,
+                                                             primaryAction: nil,
+                                                             menu: makeSettingsMenu())
     init(initialSourceLanguage: String? = nil, initialTargetLanguage: String? = nil) {
         self.initialSourceLanguage = initialSourceLanguage
         self.initialTargetLanguage = initialTargetLanguage
@@ -69,7 +69,7 @@ private extension NowListeningController {
                                                            style: .plain,
                                                            target: self,
                                                            action: #selector(onClose))
-        navigationItem.rightBarButtonItem = languageBarButtonItem
+        navigationItem.rightBarButtonItem = settingsBarButtonItem
 
         statusLabel.numberOfLines = 1
         statusLabel.font = .systemFont(ofSize: 13)
@@ -167,6 +167,13 @@ private extension NowListeningController {
                 }
             }
             .store(in: &cancellables)
+
+        viewModel.remoteCloseRoomPrompt
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] prompt in
+                self?.presentConversationPrompt(prompt)
+            }
+            .store(in: &cancellables)
     }
 
     func render(_ state: NowListeningViewState) {
@@ -240,9 +247,51 @@ private extension NowListeningController {
         loadSupportedLanguagesAndShowPicker()
     }
 
+    func makeSettingsMenu() -> UIMenu {
+        UIMenu(title: "", children: [
+            UIAction(title: "切换语言") { [weak self] _ in
+                self?.loadSupportedLanguagesAndShowPicker()
+            },
+            UIAction(title: "音色") { [weak self] _ in
+                self?.showSpeakerMenu()
+            }
+        ])
+    }
+
+    func showSpeakerMenu() {
+        let alert = UIAlertController(title: "在线收听音色",
+                                      message: "现场收听仅设置 left 声道音色，下一次 TTS 合成生效。",
+                                      preferredStyle: .actionSheet)
+        alert.addAction(UIAlertAction(title: "男声", style: .default) { [weak self] _ in
+            self?.viewModel.updateSpeaker(gender: .male)
+        })
+        alert.addAction(UIAlertAction(title: "女声", style: .default) { [weak self] _ in
+            self?.viewModel.updateSpeaker(gender: .female)
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
+        present(alert, animated: true)
+    }
+
     @objc func onClose() {
         viewModel.onViewWillClose()
         dismiss(animated: true)
+    }
+
+    func presentConversationPrompt(_ prompt: DemoConversationPrompt) {
+        guard presentedViewController == nil else { return }
+        let alert = UIAlertController(title: prompt.title,
+                                      message: prompt.message,
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
+            self?.onClose()
+        })
+        if prompt.style == .restart {
+            alert.addAction(UIAlertAction(title: "重新创建", style: .default) { [weak self] _ in
+                self?.viewModel.recreateAfterRemoteClose()
+            })
+        }
+        present(alert, animated: true)
     }
 
     func localizedLanguageName(for code: String) -> String {

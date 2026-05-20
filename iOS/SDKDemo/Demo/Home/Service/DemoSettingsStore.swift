@@ -25,15 +25,29 @@ struct DemoSettingsStore {
         guard userDefaults.object(forKey: Key.schemaVersion) != nil else {
             return .default
         }
+        let schemaVersion = userDefaults.integer(forKey: Key.schemaVersion)
         let rawEnvironment = userDefaults.string(forKey: Key.networkEnvironment) ?? DemoSettingsConfig.default.networkEnvironment.rawValue
         let environment = TmkTranslationNetworkEnvironment(rawValue: rawEnvironment) ?? .test
-        return DemoSettingsConfig(
+        let storedConfig = DemoSettingsConfig(
             diagnosisEnabled: userDefaults.bool(forKey: Key.diagnosisEnabled),
             consoleLogEnabled: userDefaults.bool(forKey: Key.consoleLogEnabled),
             networkEnvironment: environment,
             mockEngineEnabled: userDefaults.bool(forKey: Key.mockEngineEnabled),
-            schemaVersion: userDefaults.integer(forKey: Key.schemaVersion)
+            schemaVersion: schemaVersion
         )
+        guard schemaVersion < DemoSettingsConfig.default.schemaVersion else {
+            return storedConfig
+        }
+        // 迁移旧 Demo 配置：默认打开日志，同时保留用户已选择的环境和 Mock 引擎设置。
+        let migratedConfig = DemoSettingsConfig(
+            diagnosisEnabled: DemoSettingsConfig.default.diagnosisEnabled,
+            consoleLogEnabled: DemoSettingsConfig.default.consoleLogEnabled,
+            networkEnvironment: storedConfig.networkEnvironment,
+            mockEngineEnabled: storedConfig.mockEngineEnabled,
+            schemaVersion: DemoSettingsConfig.default.schemaVersion
+        )
+        save(migratedConfig)
+        return migratedConfig
     }
 
     func save(_ config: DemoSettingsConfig) {

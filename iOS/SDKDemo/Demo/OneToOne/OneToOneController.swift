@@ -35,6 +35,12 @@ final class OneToOneController: UIViewController {
     private let sourceLangContainerView = UIView()
     private let sourceLangPickerView = UIPickerView()
     private var sourceLangBottomConstraint: Constraint?
+    // 音色选择器：与离线一对一保持一致，左右声道同时选择后统一提交。
+    private let speakerMaskView = UIView()
+    private let speakerContainerView = UIView()
+    private let speakerPickerView = UIPickerView()
+    private var speakerBottomConstraint: Constraint?
+    private let speakerGenderOptions: [TmkSpeakerGender] = [.male, .female]
 
     init(initialSourceLanguage: String? = nil, initialTargetLanguage: String? = nil) {
         self.initialSourceLanguage = initialSourceLanguage
@@ -70,10 +76,10 @@ private extension OneToOneController {
                                                             style: .plain,
                                                             target: self,
                                                             action: #selector(onClose))
-        navigationItem.rightBarButtonItems = [
-            UIBarButtonItem(title: "播放音源", style: .plain, target: self, action: #selector(onTapPlaybackMode)),
-            UIBarButtonItem(title: "语言", style: .plain, target: self, action: #selector(onTapChangeLanguage))
-        ]
+        navigationItem.rightBarButtonItem = UIBarButtonItem(title: "设置",
+                                                            image: nil,
+                                                            primaryAction: nil,
+                                                            menu: makeSettingsMenu())
         statusLabel.numberOfLines = 1
         statusLabel.font = .systemFont(ofSize: 13)
         statusLabel.textColor = .label
@@ -88,6 +94,7 @@ private extension OneToOneController {
         setupButton(startListeningButton, title: "开始收听", action: #selector(onTapStartListening))
         setupButton(stopListeningButton, title: "停止收听", action: #selector(onTapStopListening))
         setupButton(sharePCMButton, title: "分享PCM", action: #selector(onTapSharePCM))
+        speakerMaskView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(hideSpeakerPicker)))
 
         tableView.register(OneToOneBubbleCell.self, forCellReuseIdentifier: OneToOneBubbleCell.reuseId)
         tableView.dataSource = self
@@ -170,6 +177,13 @@ private extension OneToOneController {
                 }
             }
             .store(in: &cancellables)
+
+        viewModel.remoteCloseRoomPrompt
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] prompt in
+                self?.presentConversationPrompt(prompt)
+            }
+            .store(in: &cancellables)
     }
 
     func render(_ state: OneToOneViewState) {
@@ -242,17 +256,38 @@ private extension OneToOneController {
         viewModel.setCaptureEnabled(captureSwitch.isOn)
     }
 
-    @objc func onTapPlaybackMode() {
-        showPlaybackModePicker()
-    }
-
-    @objc func onTapChangeLanguage() {
-        loadSupportedLanguagesAndShowPicker()
-    }
-
     @objc func onClose() {
         viewModel.onViewWillClose()
         dismiss(animated: true)
+    }
+
+    func presentConversationPrompt(_ prompt: DemoConversationPrompt) {
+        guard presentedViewController == nil else { return }
+        let alert = UIAlertController(title: prompt.title,
+                                      message: prompt.message,
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
+            self?.onClose()
+        })
+        if prompt.style == .restart {
+            alert.addAction(UIAlertAction(title: "重新创建", style: .default) { [weak self] _ in
+                self?.viewModel.recreateAfterRemoteClose()
+            })
+        }
+        present(alert, animated: true)
+    }
+
+    func makeSettingsMenu() -> UIMenu {
+        let languageAction = UIAction(title: "切换语言") { [weak self] _ in
+            self?.loadSupportedLanguagesAndShowPicker()
+        }
+        let playbackAction = UIAction(title: "播放音源") { [weak self] _ in
+            self?.showPlaybackModePicker()
+        }
+        let speakerAction = UIAction(title: "音色") { [weak self] _ in
+            self?.showSpeakerPicker()
+        }
+        return UIMenu(title: "", children: [languageAction, playbackAction, speakerAction])
     }
 
     func showPlaybackModePicker() {
@@ -346,6 +381,148 @@ private extension OneToOneController {
         guard allModes.indices.contains(row) else { return }
         viewModel.setPlaybackMode(allModes[row])
         hidePlaybackModePicker()
+    }
+
+    // MARK: - 音色选择器
+
+    func showSpeakerPicker() {
+        guard speakerMaskView.superview == nil else { return }
+
+        speakerMaskView.backgroundColor = UIColor.black.withAlphaComponent(0.35)
+        speakerMaskView.alpha = 0
+        view.addSubview(speakerMaskView)
+        speakerMaskView.snp.makeConstraints { make in
+            make.edges.equalToSuperview()
+        }
+
+        speakerContainerView.backgroundColor = .systemBackground
+        speakerContainerView.layer.cornerRadius = 12
+        speakerContainerView.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        speakerContainerView.clipsToBounds = true
+        view.addSubview(speakerContainerView)
+        speakerContainerView.snp.makeConstraints { make in
+            make.left.right.equalToSuperview()
+            make.height.equalTo(320)
+            speakerBottomConstraint = make.bottom.equalToSuperview().offset(320).constraint
+        }
+
+        let cancelButton = UIButton(type: .system)
+        cancelButton.setTitle("取消", for: .normal)
+        cancelButton.addTarget(self, action: #selector(hideSpeakerPicker), for: .touchUpInside)
+
+        let confirmButton = UIButton(type: .system)
+        confirmButton.setTitle("确定", for: .normal)
+        confirmButton.addTarget(self, action: #selector(confirmSpeakerSelection), for: .touchUpInside)
+
+        let leftLabel = UILabel()
+        leftLabel.text = "左声道"
+        leftLabel.textAlignment = .center
+        leftLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        leftLabel.textColor = .secondaryLabel
+
+        let rightLabel = UILabel()
+        rightLabel.text = "右声道"
+        rightLabel.textAlignment = .center
+        rightLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        rightLabel.textColor = .secondaryLabel
+
+        let line = UIView()
+        line.backgroundColor = .separator
+        let midLine = UIView()
+        midLine.backgroundColor = .separator
+
+        speakerPickerView.dataSource = self
+        speakerPickerView.delegate = self
+        speakerPickerView.reloadAllComponents()
+        syncSpeakerPickerSelection()
+
+        speakerContainerView.addSubview(cancelButton)
+        speakerContainerView.addSubview(confirmButton)
+        speakerContainerView.addSubview(leftLabel)
+        speakerContainerView.addSubview(rightLabel)
+        speakerContainerView.addSubview(line)
+        speakerContainerView.addSubview(midLine)
+        speakerContainerView.addSubview(speakerPickerView)
+
+        cancelButton.snp.makeConstraints { make in
+            make.left.equalToSuperview().offset(16)
+            make.top.equalToSuperview().offset(8)
+            make.height.equalTo(36)
+        }
+        confirmButton.snp.makeConstraints { make in
+            make.right.equalToSuperview().inset(16)
+            make.top.equalTo(cancelButton)
+            make.height.equalTo(cancelButton)
+        }
+        leftLabel.snp.makeConstraints { make in
+            make.left.equalToSuperview()
+            make.top.equalTo(cancelButton.snp.bottom).offset(8)
+            make.width.equalToSuperview().multipliedBy(0.5)
+            make.height.equalTo(24)
+        }
+        rightLabel.snp.makeConstraints { make in
+            make.right.equalToSuperview()
+            make.top.equalTo(leftLabel)
+            make.width.equalTo(leftLabel)
+            make.height.equalTo(leftLabel)
+        }
+        line.snp.makeConstraints { make in
+            make.top.equalTo(leftLabel.snp.bottom).offset(4)
+            make.left.right.equalToSuperview()
+            make.height.equalTo(0.5)
+        }
+        midLine.snp.makeConstraints { make in
+            make.top.equalTo(line.snp.bottom)
+            make.bottom.equalToSuperview()
+            make.centerX.equalToSuperview()
+            make.width.equalTo(0.5)
+        }
+        speakerPickerView.snp.makeConstraints { make in
+            make.top.equalTo(line.snp.bottom)
+            make.left.right.bottom.equalToSuperview()
+        }
+
+        view.layoutIfNeeded()
+        speakerBottomConstraint?.update(offset: 0)
+        UIView.animate(withDuration: 0.25) {
+            self.speakerMaskView.alpha = 1
+            self.view.layoutIfNeeded()
+        }
+    }
+
+    @objc func hideSpeakerPicker() {
+        guard speakerMaskView.superview != nil else { return }
+        speakerBottomConstraint?.update(offset: 320)
+        UIView.animate(withDuration: 0.25, animations: {
+            self.speakerMaskView.alpha = 0
+            self.view.layoutIfNeeded()
+        }, completion: { _ in
+            self.speakerPickerView.delegate = nil
+            self.speakerPickerView.dataSource = nil
+            self.speakerContainerView.subviews.forEach { $0.removeFromSuperview() }
+            self.speakerContainerView.removeFromSuperview()
+            self.speakerMaskView.removeFromSuperview()
+        })
+    }
+
+    @objc func confirmSpeakerSelection() {
+        let leftRow = speakerPickerView.selectedRow(inComponent: 0)
+        let rightRow = speakerPickerView.selectedRow(inComponent: 1)
+        guard speakerGenderOptions.indices.contains(leftRow),
+              speakerGenderOptions.indices.contains(rightRow) else {
+            return
+        }
+        viewModel.updateSpeakers(left: speakerGenderOptions[leftRow],
+                                 right: speakerGenderOptions[rightRow])
+        hideSpeakerPicker()
+    }
+
+    func syncSpeakerPickerSelection() {
+        guard speakerPickerView.numberOfComponents >= 2 else { return }
+        let leftIndex = speakerGenderOptions.firstIndex(of: viewModel.currentLeftSpeakerGender) ?? 0
+        let rightIndex = speakerGenderOptions.firstIndex(of: viewModel.currentRightSpeakerGender) ?? 0
+        speakerPickerView.selectRow(leftIndex, inComponent: 0, animated: false)
+        speakerPickerView.selectRow(rightIndex, inComponent: 1, animated: false)
     }
 
     func localizedLanguageName(for code: String) -> String {
@@ -502,17 +679,37 @@ extension OneToOneController: UITableViewDelegate {
 }
 
 extension OneToOneController: UIPickerViewDataSource, UIPickerViewDelegate {
-    func numberOfComponents(in pickerView: UIPickerView) -> Int { 1 }
+    func numberOfComponents(in pickerView: UIPickerView) -> Int {
+        pickerView === speakerPickerView ? 2 : 1
+    }
+
     func pickerView(_ pickerView: UIPickerView, numberOfRowsInComponent component: Int) -> Int {
         if pickerView === modePickerView { return allModes.count }
+        if pickerView === speakerPickerView { return speakerGenderOptions.count }
         return supportedSourceLanguageOptions.count
     }
+
     func pickerView(_ pickerView: UIPickerView, titleForRow row: Int, forComponent component: Int) -> String? {
         if pickerView === modePickerView {
             guard allModes.indices.contains(row) else { return nil }
             return allModes[row].title
         }
+        if pickerView === speakerPickerView {
+            guard speakerGenderOptions.indices.contains(row) else { return nil }
+            return speakerGenderOptions[row].title
+        }
         guard supportedSourceLanguageOptions.indices.contains(row) else { return nil }
         return supportedSourceLanguageOptions[row].title
+    }
+}
+
+private extension TmkSpeakerGender {
+    var title: String {
+        switch self {
+        case .male:
+            return "男声"
+        case .female:
+            return "女声"
+        }
     }
 }
