@@ -1,7 +1,6 @@
 package co.timekettle.translation.sample
 
 import co.timekettle.translation.config.TmkTransGlobalConfig
-import co.timekettle.translation.sample.BuildConfig
 
 object SampleSdkConfig {
 
