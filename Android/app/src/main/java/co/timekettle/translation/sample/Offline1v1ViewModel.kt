@@ -1,5 +1,6 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.TmkTranslationException
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
@@ -10,29 +11,38 @@ import android.media.MediaRecorder
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
-import co.timekettle.offlinesdk.ModelPaths
-import co.timekettle.offlinesdk.OfflineModelManager
-import co.timekettle.offlinesdk.vad.VadDetector
+import co.timekettle.translation.Cancelable
 import co.timekettle.translation.TmkTranslationChannel
 import co.timekettle.translation.TmkTranslationSDK
+import co.timekettle.offlinesdk.vad.VadDetector
 import co.timekettle.translation.config.TmkTransChannelConfig
 import co.timekettle.translation.core.AbstractChannelEngine
 import co.timekettle.translation.enums.Scenario
+import co.timekettle.translation.enums.TmkOfflineAudioChannelMode
 import co.timekettle.translation.enums.TranslationMode
+import co.timekettle.translation.listener.ActionCallback
 import co.timekettle.translation.listener.AuthCallback
 import co.timekettle.translation.listener.CreateChannelCallback
 import co.timekettle.translation.listener.CreateRoomCallback
 import co.timekettle.translation.listener.TmkTranslationListener
 import co.timekettle.translation.model.BubbleRowData
 import co.timekettle.translation.model.OfflineBubbleManager
+import co.timekettle.translation.model.Result
+import co.timekettle.translation.model.SpeakerChannel
+import co.timekettle.translation.model.SpeakerGender
+import co.timekettle.translation.model.TmkSpeaker
+import co.timekettle.translation.model.TmkTranslationChannelState
+import co.timekettle.translation.model.TmkTranslationChannelStateSnapshot
 import co.timekettle.translation.model.TmkTranslationRoom
+import co.timekettle.translation.offlinemodel.TmkOfflineModelDownloadListener
+import co.timekettle.translation.offlinemodel.TmkOfflineModelPackageInfo
+import co.timekettle.translation.offlinemodel.TmkOfflineModelPackageState
 import co.timekettle.translation.utils.RingBuffer
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.InputStream
-import java.util.Arrays
 import javax.inject.Inject
 
 @HiltViewModel
@@ -49,6 +59,7 @@ class Offline1v1ViewModel @Inject constructor(
     }
 
     private var channel: TmkTranslationChannel? = null
+    private var speakerCancelable: Cancelable? = null
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
     private var assetPcmStream: InputStream? = null
@@ -57,20 +68,8 @@ class Offline1v1ViewModel @Inject constructor(
     @Volatile private var isRecording = false
     @Volatile private var isPlaying = false
     @Volatile private var released = false
+    @Volatile private var userCancelledDownload = false
 
-    // 左声道 traceId
-    private var leftTraceId: String? = null
-    private var leftVadStartMs: Long = 0
-    private var leftFirstAsrMs: Long = 0
-    private var leftFirstMtMs: Long = 0
-    private var leftFirstTtsMs: Long = 0
-
-    // 右声道 traceId
-    private var rightTraceId: String? = null
-    private var rightVadStartMs: Long = 0
-    private var rightFirstAsrMs: Long = 0
-    private var rightFirstMtMs: Long = 0
-    private var rightFirstTtsMs: Long = 0
 
     // 左右声道 TTS RingBuffer
     private val leftTtsBuffer = RingBuffer(BYTES_PER_20MS * 50)  // ~1秒缓冲
@@ -85,6 +84,9 @@ class Offline1v1ViewModel @Inject constructor(
     private val _downloadProgress = MutableStateFlow("")
     val downloadProgress: StateFlow<String> = _downloadProgress.asStateFlow()
 
+    private val _offlineModelPackages = MutableStateFlow<List<TmkOfflineModelPackageInfo>>(emptyList())
+    val offlineModelPackages: StateFlow<List<TmkOfflineModelPackageInfo>> = _offlineModelPackages.asStateFlow()
+
     private val _isInitialized = MutableStateFlow(false)
     val isInitialized: StateFlow<Boolean> = _isInitialized.asStateFlow()
     private val _initErrorMessage = MutableStateFlow<String?>(null)
@@ -93,8 +95,23 @@ class Offline1v1ViewModel @Inject constructor(
     private val _isStarted = MutableStateFlow(false)
     val isStarted: StateFlow<Boolean> = _isStarted.asStateFlow()
 
+    private val _isChannelReady = MutableStateFlow(false)
+    val isChannelReady: StateFlow<Boolean> = _isChannelReady.asStateFlow()
+
     private val _isStarting = MutableStateFlow(false)
     val isStarting: StateFlow<Boolean> = _isStarting.asStateFlow()
+
+    private val _conversationErrorPrompt = MutableStateFlow<OnlineConversationErrorPrompt?>(null)
+    val conversationErrorPrompt: StateFlow<OnlineConversationErrorPrompt?> = _conversationErrorPrompt.asStateFlow()
+
+    private val _isCheckingOfflineSupport = MutableStateFlow(false)
+    val isCheckingOfflineSupport: StateFlow<Boolean> = _isCheckingOfflineSupport.asStateFlow()
+
+    private val _isOfflineSupported = MutableStateFlow(false)
+    val isOfflineSupported: StateFlow<Boolean> = _isOfflineSupported.asStateFlow()
+
+    private val _offlineSupportChecked = MutableStateFlow(false)
+    val offlineSupportChecked: StateFlow<Boolean> = _offlineSupportChecked.asStateFlow()
 
     private val _logMessages = MutableStateFlow<List<String>>(emptyList())
     val logMessages: StateFlow<List<String>> = _logMessages.asStateFlow()
@@ -103,20 +120,16 @@ class Offline1v1ViewModel @Inject constructor(
     private val _bubbles = MutableStateFlow<List<BubbleRowData>>(emptyList())
     val bubbles: StateFlow<List<BubbleRowData>> = _bubbles.asStateFlow()
 
-    // 固定音频开关（关闭则该路静音）
-    private val _useFixedAudio = MutableStateFlow(true)
-    val useFixedAudio: StateFlow<Boolean> = _useFixedAudio.asStateFlow()
-    fun toggleFixedAudio() { _useFixedAudio.value = !_useFixedAudio.value }
-
-    // 声道交换：false=左麦右PCM，true=左PCM右麦
-    private val _swapChannels = MutableStateFlow(false)
-    val swapChannels: StateFlow<Boolean> = _swapChannels.asStateFlow()
-    fun toggleSwapChannels() { _swapChannels.value = !_swapChannels.value }
-
     private val _sourceLang = MutableStateFlow("zh-CN")
     val sourceLang: StateFlow<String> = _sourceLang.asStateFlow()
     private val _targetLang = MutableStateFlow("en-US")
     val targetLang: StateFlow<String> = _targetLang.asStateFlow()
+    private val _leftSpeakerGender = MutableStateFlow(SpeakerGender.FEMALE)
+    val leftSpeakerGender: StateFlow<SpeakerGender> = _leftSpeakerGender.asStateFlow()
+    private val _rightSpeakerGender = MutableStateFlow(SpeakerGender.MALE)
+    val rightSpeakerGender: StateFlow<SpeakerGender> = _rightSpeakerGender.asStateFlow()
+    private val _offlineAudioChannelMode = MutableStateFlow(TmkOfflineAudioChannelMode.STEREO)
+    val offlineAudioChannelMode: StateFlow<TmkOfflineAudioChannelMode> = _offlineAudioChannelMode.asStateFlow()
     private var hasLockedLanguages = false
 
     fun setLanguagesIfNeeded(sourceLang: String, targetLang: String) {
@@ -124,17 +137,27 @@ class Offline1v1ViewModel @Inject constructor(
         _sourceLang.value = sourceLang
         _targetLang.value = targetLang
         hasLockedLanguages = true
-        refreshModelReady()
+        if (_offlineSupportChecked.value && _isOfflineSupported.value) {
+            refreshModelReady()
+        }
     }
 
-    init { refreshModelReady() }
-
     private fun refreshModelReady() {
-        val src = ModelPaths.langToCode(_sourceLang.value)
-        val tgt = ModelPaths.langToCode(_targetLang.value)
-        _isModelReady.value =
-            OfflineModelManager.isLanguagePairReady(application, src, tgt, needMt = true, needTts = true) &&
-            OfflineModelManager.isLanguagePairReady(application, tgt, src, needMt = true, needTts = true)
+        if (!_isOfflineSupported.value) {
+            _offlineModelPackages.value = emptyList()
+            _isModelReady.value = false
+            return
+        }
+        val packages = TmkTranslationSDK.getOfflineModelPackageInfos(
+            context = application,
+            srcLang = _sourceLang.value,
+            dstLang = _targetLang.value,
+            scenario = Scenario.ONE_TO_ONE,
+            needMt = true,
+            needTts = true,
+        )
+        _offlineModelPackages.value = packages
+        _isModelReady.value = packages.isNotEmpty() && packages.all { it.state == TmkOfflineModelPackageState.READY }
     }
 
     private fun addLog(msg: String) {
@@ -144,75 +167,176 @@ class Offline1v1ViewModel @Inject constructor(
 
     private fun publishBubbles() { _bubbles.value = bubbleManager.snapshot() }
 
-    private fun generateTraceId(ch: String): String {
-        val sdf = java.text.SimpleDateFormat("HHmmssSSS", java.util.Locale.getDefault())
-        return "O${ch}${sdf.format(java.util.Date())}"
+    private fun showConversationErrorPrompt(prompt: OnlineConversationErrorPrompt?) {
+        if (prompt == null || _conversationErrorPrompt.value?.id == prompt.id) return
+        _conversationErrorPrompt.value = prompt
     }
+
+    private fun applySdkChannelSnapshot(snapshot: TmkTranslationChannelStateSnapshot) {
+        when (snapshot.state) {
+            TmkTranslationChannelState.STARTING -> {
+                _isStarting.value = true
+                _isChannelReady.value = false
+            }
+            TmkTranslationChannelState.RUNNING -> {
+                _isStarting.value = false
+                _isChannelReady.value = true
+                addLog("离线一对一通道已就绪，可以开始收听")
+            }
+            TmkTranslationChannelState.STOPPING -> {
+                _isChannelReady.value = false
+                if (_isStarted.value) stopListening()
+            }
+            TmkTranslationChannelState.STOPPED -> {
+                _isStarting.value = false
+                _isChannelReady.value = false
+                if (_isStarted.value) stopListening()
+            }
+            TmkTranslationChannelState.FAILED -> {
+                _isStarting.value = false
+                _isChannelReady.value = false
+                if (_isStarted.value) stopListening()
+                addLog("通道异常: ${snapshot.message}")
+                showConversationErrorPrompt(
+                    OnlineConversationErrorPrompts.fromSnapshot(
+                        snapshot,
+                        OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
+                    )
+                )
+            }
+            TmkTranslationChannelState.IDLE -> {
+                _isStarting.value = false
+                _isChannelReady.value = false
+            }
+            TmkTranslationChannelState.RECONNECTING,
+            TmkTranslationChannelState.DEGRADED -> Unit
+        }
+    }
+
 
     fun downloadModels() {
         if (_isDownloading.value) return
+        released = false
+        userCancelledDownload = false
+        if (!_offlineSupportChecked.value) {
+            verifyAuthThenRefreshOfflineState(autoStartIfReady = false, autoDownloadIfNeeded = true)
+            return
+        }
+        if (!_isOfflineSupported.value) {
+            applyOfflineUnsupportedState()
+            return
+        }
         _isDownloading.value = true
         _downloadProgress.value = "准备下载..."
         addLog("开始下载 ${TranslationLanguages.displayName(_sourceLang.value)} ↔ ${TranslationLanguages.displayName(_targetLang.value)} 双向模型...")
 
-        Thread {
-            val forwardReady = downloadLanguagePair(_sourceLang.value, _targetLang.value, "正向")
-            val reverseReady = forwardReady && downloadLanguagePair(_targetLang.value, _sourceLang.value, "反向")
-            if (forwardReady && reverseReady) {
-                addLog("模型下载完成")
-                _isModelReady.value = true
-            }
-            _downloadProgress.value = ""
-            _isDownloading.value = false
-        }.start()
-    }
-
-    private fun downloadLanguagePair(srcLang: String, targetLang: String, stageLabel: String): Boolean {
-        var failed = false
         var lastLoggedPct = -1L
-        OfflineModelManager.downloadLanguagePair(
+        TmkTranslationSDK.downloadOfflineModels(
             context = application,
-            srcLang = srcLang,
-            dstLang = targetLang,
-            callback = object : OfflineModelManager.DownloadCallback {
-                override fun onProgress(fileName: String, downloaded: Long, total: Long) {
-                    val pct = if (total > 0) (downloaded * 100 / total) else 0
-                    _downloadProgress.value = "$stageLabel $fileName ${pct}%"
+            srcLang = _sourceLang.value,
+            dstLang = _targetLang.value,
+            scenario = Scenario.ONE_TO_ONE,
+            needMt = true,
+            needTts = true,
+            listener = object : TmkOfflineModelDownloadListener {
+                override fun onOfflineModelDownloadProgress(
+                    fileName: String,
+                    index: Int,
+                    total: Int,
+                    downloaded: Long,
+                    fileTotal: Long,
+                ) {
+                    if (userCancelledDownload) return
+                    val pct = if (fileTotal > 0) (downloaded * 100 / fileTotal) else 0
+                    _downloadProgress.value = "($index/$total) $fileName ${pct}%"
                     if (pct >= lastLoggedPct + 5) {
                         lastLoggedPct = pct
-                        addLog("[$stageLabel][$fileName] $pct%")
+                        addLog("[$fileName] $pct%")
                     }
                 }
 
-                override fun onFileProgress(current: Int, total: Int, fileName: String) {
-                    lastLoggedPct = -1L
-                    _downloadProgress.value = "$stageLabel ($current/$total) $fileName"
-                    addLog("$stageLabel 下载 ($current/$total): $fileName")
+                override fun onOfflineModelUnzipProgress(fileName: String, progress: Double) {
+                    if (userCancelledDownload) return
+                    _downloadProgress.value = "$fileName 解压中 ${(progress * 100).toInt()}%"
                 }
 
-                override fun onComplete() = Unit
-
-                override fun onError(message: String) {
-                    failed = true
-                    _downloadProgress.value = "$stageLabel 下载失败"
-                    addLog("$stageLabel 下载失败: $message")
+                override fun onOfflineModelReady() {
+                    if (released || userCancelledDownload) return
+                    addLog("模型下载完成")
+                    _downloadProgress.value = "下载完成"
+                    _isDownloading.value = false
+                    refreshModelReady()
+                    if (_isModelReady.value) {
+                        prepareChannelIfNeeded()
+                    }
                 }
-            }
+
+                override fun onOfflineModelPackageInfosChanged(packages: List<TmkOfflineModelPackageInfo>) {
+                    if (released || userCancelledDownload) return
+                    _offlineModelPackages.value = packages
+                    _isModelReady.value = packages.isNotEmpty() && packages.all { it.state == TmkOfflineModelPackageState.READY }
+                }
+
+                override fun onOfflineModelEvent(name: String, args: Any?) {
+                    if (released) return
+                    if (name == "offline_model_cancelled") {
+                        userCancelledDownload = true
+                        _downloadProgress.value = "下载已取消"
+                        _isDownloading.value = false
+                        refreshModelReady()
+                    } else if (name == "offline_model_update_required") {
+                        _downloadProgress.value = "模型需要更新"
+                        refreshModelReady()
+                    }
+                }
+
+                override fun onOfflineModelError(code: Int, message: String) {
+                    if (released || userCancelledDownload) return
+                    addLog("下载失败: [$code] $message")
+                    showConversationErrorPrompt(
+                        OnlineConversationErrorPrompts.fromCode(
+                            code,
+                            message,
+                            mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
+                        )
+                    )
+                    _downloadProgress.value = "下载失败"
+                    _isDownloading.value = false
+                    refreshModelReady()
+                }
+            },
         )
-        return !failed
+    }
+
+    fun cancelDownloadModels() {
+        if (!_isDownloading.value) return
+        userCancelledDownload = true
+        TmkTranslationSDK.cancelOfflineModelDownload()
+        _isDownloading.value = false
+        _downloadProgress.value = "下载已取消"
+        refreshModelReady()
+        addLog("已取消离线模型下载")
     }
 
     fun initSDK() {
-        if (_isInitialized.value) return
-        try {
-            TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig())
-            _isInitialized.value = true
-            _initErrorMessage.value = null
-            addLog("SDK 初始化完成")
+        released = false
+        verifyAuthThenRefreshOfflineState(autoStartIfReady = true)
+    }
+
+    private fun ensureSdkInitialized(): Boolean {
+        return try {
+            if (!_isInitialized.value) {
+                TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig())
+                _isInitialized.value = true
+                _initErrorMessage.value = null
+                addLog("SDK 初始化完成")
+            }
+            true
         } catch (e: Exception) {
             addLog("SDK 初始化异常: ${e.message}")
             _initErrorMessage.value = SampleSdkConfig.buildInitErrorMessage(e)
             Log.e(TAG, "initSDK failed", e)
+            false
         }
     }
 
@@ -220,25 +344,116 @@ class Offline1v1ViewModel @Inject constructor(
         _initErrorMessage.value = null
     }
 
+    private fun verifyAuthThenRefreshOfflineState(
+        autoStartIfReady: Boolean,
+        autoDownloadIfNeeded: Boolean = false,
+    ) {
+        if (!ensureSdkInitialized()) return
+        if (_isCheckingOfflineSupport.value) return
+        _isCheckingOfflineSupport.value = true
+        addLog("开始鉴权并检查离线能力...")
+        try {
+            TmkTranslationSDK.verifyAuth(object : AuthCallback {
+                override fun onSuccess() {
+                    if (released) {
+                        _isCheckingOfflineSupport.value = false
+                        return
+                    }
+                    _offlineSupportChecked.value = true
+                    _isOfflineSupported.value = TmkTranslationSDK.isOfflineTranslationSupported()
+                    _isCheckingOfflineSupport.value = false
+                    if (!_isOfflineSupported.value) {
+                        applyOfflineUnsupportedState()
+                        return
+                    }
+                    addLog("鉴权成功，当前账号支持离线翻译")
+                    refreshModelReady()
+                    if (_isModelReady.value) {
+                        if (autoStartIfReady) prepareChannelIfNeeded()
+                    } else {
+                        addLog("当前模型资源不完整，需要先下载离线资源")
+                        if (autoDownloadIfNeeded) downloadModels()
+                    }
+                }
+
+                override fun onError(errorId: Int, e: Exception) {
+                    _offlineSupportChecked.value = false
+                    _isOfflineSupported.value = false
+                    _isCheckingOfflineSupport.value = false
+                    _isModelReady.value = false
+                    _offlineModelPackages.value = emptyList()
+                    addLog("鉴权失败: [$errorId] ${e.message}")
+                    showConversationErrorPrompt(
+                        OnlineConversationErrorPrompts.fromCode(
+                            errorId,
+                            e.message ?: "offline auth failed",
+                            mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
+                        )
+                    )
+                }
+            })
+        } catch (e: Exception) {
+            _offlineSupportChecked.value = false
+            _isOfflineSupported.value = false
+            _isCheckingOfflineSupport.value = false
+            _isModelReady.value = false
+            _offlineModelPackages.value = emptyList()
+            addLog("鉴权异常: ${e.message}")
+            Log.e(TAG, "verifyAuth failed", e)
+        }
+    }
+
+    private fun applyOfflineUnsupportedState() {
+        channel?.stop()
+        channel?.destroy()
+        channel = null
+        _isChannelReady.value = false
+        _isStarting.value = false
+        _isStarted.value = false
+        _isDownloading.value = false
+        _downloadProgress.value = ""
+        _offlineModelPackages.value = emptyList()
+        _isModelReady.value = false
+        addLog("当前账号未开通离线翻译能力")
+        showConversationErrorPrompt(
+            OnlineConversationErrorPrompts.fromCode(
+                TmkTranslationException.ErrorCodes.OFFLINE_MODEL_NOT_READY,
+                "当前账号未开通离线翻译能力",
+                mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
+            )
+        )
+    }
+
     fun start() {
-        if (!_isInitialized.value) {
-            addLog("请先初始化 SDK")
+        if (!_isInitialized.value || channel == null || !_isChannelReady.value) {
+            addLog("离线一对一通道未就绪，尝试重新准备")
+            initSDK()
+            return
+        }
+        if (_isStarted.value) return
+        startTtsPlaybackThread()
+        if (!startDualChannelStreaming()) {
+            stopTtsPlayback()
+            return
+        }
+        _isStarted.value = true
+        addLog("离线一对一已开始采集")
+    }
+
+    private fun prepareChannelIfNeeded() {
+        if (channel != null || _isStarting.value) return
+        if (!_isOfflineSupported.value) {
+            applyOfflineUnsupportedState()
+            return
+        }
+        refreshModelReady()
+        if (!_isModelReady.value) {
+            addLog("当前模型资源不完整，需要先下载离线资源")
             return
         }
         released = false
         _isStarting.value = true
-        addLog("开始鉴权...")
-        TmkTranslationSDK.verifyAuth(object : AuthCallback {
-            override fun onSuccess() {
-                if (released) { _isStarting.value = false; return }
-                addLog("鉴权成功")
-                doStart()
-            }
-            override fun onError(errorId: Int, e: Exception) {
-                addLog("鉴权失败: [$errorId] ${e.message}")
-                _isStarting.value = false
-            }
-        })
+        doStart()
     }
 
     private fun doStart() {
@@ -249,24 +464,29 @@ class Offline1v1ViewModel @Inject constructor(
                 if (released) { _isStarting.value = false; return }
                 addLog("创建房间成功: ${room.roomId}")
 
-                val modelRootDir = OfflineModelManager.getModelRootDir(application).absolutePath
+                val modelRootDir = TmkTranslationSDK.defaultOfflineModelRootDirectory(application)
 
                 val channelConfig = TmkTransChannelConfig.Builder()
                     .setRoom(room)
                     .setMode(TranslationMode.OFFLINE)
                     .setScenario(Scenario.ONE_TO_ONE)
-                    .setSourceLang(_sourceLang.value)
-                    .setTargetLang(_targetLang.value)
+                    // 一对一 Demo 固定：左声道=目标语言固定 PCM，右声道=源语言麦克风。
+                    // 离线引擎按 config.sourceLang 作为左声道源语言，因此这里与在线 1v1 保持同样映射。
+                    .setSourceLang(_targetLang.value)
+                    .setTargetLang(_sourceLang.value)
+                    .setSpeakers(currentSpeakers())
                     .setSampleRate(SAMPLE_RATE)
                     .setChannelNum(2)
-                    .addExtraParams("model_root_dir", modelRootDir)
+                    .setOfflineAudioChannelMode(_offlineAudioChannelMode.value)
+                    .setModelRootDirectory(modelRootDir)
                     .build()
 
-                addLog("src=${_sourceLang.value} tgt=${_targetLang.value} model_root_dir: $modelRootDir")
+                addLog("left=${_targetLang.value} right=${_sourceLang.value} model_root_dir: $modelRootDir")
 
                 TmkTranslationSDK.createTranslationChannel(
                     application,
                     channelConfig,
+                    translationListener,
                     object : CreateChannelCallback {
                         override fun onSuccess(ch: TmkTranslationChannel) {
                             if (released) {
@@ -276,18 +496,20 @@ class Offline1v1ViewModel @Inject constructor(
                             }
                             channel = ch
                             addLog("创建离线 1v1 Channel 成功")
-                            ch.setTranslationListener(translationListener)
-                            ch.start()
-                            addLog("离线 1v1 Channel 已启动")
-                            startTtsPlaybackThread()
-                            startDualChannelStreaming()
                             _isStarting.value = false
-                            _isStarted.value = true
+                            _isChannelReady.value = true
                         }
 
                         override fun onError(errorId: Int, e: Exception) {
                             addLog("创建 Channel 失败: [$errorId] ${e.message}")
                             _isStarting.value = false
+                            showConversationErrorPrompt(
+                                OnlineConversationErrorPrompts.fromCode(
+                                    errorId,
+                                    e.message ?: "create offline one-to-one channel failed",
+                                    mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
+                                )
+                            )
                         }
                     }
                 )
@@ -300,72 +522,182 @@ class Offline1v1ViewModel @Inject constructor(
         })
     }
 
-    fun stop() {
-        released = true
+    fun stopListening() {
         stopRecording()
         stopTtsPlayback()
+        _isStarted.value = false
+        addLog("离线一对一已停止采集")
+    }
+
+    fun stop() {
+        released = true
+        if (_isDownloading.value) {
+            userCancelledDownload = true
+            TmkTranslationSDK.cancelOfflineModelDownload()
+            _isDownloading.value = false
+            _downloadProgress.value = ""
+        }
+        stopListening()
+        speakerCancelable?.cancel()
+        speakerCancelable = null
         channel?.stop()
         channel?.destroy()
         channel = null
+        _isChannelReady.value = false
         _isStarting.value = false
         _isStarted.value = false
+        _conversationErrorPrompt.value = null
         addLog("离线 1v1 翻译已停止")
+    }
+
+    fun recreateChannelAfterRuntimeFailure() {
+        _conversationErrorPrompt.value = null
+        stop()
+        released = false
+        initSDK()
+    }
+
+    fun dismissConversationErrorPrompt() {
+        _conversationErrorPrompt.value = null
+    }
+
+    fun setOfflineAudioChannelMode(mode: TmkOfflineAudioChannelMode) {
+        if (_offlineAudioChannelMode.value == mode) return
+        _offlineAudioChannelMode.value = mode
+        val modeName = if (mode == TmkOfflineAudioChannelMode.STEREO) "Stereo" else "Mono"
+        when {
+            _isStarting.value -> {
+                addLog("离线一对一 TTS 输出模式已切换为 $modeName，当前正在启动，将在本次通道创建时生效")
+            }
+            _isStarted.value -> {
+                addLog("离线一对一 TTS 输出模式已切换为 $modeName，正在重建离线通道...")
+                stop()
+                initSDK()
+            }
+            channel != null -> {
+                addLog("离线一对一 TTS 输出模式已切换为 $modeName，正在重建离线通道...")
+                stop()
+                initSDK()
+            }
+            else -> {
+                addLog("离线一对一 TTS 输出模式已切换为 $modeName，将在创建离线通道时生效")
+            }
+        }
+    }
+
+    fun updateSpeakers(leftGender: SpeakerGender, rightGender: SpeakerGender) {
+        _leftSpeakerGender.value = leftGender
+        _rightSpeakerGender.value = rightGender
+        val currentChannel = channel
+        if (currentChannel == null) {
+            addLog("音色已设置为 L=${speakerLabel(leftGender)} R=${speakerLabel(rightGender)}，将在创建离线通道时生效")
+            return
+        }
+        speakerCancelable?.cancel()
+        val speakers = currentSpeakers()
+        speakerCancelable = currentChannel.updateSpeaker(
+            speakers,
+            object : ActionCallback {
+                override fun onSuccess(result: Result<Unit>) {
+                    addLog("音色设置成功: L=${speakerLabel(leftGender)} R=${speakerLabel(rightGender)}，下一次 TTS 生效")
+                }
+
+                override fun onError(errorId: Int, e: Exception) {
+                    addLog("音色设置失败: [$errorId] ${e.message}")
+                }
+            }
+        )
+    }
+
+    private fun currentSpeakers(): List<TmkSpeaker> = listOf(
+        TmkSpeaker(SpeakerChannel.LEFT, _leftSpeakerGender.value),
+        TmkSpeaker(SpeakerChannel.RIGHT, _rightSpeakerGender.value),
+    )
+
+    private fun speakerLabel(gender: SpeakerGender): String = when (gender) {
+        SpeakerGender.MALE -> "男声"
+        SpeakerGender.FEMALE -> "女声"
+    }
+
+    private fun normalizeChannel(raw: Any?): String {
+        return when (raw?.toString()?.lowercase()) {
+            "1", "left" -> "left"
+            "2", "right" -> "right"
+            else -> ""
+        }
+    }
+
+    private fun extractPcmChannel(data: ByteArray, channelCount: Int, channelIndex: Int): ByteArray {
+        if (channelCount <= 1) return data
+        val frameSize = channelCount * 2
+        val frameCount = data.size / frameSize
+        val output = ByteArray(frameCount * 2)
+        for (index in 0 until frameCount) {
+            val inOffset = index * frameSize + channelIndex * 2
+            val outOffset = index * 2
+            output[outOffset] = data[inOffset]
+            output[outOffset + 1] = data[inOffset + 1]
+        }
+        return output
+    }
+
+    private fun appendTtsBuffer(ch: String, data: ByteArray, channelCount: Int) {
+        when (ch) {
+            // SDK 离线 1v1 已对外回调 stereo PCM；Demo 仍按左右缓冲播放，需取出对应声道。
+            "left" -> leftTtsBuffer.write(extractPcmChannel(data, channelCount, 0))
+            "right" -> rightTtsBuffer.write(extractPcmChannel(data, channelCount, 1))
+            else -> {
+                leftTtsBuffer.write(extractPcmChannel(data, channelCount, 0))
+                rightTtsBuffer.write(extractPcmChannel(data, channelCount, if (channelCount > 1) 1 else 0))
+            }
+        }
     }
 
     private val translationListener = object : TmkTranslationListener {
         override fun onRecognized(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
             val sid = r?.sessionId ?: ""; val text = r?.data ?: ""
-            val ch = r?.extraData?.get("channel")?.toString() ?: ""
+            val ch = normalizeChannel(r?.extraData?.get("channel"))
             val bid = bubbleManager.extractBubbleId(r)
             val src = r?.srcCode?.takeIf { it.isNotEmpty() } ?: _sourceLang.value
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
             bubbleManager.upsertSource(sid, bid, src, dst, text, isFinal, channel = ch)
             publishBubbles()
             if (!isFinal) return
-            val now = System.currentTimeMillis()
-            if (ch == "left" && leftTraceId != null && leftFirstAsrMs == 0L) {
-                leftFirstAsrMs = now; addLog("ASR [final]:L $text | traceId=$leftTraceId ASR=${now - leftVadStartMs}ms")
-            } else if (ch == "right" && rightTraceId != null && rightFirstAsrMs == 0L) {
-                rightFirstAsrMs = now; addLog("ASR [final]:R $text | traceId=$rightTraceId ASR=${now - rightVadStartMs}ms")
-            } else addLog("ASR [ch=$ch final=$isFinal]: $text")
+            addLog("ASR [ch=$ch final=$isFinal]: $text")
         }
 
         override fun onTranslate(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
             val sid = r?.sessionId ?: ""; val text = r?.data ?: ""
-            val ch = r?.extraData?.get("channel")?.toString() ?: ""
+            val ch = normalizeChannel(r?.extraData?.get("channel"))
             val bid = bubbleManager.extractBubbleId(r)
             val src = r?.srcCode?.takeIf { it.isNotEmpty() } ?: _sourceLang.value
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
             bubbleManager.upsertTranslation(sid, bid, src, dst, text, isFinal, channel = ch)
             publishBubbles()
             if (!isFinal) return
-            val now = System.currentTimeMillis()
-            if (ch == "left" && leftTraceId != null && leftFirstMtMs == 0L) {
-                leftFirstMtMs = now; addLog("MT [final]:L $text | traceId=$leftTraceId MT=${now - leftVadStartMs}ms")
-            } else if (ch == "right" && rightTraceId != null && rightFirstMtMs == 0L) {
-                rightFirstMtMs = now; addLog("MT [final]:R $text | traceId=$rightTraceId MT=${now - rightVadStartMs}ms")
-            } else addLog("MT [ch=$ch final=$isFinal]: $text")
+            addLog("MT [ch=$ch final=$isFinal]: $text")
         }
 
         override fun onAudioDataReceive(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, data: ByteArray, channelCount: Int) {
-            val ch = r?.extraData?.get("channel")?.toString() ?: ""
-            val now = System.currentTimeMillis()
-            if (ch == "left" && leftTraceId != null && leftFirstTtsMs == 0L && data.isNotEmpty()) {
-                leftFirstTtsMs = now; val t = now - leftVadStartMs
-                addLog("TTS L 首包 | traceId=$leftTraceId 总=${t}ms ASR=${leftFirstAsrMs - leftVadStartMs}ms MT=${leftFirstMtMs - leftVadStartMs}ms")
-            } else if (ch == "right" && rightTraceId != null && rightFirstTtsMs == 0L && data.isNotEmpty()) {
-                rightFirstTtsMs = now; val t = now - rightVadStartMs
-                addLog("TTS R 首包 | traceId=$rightTraceId 总=${t}ms ASR=${rightFirstAsrMs - rightVadStartMs}ms MT=${rightFirstMtMs - rightVadStartMs}ms")
-            }
-            when (ch) {
-                "left" -> leftTtsBuffer.write(data)
-                "right" -> rightTtsBuffer.write(data)
-                else -> { leftTtsBuffer.write(data); rightTtsBuffer.write(data) }
-            }
+            val ch = normalizeChannel(r?.extraData?.get("channel"))
+            appendTtsBuffer(ch, data, channelCount)
         }
 
-        override fun onError(code: Int, msg: String) { addLog("Error [$code]: $msg") }
+        override fun onError(code: Int, msg: String) {
+            addLog("Error [$code]: $msg")
+            showConversationErrorPrompt(
+                OnlineConversationErrorPrompts.fromCode(
+                    code,
+                    msg,
+                    mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
+                )
+            )
+        }
         override fun onEvent(eventName: String, args: Any?) { addLog("Event: $eventName") }
+        override fun onStateChanged(fromEngine: AbstractChannelEngine?, snapshot: TmkTranslationChannelStateSnapshot) {
+            addLog("状态变化: ${snapshot.state.rawValue}/${snapshot.reason.rawValue} ${snapshot.message}")
+            applySdkChannelSnapshot(snapshot)
+        }
     }
 
     /**
@@ -459,16 +791,16 @@ class Offline1v1ViewModel @Inject constructor(
     }
 
     /**
-     * 双声道推流: 左声道=麦克风(中文), 右声道=资产PCM(英文)
-     * 跟在线 1v1 demo 一样的模式
+     * 双声道推流：左声道固定资产 PCM，右声道麦克风。
      */
-    private fun startDualChannelStreaming() {
+    private fun startDualChannelStreaming(): Boolean {
         if (ContextCompat.checkSelfPermission(application, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
             addLog("没有录音权限")
-            return
+            return false
         }
+        if (isRecording) return true
 
         val bufferSize = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
@@ -479,33 +811,19 @@ class Offline1v1ViewModel @Inject constructor(
         )
         isRecording = true
         audioRecord?.startRecording()
-        assetPcmStream = application.assets.open("16k16b_en-US.pcm")
-        addLog("双声道推流已开始")
+        assetPcmStream = application.assets.open("en_simple.pcm")
+        addLog("双声道推流已开始 (左:资产PCM, 右:麦克风)")
 
         leftVadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
             setCallback(object : VadDetector.Callback {
-                override fun onVadStart() {
-                    leftTraceId = generateTraceId("L"); leftVadStartMs = System.currentTimeMillis() - (leftVadDetector?.getVadBeginDurationMs() ?: 0)
-                    leftFirstAsrMs = 0; leftFirstMtMs = 0; leftFirstTtsMs = 0
-                    addLog("VAD L → 开始说话 traceId=$leftTraceId")
-                }
-                override fun onVadEnd() {
-                    val tid = leftTraceId ?: return
-                    addLog("VAD L → 停止说话 traceId=$tid 持续${System.currentTimeMillis() - leftVadStartMs}ms")
-                }
+                override fun onVadStart() { addLog("VAD L → 开始说话") }
+                override fun onVadEnd() { addLog("VAD L → 停止说话") }
             }); init()
         }
         rightVadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
             setCallback(object : VadDetector.Callback {
-                override fun onVadStart() {
-                    rightTraceId = generateTraceId("R"); rightVadStartMs = System.currentTimeMillis() - (rightVadDetector?.getVadBeginDurationMs() ?: 0)
-                    rightFirstAsrMs = 0; rightFirstMtMs = 0; rightFirstTtsMs = 0
-                    addLog("VAD R → 开始说话 traceId=$rightTraceId")
-                }
-                override fun onVadEnd() {
-                    val tid = rightTraceId ?: return
-                    addLog("VAD R → 停止说话 traceId=$tid 持续${System.currentTimeMillis() - rightVadStartMs}ms")
-                }
+                override fun onVadStart() { addLog("VAD R → 开始说话") }
+                override fun onVadEnd() { addLog("VAD R → 停止说话") }
             }); init()
         }
 
@@ -517,33 +835,27 @@ class Offline1v1ViewModel @Inject constructor(
             val stereoBuf = ByteArray(bytesPerChannel * 2)
 
             while (isRecording) {
-                // 麦克风数据
+                // 右声道麦克风数据
                 var micOffset = 0
                 while (micOffset < bytesPerChannel && isRecording) {
                     val read = audioRecord?.read(micBuf, micOffset, bytesPerChannel - micOffset) ?: -1
                     if (read > 0) micOffset += read
                 }
 
-                // 固定音频 or 静音
-                if (_useFixedAudio.value) {
-                    var pcmOffset = 0
-                    while (pcmOffset < bytesPerChannel && isRecording) {
-                        val r = assetPcmStream?.read(pcmBuf, pcmOffset, bytesPerChannel - pcmOffset) ?: -1
-                        if (r == -1) {
-                            assetPcmStream?.close()
-                            assetPcmStream = application.assets.open("16k16b_en-US.pcm")
-                        } else if (r > 0) {
-                            pcmOffset += r
-                        }
+                // 左声道固定资产 PCM。
+                var pcmOffset = 0
+                while (pcmOffset < bytesPerChannel && isRecording) {
+                    val r = assetPcmStream?.read(pcmBuf, pcmOffset, bytesPerChannel - pcmOffset) ?: -1
+                    if (r == -1) {
+                        assetPcmStream?.close()
+                        assetPcmStream = application.assets.open("en_simple.pcm")
+                    } else if (r > 0) {
+                        pcmOffset += r
                     }
-                } else {
-                    Arrays.fill(pcmBuf, 0.toByte())
                 }
 
-                // 根据 swapChannels 决定左右声道内容
-                val swap = _swapChannels.value
-                val leftBuf = if (swap) pcmBuf else micBuf
-                val rightBuf = if (swap) micBuf else pcmBuf
+                val leftBuf = pcmBuf
+                val rightBuf = micBuf
 
                 // VAD 检测
                 leftVadDetector?.pushAudioBytes(leftBuf)
@@ -563,6 +875,7 @@ class Offline1v1ViewModel @Inject constructor(
                 channel?.pushStreamAudioData(stereoBuf, 2, null)
             }
         }.start()
+        return true
     }
 
     private fun stopRecording() {

@@ -5,7 +5,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -22,17 +21,32 @@ data class DualChannelScreen(
     override fun Content() {
         val navigator = LocalNavigator.currentOrThrow
         val viewModel: Online1v1ViewModel = hiltViewModel()
-        val isInitialized by viewModel.isInitialized.collectAsState()
         val initErrorMessage by viewModel.initErrorMessage.collectAsState()
         val isStarted by viewModel.isStarted.collectAsState()
+        val isChannelReady by viewModel.isChannelReady.collectAsState()
+        val isLocaleUpdating by viewModel.isLocaleUpdating.collectAsState()
         val isStarting by viewModel.isStarting.collectAsState()
-        val useFixedAudio by viewModel.useFixedAudio.collectAsState()
         val bubbles by viewModel.bubbles.collectAsState()
+        val statusText by viewModel.statusText.collectAsState()
+        val remoteCloseRoomPromptVisible by viewModel.remoteCloseRoomPromptVisible.collectAsState()
+        val conversationErrorPrompt by viewModel.conversationErrorPrompt.collectAsState()
+        val currentRoomNo by viewModel.currentRoomNo.collectAsState()
+        val captureSampleRate by viewModel.captureSampleRate.collectAsState()
+        val captureChannels by viewModel.captureChannels.collectAsState()
+        val playbackChannels by viewModel.playbackChannels.collectAsState()
         val lockedSourceLang by viewModel.sourceLang.collectAsState()
         val lockedTargetLang by viewModel.targetLang.collectAsState()
+        val leftSpeakerGender by viewModel.leftSpeakerGender.collectAsState()
+        val rightSpeakerGender by viewModel.rightSpeakerGender.collectAsState()
+        var settingsExpanded by remember { mutableStateOf(false) }
+        var showLocaleDialog by remember { mutableStateOf(false) }
+        var showSpeakerDialog by remember { mutableStateOf(false) }
+        var showDetailInfo by remember { mutableStateOf(false) }
+        val onlineLanguageOptions = rememberOnlineLanguageOptions()
 
         LaunchedEffect(viewModel, sourceLang, targetLang) {
             viewModel.setLanguagesIfNeeded(sourceLang, targetLang)
+            viewModel.initSDK()
         }
         BackHandler(enabled = true) { viewModel.stopTranslation(); navigator.pop() }
         DisposableEffect(Unit) { onDispose { viewModel.stopTranslation() } }
@@ -44,31 +58,148 @@ data class DualChannelScreen(
             )
         }
 
+        if (conversationErrorPrompt != null || remoteCloseRoomPromptVisible) {
+            val prompt = conversationErrorPrompt ?: OnlineConversationErrorPrompts.fromCloseRoom()
+            AlertDialog(
+                onDismissRequest = {},
+                title = { Text(prompt.title) },
+                text = { Text(prompt.message) },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.recreateChannelAfterRemoteClose() }) {
+                        Text(prompt.restartText)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        viewModel.dismissRemoteCloseRoomPrompt()
+                        viewModel.stopTranslation(prompt.title)
+                        navigator.pop()
+                    }) {
+                        Text(prompt.leaveText)
+                    }
+                },
+            )
+        }
+
         Column(
             modifier = Modifier.fillMaxSize().padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text("1v1 模式（双声道）", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(bottom = 16.dp))
-
-            FixedLanguageSummary("左声道(源)", lockedSourceLang, "右声道(目标)", lockedTargetLang, Modifier.padding(bottom = 16.dp))
-
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { viewModel.initSDK() }, enabled = !isInitialized, modifier = Modifier.fillMaxWidth()) {
-                    Text(if (isInitialized) "已初始化 ✓" else "初始化 SDK")
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "一对一",
+                    style = MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.weight(1f),
+                )
+                Box {
+                    TextButton(onClick = { settingsExpanded = true }) {
+                        Text("设置")
+                    }
+                    DropdownMenu(
+                        expanded = settingsExpanded,
+                        onDismissRequest = { settingsExpanded = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text(if (isLocaleUpdating) "切换中..." else "切换语言") },
+                            enabled = !isLocaleUpdating,
+                            onClick = {
+                                settingsExpanded = false
+                                showLocaleDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("音色设置") },
+                            onClick = {
+                                settingsExpanded = false
+                                showSpeakerDialog = true
+                            },
+                        )
+                    }
                 }
-                Button(onClick = { viewModel.startTranslation() }, enabled = isInitialized && !isStarted && !isStarting, modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50))) { Text(if (isStarting) "正在启动..." else "开始翻译") }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("右声道固定音频")
-                    Switch(checked = useFixedAudio, onCheckedChange = { viewModel.toggleFixedAudio() }, enabled = !isStarted)
-                }
-                Button(onClick = { viewModel.stopTranslation() }, enabled = isStarted, modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF44336))) { Text("停止翻译") }
             }
 
-            Spacer(Modifier.height(12.dp))
+            val captureInfo = if (captureChannels > 0) "${captureSampleRate}Hz/${captureChannels}ch" else "-"
+            val playbackInfo = if (playbackChannels > 0) "${playbackChannels}ch" else "-"
+            val connectionState = when {
+                isStarted -> "收听中"
+                isChannelReady -> "已连接"
+                isStarting -> "连接中"
+                else -> "未连接"
+            }
+            TranslationStatusLine(statusText)
+            TranslationLanguageLine(
+                sourceLang = lockedSourceLang,
+                targetLang = lockedTargetLang,
+                showDetailInfo = showDetailInfo,
+                onToggleDetail = { showDetailInfo = !showDetailInfo },
+            )
 
-            BubbleList(rows = bubbles, modifier = Modifier.fillMaxWidth().weight(1f))
+            if (showDetailInfo) {
+                TranslationDetailPanel(
+                    rows = listOf(
+                        "连接：$connectionState",
+                        "房间：$currentRoomNo",
+                        "通道：one_to_one/online",
+                        "采样：配置16000Hz/2ch  采集$captureInfo  回放$playbackInfo",
+                        "输入：左声道固定PCM / 右声道麦克风",
+                    ),
+                )
+            }
+
+            TranslationStartStopButtons(
+                startText = "开始收听",
+                stopText = "停止收听",
+                startEnabled = isChannelReady && !isStarted && !isStarting,
+                stopEnabled = isStarted,
+                onStart = { viewModel.startTranslation() },
+                onStop = { viewModel.stopListening() },
+            )
+
+            Spacer(Modifier.height(6.dp))
+
+            BubbleList(
+                rows = bubbles,
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                metaText = { row ->
+                    val capture = if (captureChannels > 0) "${captureSampleRate}Hz/${captureChannels}ch" else "-"
+                    val playback = if (playbackChannels > 0) "${playbackChannels}ch" else "-"
+                    "sessionId: ${row.sessionId}  bubbleId: ${row.bubbleId}\n" +
+                        "房间: $currentRoomNo  通道: one_to_one/online\n" +
+                        "采样: 配置16000Hz/2ch  采集$capture  回放$playback"
+                },
+                scrollOnLatestUpdate = true,
+            )
+        }
+
+        if (showLocaleDialog) {
+            OnlineLocaleSwitchDialog(
+                title = "切换 1v1 语言",
+                sourceLabel = "源语言（右声道）",
+                targetLabel = "目标语言（左声道）",
+                initialSourceLang = lockedSourceLang,
+                initialTargetLang = lockedTargetLang,
+                languageOptions = onlineLanguageOptions,
+                onDismiss = { showLocaleDialog = false },
+                onConfirm = { source, target ->
+                    showLocaleDialog = false
+                    viewModel.updateRoomLocale(source, target)
+                },
+            )
+        }
+
+        if (showSpeakerDialog) {
+            Offline1v1SpeakerDialog(
+                initialLeftGender = leftSpeakerGender,
+                initialRightGender = rightSpeakerGender,
+                onDismiss = { showSpeakerDialog = false },
+                onConfirm = { left, right ->
+                    showSpeakerDialog = false
+                    viewModel.updateSpeakers(left, right)
+                },
+            )
         }
     }
 }

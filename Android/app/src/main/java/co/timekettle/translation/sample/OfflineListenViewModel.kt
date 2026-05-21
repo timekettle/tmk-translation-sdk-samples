@@ -1,5 +1,6 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.TmkTranslationException
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
@@ -10,22 +11,32 @@ import android.media.MediaRecorder
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
-import co.timekettle.offlinesdk.ModelPaths
-import co.timekettle.offlinesdk.OfflineModelManager
-import co.timekettle.offlinesdk.vad.VadDetector
+import co.timekettle.translation.Cancelable
 import co.timekettle.translation.TmkTranslationChannel
 import co.timekettle.translation.TmkTranslationSDK
+import co.timekettle.offlinesdk.vad.VadDetector
 import co.timekettle.translation.config.TmkTransChannelConfig
 import co.timekettle.translation.core.AbstractChannelEngine
+import co.timekettle.translation.enums.Scenario
 import co.timekettle.translation.enums.TranslationMode
 import co.timekettle.translation.lingcast.common.enums.TransModeType
+import co.timekettle.translation.listener.ActionCallback
 import co.timekettle.translation.listener.AuthCallback
 import co.timekettle.translation.listener.CreateChannelCallback
 import co.timekettle.translation.listener.CreateRoomCallback
 import co.timekettle.translation.listener.TmkTranslationListener
 import co.timekettle.translation.model.BubbleRowData
 import co.timekettle.translation.model.OfflineBubbleManager
+import co.timekettle.translation.model.Result
+import co.timekettle.translation.model.SpeakerChannel
+import co.timekettle.translation.model.SpeakerGender
+import co.timekettle.translation.model.TmkSpeaker
+import co.timekettle.translation.model.TmkTranslationChannelState
+import co.timekettle.translation.model.TmkTranslationChannelStateSnapshot
 import co.timekettle.translation.model.TmkTranslationRoom
+import co.timekettle.translation.offlinemodel.TmkOfflineModelDownloadListener
+import co.timekettle.translation.offlinemodel.TmkOfflineModelPackageInfo
+import co.timekettle.translation.offlinemodel.TmkOfflineModelPackageState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -46,18 +57,14 @@ class OfflineListenViewModel @Inject constructor(
     }
 
     private var channel: TmkTranslationChannel? = null
+    private var speakerCancelable: Cancelable? = null
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
     private var vadDetector: VadDetector? = null
     @Volatile private var isRecording = false
     @Volatile private var released = false
+    @Volatile private var userCancelledDownload = false
 
-    // traceId 计时
-    private var currentTraceId: String? = null
-    private var vadStartMs: Long = 0
-    private var firstAsrMs: Long = 0
-    private var firstMtMs: Long = 0
-    private var firstTtsMs: Long = 0
 
     private val _isModelReady = MutableStateFlow(false)
     val isModelReady: StateFlow<Boolean> = _isModelReady.asStateFlow()
@@ -69,6 +76,9 @@ class OfflineListenViewModel @Inject constructor(
     private val _downloadProgress = MutableStateFlow("")
     val downloadProgress: StateFlow<String> = _downloadProgress.asStateFlow()
 
+    private val _offlineModelPackages = MutableStateFlow<List<TmkOfflineModelPackageInfo>>(emptyList())
+    val offlineModelPackages: StateFlow<List<TmkOfflineModelPackageInfo>> = _offlineModelPackages.asStateFlow()
+
     private val _isInitialized = MutableStateFlow(false)
     val isInitialized: StateFlow<Boolean> = _isInitialized.asStateFlow()
     private val _initErrorMessage = MutableStateFlow<String?>(null)
@@ -77,8 +87,23 @@ class OfflineListenViewModel @Inject constructor(
     private val _isStarted = MutableStateFlow(false)
     val isStarted: StateFlow<Boolean> = _isStarted.asStateFlow()
 
+    private val _isChannelReady = MutableStateFlow(false)
+    val isChannelReady: StateFlow<Boolean> = _isChannelReady.asStateFlow()
+
     private val _isStarting = MutableStateFlow(false)
     val isStarting: StateFlow<Boolean> = _isStarting.asStateFlow()
+
+    private val _conversationErrorPrompt = MutableStateFlow<OnlineConversationErrorPrompt?>(null)
+    val conversationErrorPrompt: StateFlow<OnlineConversationErrorPrompt?> = _conversationErrorPrompt.asStateFlow()
+
+    private val _isCheckingOfflineSupport = MutableStateFlow(false)
+    val isCheckingOfflineSupport: StateFlow<Boolean> = _isCheckingOfflineSupport.asStateFlow()
+
+    private val _isOfflineSupported = MutableStateFlow(false)
+    val isOfflineSupported: StateFlow<Boolean> = _isOfflineSupported.asStateFlow()
+
+    private val _offlineSupportChecked = MutableStateFlow(false)
+    val offlineSupportChecked: StateFlow<Boolean> = _offlineSupportChecked.asStateFlow()
 
     private val _logMessages = MutableStateFlow<List<String>>(emptyList())
     val logMessages: StateFlow<List<String>> = _logMessages.asStateFlow()
@@ -91,6 +116,8 @@ class OfflineListenViewModel @Inject constructor(
     val sourceLang: StateFlow<String> = _sourceLang.asStateFlow()
     private val _targetLang = MutableStateFlow("en-US")
     val targetLang: StateFlow<String> = _targetLang.asStateFlow()
+    private val _speakerGender = MutableStateFlow(SpeakerGender.FEMALE)
+    val speakerGender: StateFlow<SpeakerGender> = _speakerGender.asStateFlow()
     private var hasLockedLanguages = false
 
     fun setLanguagesIfNeeded(sourceLang: String, targetLang: String) {
@@ -98,17 +125,27 @@ class OfflineListenViewModel @Inject constructor(
         _sourceLang.value = sourceLang
         _targetLang.value = targetLang
         hasLockedLanguages = true
-        refreshModelReady()
+        if (_offlineSupportChecked.value && _isOfflineSupported.value) {
+            refreshModelReady()
+        }
     }
 
-    init { refreshModelReady() }
-
     private fun refreshModelReady() {
-        val src = ModelPaths.langToCode(_sourceLang.value)
-        val tgt = ModelPaths.langToCode(_targetLang.value)
-        _isModelReady.value = OfflineModelManager.isLanguagePairReady(
-            application, src, tgt, needMt = true, needTts = true
+        if (!_isOfflineSupported.value) {
+            _offlineModelPackages.value = emptyList()
+            _isModelReady.value = false
+            return
+        }
+        val packages = TmkTranslationSDK.getOfflineModelPackageInfos(
+            context = application,
+            srcLang = _sourceLang.value,
+            dstLang = _targetLang.value,
+            scenario = Scenario.LISTEN,
+            needMt = true,
+            needTts = true,
         )
+        _offlineModelPackages.value = packages
+        _isModelReady.value = packages.isNotEmpty() && packages.all { it.state == TmkOfflineModelPackageState.READY }
     }
 
     private fun addLog(msg: String) {
@@ -118,72 +155,176 @@ class OfflineListenViewModel @Inject constructor(
 
     private fun publishBubbles() { _bubbles.value = bubbleManager.snapshot() }
 
-    private fun generateTraceId(): String {
-        val sdf = java.text.SimpleDateFormat("HHmmssSSS", java.util.Locale.getDefault())
-        return "OL${sdf.format(java.util.Date())}"
+    private fun showConversationErrorPrompt(prompt: OnlineConversationErrorPrompt?) {
+        if (prompt == null || _conversationErrorPrompt.value?.id == prompt.id) return
+        _conversationErrorPrompt.value = prompt
     }
 
-    private fun resetTrace() {
-        currentTraceId = null; vadStartMs = 0; firstAsrMs = 0; firstMtMs = 0; firstTtsMs = 0
+    private fun applySdkChannelSnapshot(snapshot: TmkTranslationChannelStateSnapshot) {
+        when (snapshot.state) {
+            TmkTranslationChannelState.STARTING -> {
+                _isStarting.value = true
+                _isChannelReady.value = false
+            }
+            TmkTranslationChannelState.RUNNING -> {
+                _isStarting.value = false
+                _isChannelReady.value = true
+                addLog("离线通道已就绪，可以开始收听")
+            }
+            TmkTranslationChannelState.STOPPING -> {
+                _isChannelReady.value = false
+                if (_isStarted.value) stopListening()
+            }
+            TmkTranslationChannelState.STOPPED -> {
+                _isStarting.value = false
+                _isChannelReady.value = false
+                if (_isStarted.value) stopListening()
+            }
+            TmkTranslationChannelState.FAILED -> {
+                _isStarting.value = false
+                _isChannelReady.value = false
+                if (_isStarted.value) stopListening()
+                addLog("通道异常: ${snapshot.message}")
+                showConversationErrorPrompt(
+                    OnlineConversationErrorPrompts.fromSnapshot(
+                        snapshot,
+                        OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
+                    )
+                )
+            }
+            TmkTranslationChannelState.IDLE -> {
+                _isStarting.value = false
+                _isChannelReady.value = false
+            }
+            TmkTranslationChannelState.RECONNECTING,
+            TmkTranslationChannelState.DEGRADED -> Unit
+        }
     }
+
 
     fun downloadModels() {
         if (_isDownloading.value) return
+        released = false
+        userCancelledDownload = false
+        if (!_offlineSupportChecked.value) {
+            verifyAuthThenRefreshOfflineState(autoStartIfReady = false, autoDownloadIfNeeded = true)
+            return
+        }
+        if (!_isOfflineSupported.value) {
+            applyOfflineUnsupportedState()
+            return
+        }
         _isDownloading.value = true
         _downloadProgress.value = "准备下载..."
         addLog("开始下载 ${TranslationLanguages.displayName(_sourceLang.value)} → ${TranslationLanguages.displayName(_targetLang.value)} 模型...")
 
         var lastLoggedPct = -1L
-        var currentFileIdx = 0
-        var totalFiles = 0
-        Thread {
-            OfflineModelManager.downloadLanguagePair(
-                context = application,
-                srcLang = _sourceLang.value,
-                dstLang = _targetLang.value,
-                callback = object : OfflineModelManager.DownloadCallback {
-                override fun onProgress(fileName: String, downloaded: Long, total: Long) {
-                    val pct = if (total > 0) (downloaded * 100 / total) else 0
-                    val fileLabel = if (totalFiles > 0) "($currentFileIdx/$totalFiles) " else ""
-                    _downloadProgress.value = "$fileLabel$fileName ${pct}%"
+        TmkTranslationSDK.downloadOfflineModels(
+            context = application,
+            srcLang = _sourceLang.value,
+            dstLang = _targetLang.value,
+            scenario = Scenario.LISTEN,
+            needMt = true,
+            needTts = true,
+            listener = object : TmkOfflineModelDownloadListener {
+                override fun onOfflineModelDownloadProgress(
+                    fileName: String,
+                    index: Int,
+                    total: Int,
+                    downloaded: Long,
+                    fileTotal: Long,
+                ) {
+                    if (userCancelledDownload) return
+                    val pct = if (fileTotal > 0) (downloaded * 100 / fileTotal) else 0
+                    _downloadProgress.value = "($index/$total) $fileName ${pct}%"
                     if (pct >= lastLoggedPct + 5) {
                         lastLoggedPct = pct
                         addLog("[$fileName] $pct%")
                     }
                 }
-                override fun onFileProgress(current: Int, total: Int, fileName: String) {
-                    currentFileIdx = current
-                    totalFiles = total
-                    lastLoggedPct = -1L
-                    _downloadProgress.value = "($current/$total) $fileName"
-                    addLog("下载 ($current/$total): $fileName")
+
+                override fun onOfflineModelUnzipProgress(fileName: String, progress: Double) {
+                    if (userCancelledDownload) return
+                    _downloadProgress.value = "$fileName 解压中 ${(progress * 100).toInt()}%"
                 }
-                override fun onComplete() {
+
+                override fun onOfflineModelReady() {
+                    if (released || userCancelledDownload) return
                     addLog("模型下载完成")
-                    _downloadProgress.value = ""
-                    _isModelReady.value = true
+                    _downloadProgress.value = "下载完成"
                     _isDownloading.value = false
+                    refreshModelReady()
+                    if (_isModelReady.value) {
+                        prepareChannelIfNeeded()
+                    }
                 }
-                override fun onError(message: String) {
-                    addLog("下载失败: $message")
+
+                override fun onOfflineModelPackageInfosChanged(packages: List<TmkOfflineModelPackageInfo>) {
+                    if (released || userCancelledDownload) return
+                    _offlineModelPackages.value = packages
+                    _isModelReady.value = packages.isNotEmpty() && packages.all { it.state == TmkOfflineModelPackageState.READY }
+                }
+
+                override fun onOfflineModelEvent(name: String, args: Any?) {
+                    if (released) return
+                    if (name == "offline_model_cancelled") {
+                        userCancelledDownload = true
+                        _downloadProgress.value = "下载已取消"
+                        _isDownloading.value = false
+                        refreshModelReady()
+                    } else if (name == "offline_model_update_required") {
+                        _downloadProgress.value = "模型需要更新"
+                        refreshModelReady()
+                    }
+                }
+
+                override fun onOfflineModelError(code: Int, message: String) {
+                    if (released || userCancelledDownload) return
+                    addLog("下载失败: [$code] $message")
+                    showConversationErrorPrompt(
+                        OnlineConversationErrorPrompts.fromCode(
+                            code,
+                            message,
+                            mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
+                        )
+                    )
                     _downloadProgress.value = "下载失败"
                     _isDownloading.value = false
+                    refreshModelReady()
                 }
-            })
-        }.start()
+            },
+        )
+    }
+
+    fun cancelDownloadModels() {
+        if (!_isDownloading.value) return
+        userCancelledDownload = true
+        TmkTranslationSDK.cancelOfflineModelDownload()
+        _isDownloading.value = false
+        _downloadProgress.value = "下载已取消"
+        refreshModelReady()
+        addLog("已取消离线模型下载")
     }
 
     fun initSDK() {
-        if (_isInitialized.value) return
-        try {
-            TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig())
-            _isInitialized.value = true
-            _initErrorMessage.value = null
-            addLog("SDK 初始化完成")
+        released = false
+        verifyAuthThenRefreshOfflineState(autoStartIfReady = true)
+    }
+
+    private fun ensureSdkInitialized(): Boolean {
+        return try {
+            if (!_isInitialized.value) {
+                TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig())
+                _isInitialized.value = true
+                _initErrorMessage.value = null
+                addLog("SDK 初始化完成")
+            }
+            true
         } catch (e: Exception) {
             addLog("SDK 初始化异常: ${e.message}")
             _initErrorMessage.value = SampleSdkConfig.buildInitErrorMessage(e)
             Log.e(TAG, "initSDK failed", e)
+            false
         }
     }
 
@@ -191,31 +332,112 @@ class OfflineListenViewModel @Inject constructor(
         _initErrorMessage.value = null
     }
 
+    private fun verifyAuthThenRefreshOfflineState(
+        autoStartIfReady: Boolean,
+        autoDownloadIfNeeded: Boolean = false,
+    ) {
+        if (!ensureSdkInitialized()) return
+        if (_isCheckingOfflineSupport.value) return
+        _isCheckingOfflineSupport.value = true
+        addLog("开始鉴权并检查离线能力...")
+        try {
+            TmkTranslationSDK.verifyAuth(object : AuthCallback {
+                override fun onSuccess() {
+                    if (released) {
+                        _isCheckingOfflineSupport.value = false
+                        return
+                    }
+                    _offlineSupportChecked.value = true
+                    _isOfflineSupported.value = TmkTranslationSDK.isOfflineTranslationSupported()
+                    _isCheckingOfflineSupport.value = false
+                    if (!_isOfflineSupported.value) {
+                        applyOfflineUnsupportedState()
+                        return
+                    }
+                    addLog("鉴权成功，当前账号支持离线翻译")
+                    refreshModelReady()
+                    if (_isModelReady.value) {
+                        if (autoStartIfReady) prepareChannelIfNeeded()
+                    } else {
+                        addLog("当前模型资源不完整，需要先下载离线资源")
+                        if (autoDownloadIfNeeded) downloadModels()
+                    }
+                }
+
+                override fun onError(errorId: Int, e: Exception) {
+                    _offlineSupportChecked.value = false
+                    _isOfflineSupported.value = false
+                    _isCheckingOfflineSupport.value = false
+                    _isModelReady.value = false
+                    _offlineModelPackages.value = emptyList()
+                    addLog("鉴权失败: [$errorId] ${e.message}")
+                    showConversationErrorPrompt(
+                        OnlineConversationErrorPrompts.fromCode(
+                            errorId,
+                            e.message ?: "offline auth failed",
+                            mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
+                        )
+                    )
+                }
+            })
+        } catch (e: Exception) {
+            _offlineSupportChecked.value = false
+            _isOfflineSupported.value = false
+            _isCheckingOfflineSupport.value = false
+            _isModelReady.value = false
+            _offlineModelPackages.value = emptyList()
+            addLog("鉴权异常: ${e.message}")
+            Log.e(TAG, "verifyAuth failed", e)
+        }
+    }
+
+    private fun applyOfflineUnsupportedState() {
+        channel?.stop()
+        channel?.destroy()
+        channel = null
+        _isChannelReady.value = false
+        _isStarting.value = false
+        _isStarted.value = false
+        _isDownloading.value = false
+        _downloadProgress.value = ""
+        _offlineModelPackages.value = emptyList()
+        _isModelReady.value = false
+        addLog("当前账号未开通离线翻译能力")
+        showConversationErrorPrompt(
+            OnlineConversationErrorPrompts.fromCode(
+                TmkTranslationException.ErrorCodes.OFFLINE_MODEL_NOT_READY,
+                "当前账号未开通离线翻译能力",
+                mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
+            )
+        )
+    }
+
     fun start() {
-        if (!_isInitialized.value) {
-            addLog("请先初始化 SDK")
+        if (!_isInitialized.value || channel == null || !_isChannelReady.value) {
+            addLog("离线通道未就绪，尝试重新准备")
+            initSDK()
+            return
+        }
+        if (_isStarted.value) return
+        if (!startRecording()) return
+        _isStarted.value = true
+        addLog("离线收听已开始采集")
+    }
+
+    private fun prepareChannelIfNeeded() {
+        if (channel != null || _isStarting.value) return
+        if (!_isOfflineSupported.value) {
+            applyOfflineUnsupportedState()
+            return
+        }
+        refreshModelReady()
+        if (!_isModelReady.value) {
+            addLog("当前模型资源不完整，需要先下载离线资源")
             return
         }
         released = false
         _isStarting.value = true
-        addLog("开始鉴权...")
-        try {
-            TmkTranslationSDK.verifyAuth(object : AuthCallback {
-                override fun onSuccess() {
-                    if (released) { _isStarting.value = false; return }
-                    addLog("鉴权成功")
-                    doStart()
-                }
-                override fun onError(errorId: Int, e: Exception) {
-                    addLog("鉴权失败: [$errorId] ${e.message}")
-                    _isStarting.value = false
-                }
-            })
-        } catch (e: Exception) {
-            addLog("鉴权异常: ${e.message}")
-            Log.e(TAG, "verifyAuth failed", e)
-            _isStarting.value = false
-        }
+        doStart()
     }
 
     private fun doStart() {
@@ -229,7 +451,7 @@ class OfflineListenViewModel @Inject constructor(
 
                     try {
                         // 构建模型路径
-                        val modelRootDir = OfflineModelManager.getModelRootDir(application).absolutePath
+                        val modelRootDir = TmkTranslationSDK.defaultOfflineModelRootDirectory(application)
 
                         val channelConfig = TmkTransChannelConfig.Builder()
                             .setRoom(room)
@@ -237,9 +459,10 @@ class OfflineListenViewModel @Inject constructor(
                             .setTransModeType(TransModeType.LISTEN)
                             .setSourceLang(_sourceLang.value)
                             .setTargetLang(_targetLang.value)
+                            .setSpeakers(listOf(TmkSpeaker(SpeakerChannel.LEFT, _speakerGender.value)))
                             .setSampleRate(SAMPLE_RATE)
                             .setChannelNum(1)
-                            .addExtraParams("model_root_dir", modelRootDir)
+                            .setModelRootDirectory(modelRootDir)
                             .build()
 
                         addLog("src=${_sourceLang.value} tgt=${_targetLang.value} model_root_dir: $modelRootDir")
@@ -247,6 +470,7 @@ class OfflineListenViewModel @Inject constructor(
                         TmkTranslationSDK.createTranslationChannel(
                             application,
                             channelConfig,
+                            translationListener,
                             object : CreateChannelCallback {
                                 override fun onSuccess(ch: TmkTranslationChannel) {
                                     if (released) {
@@ -257,16 +481,13 @@ class OfflineListenViewModel @Inject constructor(
                                     try {
                                         channel = ch
                                         addLog("创建离线 Channel 成功")
-                                        ch.setTranslationListener(translationListener)
-                                        ch.start()
-                                        addLog("离线 Channel 已启动")
-                                        startRecording()
                                         _isStarting.value = false
-                                        _isStarted.value = true
+                                        _isChannelReady.value = true
                                     } catch (e: Exception) {
                                         addLog("启动离线 Channel 异常: ${e.message}")
                                         Log.e(TAG, "start channel failed", e)
                                         channel = null
+                                        _isChannelReady.value = false
                                         _isStarting.value = false
                                     }
                                 }
@@ -274,6 +495,13 @@ class OfflineListenViewModel @Inject constructor(
                                 override fun onError(errorId: Int, e: Exception) {
                                     addLog("创建 Channel 失败: [$errorId] ${e.message}")
                                     _isStarting.value = false
+                                    showConversationErrorPrompt(
+                                        OnlineConversationErrorPrompts.fromCode(
+                                            errorId,
+                                            e.message ?: "create offline channel failed",
+                                            mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
+                                        )
+                                    )
                                 }
                             }
                         )
@@ -296,20 +524,76 @@ class OfflineListenViewModel @Inject constructor(
         }
     }
 
-    fun stop() {
-        released = true
+    fun stopListening() {
         stopRecording()
-        channel?.stop()
-        channel?.destroy()
-        channel = null
         try {
+            audioTrack?.pause()
+            audioTrack?.flush()
             audioTrack?.stop()
             audioTrack?.release()
         } catch (_: Exception) {}
         audioTrack = null
+        _isStarted.value = false
+        addLog("离线收听已停止采集")
+    }
+
+    fun stop() {
+        released = true
+        if (_isDownloading.value) {
+            userCancelledDownload = true
+            TmkTranslationSDK.cancelOfflineModelDownload()
+            _isDownloading.value = false
+            _downloadProgress.value = ""
+        }
+        stopListening()
+        speakerCancelable?.cancel()
+        speakerCancelable = null
+        channel?.stop()
+        channel?.destroy()
+        channel = null
+        _isChannelReady.value = false
         _isStarting.value = false
         _isStarted.value = false
+        _conversationErrorPrompt.value = null
         addLog("离线翻译已停止")
+    }
+
+    fun recreateChannelAfterRuntimeFailure() {
+        _conversationErrorPrompt.value = null
+        stop()
+        released = false
+        initSDK()
+    }
+
+    fun dismissConversationErrorPrompt() {
+        _conversationErrorPrompt.value = null
+    }
+
+    fun updateSpeaker(gender: SpeakerGender) {
+        _speakerGender.value = gender
+        val currentChannel = channel
+        if (currentChannel == null) {
+            addLog("音色已设置为${speakerLabel(gender)}，将在创建离线通道时生效")
+            return
+        }
+        speakerCancelable?.cancel()
+        speakerCancelable = currentChannel.updateSpeaker(
+            listOf(TmkSpeaker(SpeakerChannel.LEFT, gender)),
+            object : ActionCallback {
+                override fun onSuccess(result: Result<Unit>) {
+                    addLog("音色设置成功: ${speakerLabel(gender)}，下一次 TTS 生效")
+                }
+
+                override fun onError(errorId: Int, e: Exception) {
+                    addLog("音色设置失败: [$errorId] ${e.message}")
+                }
+            }
+        )
+    }
+
+    private fun speakerLabel(gender: SpeakerGender): String = when (gender) {
+        SpeakerGender.MALE -> "男声"
+        SpeakerGender.FEMALE -> "女声"
     }
 
     private val translationListener = object : TmkTranslationListener {
@@ -321,13 +605,7 @@ class OfflineListenViewModel @Inject constructor(
             Log.d(TAG, "onRecognized: sid=$sid bid=$bid isFinal=$isFinal text=\"$text\"")
             bubbleManager.upsertSource(sid, bid, src, dst, text, isFinal)
             publishBubbles()
-            val tid = currentTraceId
-            if (isFinal && tid != null && firstAsrMs == 0L) {
-                firstAsrMs = System.currentTimeMillis()
-                addLog("ASR [final]: $text | traceId=$tid ASR=${firstAsrMs - vadStartMs}ms")
-            } else {
-                addLog("ASR [final=$isFinal]: $text")
-            }
+            addLog("ASR [final=$isFinal]: $text")
         }
 
         override fun onTranslate(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
@@ -338,38 +616,37 @@ class OfflineListenViewModel @Inject constructor(
             Log.d(TAG, "onTranslate: sid=$sid bid=$bid isFinal=$isFinal text=\"$text\"")
             bubbleManager.upsertTranslation(sid, bid, src, dst, text, isFinal)
             publishBubbles()
-            val tid = currentTraceId
-            if (isFinal && tid != null && firstMtMs == 0L) {
-                firstMtMs = System.currentTimeMillis()
-                addLog("MT [final]: $text | traceId=$tid MT=${firstMtMs - vadStartMs}ms")
-            } else {
-                addLog("MT [final=$isFinal]: $text")
-            }
+            addLog("MT [final=$isFinal]: $text")
         }
 
         override fun onAudioDataReceive(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, data: ByteArray, channelCount: Int) {
-            val tid = currentTraceId
-            if (tid != null && firstTtsMs == 0L && data.isNotEmpty()) {
-                firstTtsMs = System.currentTimeMillis()
-                val total = firstTtsMs - vadStartMs
-                val asr = if (firstAsrMs > 0) firstAsrMs - vadStartMs else -1
-                val mt = if (firstMtMs > 0) firstMtMs - vadStartMs else -1
-                addLog("TTS 首包 | traceId=$tid 总=${total}ms ASR=${asr}ms MT=${mt}ms")
-            }
             playTtsAudio(data)
         }
 
-        override fun onError(code: Int, msg: String) { addLog("Error [$code]: $msg") }
+        override fun onError(code: Int, msg: String) {
+            addLog("Error [$code]: $msg")
+            showConversationErrorPrompt(
+                OnlineConversationErrorPrompts.fromCode(
+                    code,
+                    msg,
+                    mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
+                )
+            )
+        }
         override fun onEvent(eventName: String, args: Any?) { addLog("Event: $eventName") }
+        override fun onStateChanged(fromEngine: AbstractChannelEngine?, snapshot: TmkTranslationChannelStateSnapshot) {
+            addLog("状态变化: ${snapshot.state.rawValue}/${snapshot.reason.rawValue} ${snapshot.message}")
+            applySdkChannelSnapshot(snapshot)
+        }
     }
 
-    private fun startRecording() {
-        if (isRecording) return
+    private fun startRecording(): Boolean {
+        if (isRecording) return true
         if (ContextCompat.checkSelfPermission(application, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
             addLog("没有录音权限")
-            return
+            return false
         }
         val bufferSize = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
@@ -384,16 +661,8 @@ class OfflineListenViewModel @Inject constructor(
 
         vadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
             setCallback(object : VadDetector.Callback {
-                override fun onVadStart() {
-                    resetTrace()
-                    currentTraceId = generateTraceId()
-                    vadStartMs = System.currentTimeMillis() - (vadDetector?.getVadBeginDurationMs() ?: 0)
-                    addLog("VAD → 开始说话 traceId=$currentTraceId")
-                }
-                override fun onVadEnd() {
-                    val tid = currentTraceId ?: return
-                    addLog("VAD → 停止说话 traceId=$tid 持续${System.currentTimeMillis() - vadStartMs}ms")
-                }
+                override fun onVadStart() { addLog("VAD → 开始说话") }
+                override fun onVadEnd() { addLog("VAD → 停止说话") }
             })
             init()
         }
@@ -409,6 +678,7 @@ class OfflineListenViewModel @Inject constructor(
                 }
             }
         }.start()
+        return true
     }
 
     private fun stopRecording() {

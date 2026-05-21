@@ -6,7 +6,7 @@ plugins {
     alias(libs.plugins.hilt.android)
 }
 
-val sampleSdkVersion = providers.gradleProperty("TMK_SDK_VERSION").orElse("1.0.0").get()
+val sampleSdkVersion = providers.gradleProperty("TMK_SDK_VERSION").orElse("1.1.2").get()
 val sampleAppId = providers.environmentVariable("TMK_SAMPLE_APP_ID")
     .orElse(providers.gradleProperty("TMK_SAMPLE_APP_ID"))
     .orElse("")
@@ -27,7 +27,8 @@ android {
         minSdk = 28
         targetSdk = 36
         versionCode = 1
-        versionName = "1.0"
+        versionName = sampleSdkVersion
+        buildConfigField("String", "TMK_SDK_VERSION", "\"$sampleSdkVersion\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "TMK_SAMPLE_APP_ID", "\"$sampleAppId\"")

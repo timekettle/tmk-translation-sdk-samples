@@ -110,7 +110,7 @@ class SettingsScreen : Screen {
 //            }
 
             Spacer(Modifier.height(32.dp))
-            Text("TmkTranslationSDK v1.0.0", fontSize = 11.sp, color = TextDim,
+            Text("TmkTranslationSDK v${BuildConfig.TMK_SDK_VERSION}", fontSize = 11.sp, color = TextDim,
                 modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
             Spacer(Modifier.height(16.dp))
         }

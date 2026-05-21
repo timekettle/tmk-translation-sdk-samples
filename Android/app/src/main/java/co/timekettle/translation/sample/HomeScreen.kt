@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -27,7 +28,6 @@ import androidx.compose.ui.window.PopupProperties
 import cafe.adriel.voyager.core.screen.Screen
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
-import co.timekettle.translation.OnlineLanguageService
 
 private val BgColor = Color(0xFF0F1117)
 private val SurfaceColor = Color(0xFF1A1D27)
@@ -87,31 +87,25 @@ class HomeScreen : Screen {
     @Composable
     override fun Content() {
         val navigator = LocalNavigator.currentOrThrow
-        var scenario by remember { mutableStateOf(ScenarioType.LISTEN) }
-        var modeId by remember { mutableStateOf(ModeId.ONLINE) }
-        var sourceLang by remember { mutableStateOf("zh-CN") }
-        var targetLang by remember { mutableStateOf("en-US") }
+        var scenarioName by rememberSaveable { mutableStateOf(ScenarioType.LISTEN.name) }
+        var modeId by rememberSaveable { mutableStateOf(ModeId.ONLINE) }
+        var sourceLang by rememberSaveable { mutableStateOf("zh-CN") }
+        var targetLang by rememberSaveable { mutableStateOf("en-US") }
+        val scenario = ScenarioType.entries.firstOrNull { it.name == scenarioName } ?: ScenarioType.LISTEN
         val allowedModes = SCENARIO_MODES[scenario] ?: listOf(ModeId.ONLINE)
         val effectiveModeId = modeId.takeIf { it in allowedModes } ?: allowedModes.firstOrNull() ?: ModeId.ONLINE
         val effectiveMode = MODE_OPTION_BY_ID[effectiveModeId] ?: MODE_OPTIONS.first()
+        val startLabel = "开始${effectiveMode.label}"
 
-        // 在线语言列表：首页进来时拉取一次，有缓存就不请求
-        var onlineLangs by remember { mutableStateOf(OnlineLanguageService.getCached()) }
-        LaunchedEffect(Unit) {
-            if (onlineLangs == null) {
-                try {
-                    onlineLangs = OnlineLanguageService.fetch()
-                } catch (_: Exception) {}
-            }
-        }
+        val onlineLangs = rememberOnlineLanguageOptions()
 
         val langOptions = when (effectiveModeId) {
             ModeId.OFFLINE -> TranslationLanguages.offline
-            else -> onlineLangs ?: TranslationLanguages.online
+            else -> onlineLangs
         }
 
         // 如果当前 mode 不在允许列表，自动切到第一个
-        LaunchedEffect(scenario) {
+        LaunchedEffect(scenarioName) {
             val allowed = SCENARIO_MODES[scenario] ?: listOf(ModeId.ONLINE)
             if (modeId !in allowed) {
                 modeId = allowed.first()
@@ -128,86 +122,98 @@ class HomeScreen : Screen {
             }
         }
 
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(BgColor)
-                .padding(horizontal = 20.dp, vertical = 16.dp)
-                .verticalScroll(rememberScrollState()),
+                .background(BgColor),
         ) {
-            Spacer(Modifier.height(24.dp))
-
-            // Hero
-            Text("翻译中台", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = TextColor,
-                modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
-            Text("先选场景，再选模式", fontSize = 14.sp, color = TextDim,
-                modifier = Modifier.fillMaxWidth().padding(top = 4.dp), textAlign = TextAlign.Center)
-
-            Spacer(Modifier.height(28.dp))
-
-            // ① 使用场景
-            SectionTitle("① 使用场景")
-            Spacer(Modifier.height(10.dp))
-            ScenarioType.entries.forEach { s ->
-                ScenarioCard(s, selected = s == scenario) { scenario = s }
-                Spacer(Modifier.height(8.dp))
-            }
-
-            Spacer(Modifier.height(24.dp))
-
-            // ② 翻译模式
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                SectionTitle("② 翻译模式")
-                Spacer(Modifier.width(6.dp))
-                Text("· ${SCENARIO_HINTS[scenario]}", fontSize = 11.sp, color = AccentColor)
-            }
-            Spacer(Modifier.height(10.dp))
-            ModeGrid(allowedModes, effectiveModeId) { modeId = it }
-
-            Spacer(Modifier.height(20.dp))
-
-            // 语言选择
-            LangRow(sourceLang, targetLang, langOptions,
-                onSourceChange = { sourceLang = it },
-                onTargetChange = { targetLang = it },
-                onSwap = { val t = sourceLang; sourceLang = targetLang; targetLang = t }
-            )
-
-            Spacer(Modifier.height(20.dp))
-
-            // 开始翻译
-            val startLabel = "开始${effectiveMode.label}"
-            Button(
-                onClick = { navigator.push(resolveScreen(scenario, effectiveModeId, sourceLang, targetLang)) },
-                modifier = Modifier.fillMaxWidth().height(52.dp),
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
-                contentPadding = PaddingValues(0.dp),
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 20.dp, vertical = 16.dp)
+                    .padding(bottom = 120.dp)
+                    .verticalScroll(rememberScrollState()),
             ) {
-                Box(
-                    Modifier.fillMaxSize().background(
-                        Brush.linearGradient(listOf(PrimaryColor, Color(0xFF8B5CF6))),
-                        RoundedCornerShape(10.dp)
-                    ), contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        startLabel,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color.White,
-                    )
+                Spacer(Modifier.height(24.dp))
+
+                // Hero
+                Text("翻译中台", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = TextColor,
+                    modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
+                Text("先选场景，再选模式", fontSize = 14.sp, color = TextDim,
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp), textAlign = TextAlign.Center)
+
+                Spacer(Modifier.height(28.dp))
+
+                // ① 使用场景
+                SectionTitle("① 使用场景")
+                Spacer(Modifier.height(10.dp))
+                ScenarioType.entries.forEach { s ->
+                    ScenarioCard(s, selected = s == scenario) { scenarioName = s.name }
+                    Spacer(Modifier.height(8.dp))
+                }
+
+                Spacer(Modifier.height(24.dp))
+
+                // ② 翻译模式
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SectionTitle("② 翻译模式")
+                    Spacer(Modifier.width(6.dp))
+                    Text("· ${SCENARIO_HINTS[scenario]}", fontSize = 11.sp, color = AccentColor)
+                }
+                Spacer(Modifier.height(10.dp))
+                ModeGrid(allowedModes, effectiveModeId) { modeId = it }
+
+                Spacer(Modifier.height(20.dp))
+
+                // 语言选择
+                LangRow(sourceLang, targetLang, langOptions,
+                    onSourceChange = { sourceLang = it },
+                    onTargetChange = { targetLang = it },
+                    onSwap = { val t = sourceLang; sourceLang = targetLang; targetLang = t }
+                )
+
+                Spacer(Modifier.height(20.dp))
+            }
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(BgColor)
+                    .padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 10.dp),
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Button(
+                        onClick = { navigator.push(resolveScreen(scenario, effectiveModeId, sourceLang, targetLang)) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                        contentPadding = PaddingValues(0.dp),
+                    ) {
+                        Box(
+                            Modifier.fillMaxSize().background(
+                                Brush.linearGradient(listOf(PrimaryColor, Color(0xFF8B5CF6))),
+                                RoundedCornerShape(10.dp)
+                            ), contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                startLabel,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.White,
+                            )
+                        }
+                    }
+                    TextButton(
+                        onClick = { navigator.push(SettingsScreen()) },
+                        modifier = Modifier.padding(top = 4.dp),
+                    ) {
+                        Text("⚙️ 设置", color = TextDim, fontSize = 13.sp)
+                    }
                 }
             }
-
-            Spacer(Modifier.height(12.dp))
-
-            // 设置入口
-            TextButton(
-                onClick = { navigator.push(SettingsScreen()) },
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("⚙️ 设置", color = TextDim, fontSize = 13.sp) }
-
-            Spacer(Modifier.height(16.dp))
         }
     }
 }
