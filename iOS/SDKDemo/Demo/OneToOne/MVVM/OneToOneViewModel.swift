@@ -424,8 +424,8 @@ private extension OneToOneViewModel {
         }
         updateStatus("语言已切换，正在更新一对一房间语言，下一句话生效...")
         _ = updateOneToOneRoomLocale(room: room,
-                                     sourceLang: source,
-                                     targetLang: selectedTargetLang) { [weak self] result in
+                                     rightLang: source,
+                                     leftLang: selectedTargetLang) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success:
@@ -448,11 +448,11 @@ private extension OneToOneViewModel {
 
     @discardableResult
     private func updateOneToOneRoomLocale(room: TmkTranslationRoom,
-                                          sourceLang: String,
-                                          targetLang: String,
+                                          rightLang: String,
+                                          leftLang: String,
                                           completion: @escaping (Result<Void, TmkTranslationError>) -> Void) -> TmkSDKCancellable? {
-        room.updateRoomLocale(sourceLocales: [targetLang],
-                              targetLocales: [sourceLang],
+        room.updateRoomLocale(sourceLocales: [leftLang],
+                              targetLocales: [rightLang],
                               completion: completion)
     }
 

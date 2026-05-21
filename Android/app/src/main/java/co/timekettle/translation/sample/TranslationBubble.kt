@@ -32,7 +32,7 @@ fun BubbleList(
     val listState = rememberLazyListState()
     val latestScrollKey: Any? = if (scrollOnLatestUpdate) {
         rows.lastOrNull()?.let {
-            "${it.sessionId}:${it.bubbleId}:${it.channel}:${it.sourceText}:${it.translatedText}"
+            "${it.sessionId}:${it.bubbleId}:${it.channel}:${it.sourceText.hashCode()}:${it.translatedText.hashCode()}"
         }
     } else {
         rows.size

@@ -61,7 +61,7 @@ struct DemoSettingsConfig: Equatable {
 
     static var `default`: DemoSettingsConfig {
         DemoSettingsConfig(
-            diagnosisEnabled: true,
+            diagnosisEnabled: false,
             consoleLogEnabled: true,
             networkEnvironment: .test,
             mockEngineEnabled: false,
