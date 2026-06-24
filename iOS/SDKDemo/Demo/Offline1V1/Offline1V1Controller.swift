@@ -43,12 +43,12 @@ final class Offline1V1Controller: UIViewController {
     private var pickerBottomConstraint: Constraint?
     private let allModes = OneToOnePlaybackMode.allCases
 
-    // TTS 输出方式选择器。
-    private let ttsOutputMaskView = UIView()
-    private let ttsOutputContainerView = UIView()
-    private let ttsOutputPickerView = UIPickerView()
-    private var ttsOutputBottomConstraint: Constraint?
-    private let allTTSOutputModes: [TmkOfflineAudioChannelMode] = [.mono, .stereo]
+    // 通道模式选择器。
+    private let channelModeMaskView = UIView()
+    private let channelModeContainerView = UIView()
+    private let channelModePickerView = UIPickerView()
+    private var channelModeBottomConstraint: Constraint?
+    private let allChannelAudioModes: [TmkChannelAudioMode] = [.standard, .lowLatency]
 
     // 语言选择器。
     private let sourceLangMaskView = UIView()
@@ -204,8 +204,8 @@ private extension Offline1V1Controller {
             UIAction(title: "音色") { [weak self] _ in
                 self?.showSpeakerPicker()
             },
-            UIAction(title: "TTS输出方式") { [weak self] _ in
-                self?.showTTSOutputModePicker()
+            UIAction(title: "通道模式") { [weak self] _ in
+                self?.showChannelModePicker()
             }
         ])
     }
@@ -301,7 +301,7 @@ private extension Offline1V1Controller {
             }
             .store(in: &cancellables)
 
-        viewModel.$offlineAudioChannelMode
+        viewModel.$channelAudioMode
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.refreshSettingsMenu()
@@ -315,8 +315,7 @@ private extension Offline1V1Controller {
         let playback = state.playbackChannels > 0 ? "\(state.playbackChannels)ch" : "-"
         let sourceName = localizedLanguageName(for: state.sourceLanguage)
         let targetName = localizedLanguageName(for: state.targetLanguage)
-        let outputMode = viewModel.offlineAudioChannelMode == .stereo ? "Stereo" : "Mono"
-        infoLabel.text = "语言:\(sourceName)→\(targetName)  采集:\(capture)  回放:\(playback)  播放:\(state.playbackMode.title)  TTS:\(outputMode)"
+        infoLabel.text = "语言:\(sourceName)→\(targetName)  采集:\(capture)  回放:\(playback)  播放:\(state.playbackMode.title)  通道:\(viewModel.channelAudioMode.oneToOneDemoTitle)"
         startListeningButton.isEnabled = state.canStartListening && modelButtonState == .ready
         stopListeningButton.isEnabled = state.canStopListening
     }
@@ -356,9 +355,12 @@ private extension Offline1V1Controller {
         cell.configure(metaText: meta,
                        sourceLangCode: row.sourceLangCode,
                        sourceText: row.sourceText,
+                       sourceSegments: row.sourceSegments,
                        targetLangCode: row.targetLangCode,
                        translatedText: row.translatedText,
-                       isRightBubble: row.lane == .right)
+                       translatedSegments: row.translatedSegments,
+                       isRightBubble: row.lane == .right,
+                       isBubbleEnded: false)
     }
 
     func refreshVisibleCells() {
@@ -544,49 +546,49 @@ private extension Offline1V1Controller {
         hidePlaybackModePicker()
     }
 
-    // MARK: - TTS 输出方式选择器
+    // MARK: - 通道模式选择器
 
-    func showTTSOutputModePicker() {
-        guard ttsOutputMaskView.superview == nil else { return }
+    func showChannelModePicker() {
+        guard channelModeMaskView.superview == nil else { return }
 
-        ttsOutputMaskView.backgroundColor = UIColor.black.withAlphaComponent(0.35)
-        ttsOutputMaskView.alpha = 0
-        ttsOutputMaskView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(hideTTSOutputModePicker)))
-        view.addSubview(ttsOutputMaskView)
-        ttsOutputMaskView.snp.makeConstraints { make in
+        channelModeMaskView.backgroundColor = UIColor.black.withAlphaComponent(0.35)
+        channelModeMaskView.alpha = 0
+        channelModeMaskView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(hideChannelModePicker)))
+        view.addSubview(channelModeMaskView)
+        channelModeMaskView.snp.makeConstraints { make in
             make.edges.equalToSuperview()
         }
 
-        ttsOutputContainerView.backgroundColor = .systemBackground
-        ttsOutputContainerView.layer.cornerRadius = 12
-        ttsOutputContainerView.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
-        ttsOutputContainerView.clipsToBounds = true
-        view.addSubview(ttsOutputContainerView)
-        ttsOutputContainerView.snp.makeConstraints { make in
+        channelModeContainerView.backgroundColor = .systemBackground
+        channelModeContainerView.layer.cornerRadius = 12
+        channelModeContainerView.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        channelModeContainerView.clipsToBounds = true
+        view.addSubview(channelModeContainerView)
+        channelModeContainerView.snp.makeConstraints { make in
             make.left.right.equalToSuperview()
             make.height.equalTo(280)
-            ttsOutputBottomConstraint = make.bottom.equalToSuperview().offset(280).constraint
+            channelModeBottomConstraint = make.bottom.equalToSuperview().offset(280).constraint
         }
 
         let cancelButton = UIButton(type: .system)
         cancelButton.setTitle("取消", for: .normal)
-        cancelButton.addTarget(self, action: #selector(hideTTSOutputModePicker), for: .touchUpInside)
+        cancelButton.addTarget(self, action: #selector(hideChannelModePicker), for: .touchUpInside)
         let confirmButton = UIButton(type: .system)
         confirmButton.setTitle("确定", for: .normal)
-        confirmButton.addTarget(self, action: #selector(confirmTTSOutputMode), for: .touchUpInside)
+        confirmButton.addTarget(self, action: #selector(confirmChannelMode), for: .touchUpInside)
 
         let line = UIView()
         line.backgroundColor = .separator
 
-        ttsOutputPickerView.dataSource = self
-        ttsOutputPickerView.delegate = self
-        ttsOutputPickerView.reloadAllComponents()
-        syncTTSOutputModePickerSelection()
+        channelModePickerView.dataSource = self
+        channelModePickerView.delegate = self
+        channelModePickerView.reloadAllComponents()
+        syncChannelModePickerSelection()
 
-        ttsOutputContainerView.addSubview(cancelButton)
-        ttsOutputContainerView.addSubview(confirmButton)
-        ttsOutputContainerView.addSubview(line)
-        ttsOutputContainerView.addSubview(ttsOutputPickerView)
+        channelModeContainerView.addSubview(cancelButton)
+        channelModeContainerView.addSubview(confirmButton)
+        channelModeContainerView.addSubview(line)
+        channelModeContainerView.addSubview(channelModePickerView)
 
         cancelButton.snp.makeConstraints { make in
             make.left.equalToSuperview().offset(16)
@@ -603,45 +605,45 @@ private extension Offline1V1Controller {
             make.left.right.equalToSuperview()
             make.height.equalTo(0.5)
         }
-        ttsOutputPickerView.snp.makeConstraints { make in
+        channelModePickerView.snp.makeConstraints { make in
             make.top.equalTo(line.snp.bottom)
             make.left.right.bottom.equalToSuperview()
         }
 
         view.layoutIfNeeded()
-        ttsOutputBottomConstraint?.update(offset: 0)
+        channelModeBottomConstraint?.update(offset: 0)
         UIView.animate(withDuration: 0.25) {
-            self.ttsOutputMaskView.alpha = 1
+            self.channelModeMaskView.alpha = 1
             self.view.layoutIfNeeded()
         }
     }
 
-    @objc func hideTTSOutputModePicker() {
-        guard ttsOutputMaskView.superview != nil else { return }
-        ttsOutputBottomConstraint?.update(offset: 280)
+    @objc func hideChannelModePicker() {
+        guard channelModeMaskView.superview != nil else { return }
+        channelModeBottomConstraint?.update(offset: 280)
         UIView.animate(withDuration: 0.25, animations: {
-            self.ttsOutputMaskView.alpha = 0
+            self.channelModeMaskView.alpha = 0
             self.view.layoutIfNeeded()
         }, completion: { _ in
-            self.ttsOutputPickerView.delegate = nil
-            self.ttsOutputPickerView.dataSource = nil
-            self.ttsOutputContainerView.subviews.forEach { $0.removeFromSuperview() }
-            self.ttsOutputContainerView.removeFromSuperview()
-            self.ttsOutputMaskView.removeFromSuperview()
+            self.channelModePickerView.delegate = nil
+            self.channelModePickerView.dataSource = nil
+            self.channelModeContainerView.subviews.forEach { $0.removeFromSuperview() }
+            self.channelModeContainerView.removeFromSuperview()
+            self.channelModeMaskView.removeFromSuperview()
         })
     }
 
-    @objc func confirmTTSOutputMode() {
-        let row = ttsOutputPickerView.selectedRow(inComponent: 0)
-        guard allTTSOutputModes.indices.contains(row) else { return }
-        viewModel.setOfflineAudioChannelMode(allTTSOutputModes[row])
-        hideTTSOutputModePicker()
+    @objc func confirmChannelMode() {
+        let row = channelModePickerView.selectedRow(inComponent: 0)
+        guard allChannelAudioModes.indices.contains(row) else { return }
+        viewModel.setChannelAudioMode(allChannelAudioModes[row])
+        hideChannelModePicker()
     }
 
-    func syncTTSOutputModePickerSelection() {
-        guard ttsOutputPickerView.numberOfComponents > 0 else { return }
-        let index = allTTSOutputModes.firstIndex(of: viewModel.offlineAudioChannelMode) ?? 0
-        ttsOutputPickerView.selectRow(index, inComponent: 0, animated: false)
+    func syncChannelModePickerSelection() {
+        guard channelModePickerView.numberOfComponents > 0 else { return }
+        let index = allChannelAudioModes.firstIndex(of: viewModel.channelAudioMode) ?? 0
+        channelModePickerView.selectRow(index, inComponent: 0, animated: false)
     }
 
     // MARK: - 音色选择器
@@ -912,7 +914,7 @@ extension Offline1V1Controller: UIPickerViewDataSource, UIPickerViewDelegate {
 
     func pickerView(_ pickerView: UIPickerView, numberOfRowsInComponent component: Int) -> Int {
         if pickerView === modePickerView { return allModes.count }
-        if pickerView === ttsOutputPickerView { return allTTSOutputModes.count }
+        if pickerView === channelModePickerView { return allChannelAudioModes.count }
         if pickerView === speakerPickerView { return speakerGenderOptions.count }
         return supportedSourceLanguageOptions.count
     }
@@ -922,9 +924,9 @@ extension Offline1V1Controller: UIPickerViewDataSource, UIPickerViewDelegate {
             guard allModes.indices.contains(row) else { return nil }
             return allModes[row].title
         }
-        if pickerView === ttsOutputPickerView {
-            guard allTTSOutputModes.indices.contains(row) else { return nil }
-            return allTTSOutputModes[row].title
+        if pickerView === channelModePickerView {
+            guard allChannelAudioModes.indices.contains(row) else { return nil }
+            return allChannelAudioModes[row].oneToOneDemoTitle
         }
         if pickerView === speakerPickerView {
             guard speakerGenderOptions.indices.contains(row) else { return nil }
@@ -942,17 +944,6 @@ private extension TmkSpeakerGender {
             return "男声"
         case .female:
             return "女声"
-        }
-    }
-}
-
-private extension TmkOfflineAudioChannelMode {
-    var title: String {
-        switch self {
-        case .mono:
-            return "Mono（单声道）"
-        case .stereo:
-            return "Stereo（立体声）"
         }
     }
 }

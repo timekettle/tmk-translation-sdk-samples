@@ -1,6 +1,5 @@
 package co.timekettle.translation.sample
 
-import co.timekettle.translation.TmkTranslationException
 import co.timekettle.translation.model.TmkTranslationChannelStateReason
 import co.timekettle.translation.model.TmkTranslationChannelStateSnapshot
 
@@ -11,8 +10,6 @@ data class OnlineConversationErrorPrompt(
     val restartText: String = "重新创建",
     val leaveText: String = "离开页面",
 )
-
-
 
 object OnlineConversationErrorPrompts {
     enum class RuntimeMode {
@@ -74,6 +71,12 @@ object OnlineConversationErrorPrompts {
                 id = "fatal_$code",
                 title = "对话无法继续",
                 message = "当前配置或鉴权信息无效，无法继续启动对话。\n\n错误[$code]：$message"
+            )
+
+            TmkTranslationException.ErrorCodes.INVALID_LANGUAGE_CODE -> invalidLanguagePrompt(
+                code = code,
+                message = message,
+                mode = mode,
             )
 
             TmkTranslationException.ErrorCodes.OFFLINE_MODEL_NOT_READY -> restartPrompt(
@@ -153,6 +156,24 @@ object OnlineConversationErrorPrompts {
             title = title,
             message = message,
             restartText = restartText,
+        )
+    }
+
+    private fun invalidLanguagePrompt(
+        code: Int,
+        message: String,
+        mode: RuntimeMode,
+    ): OnlineConversationErrorPrompt {
+        val action = if (mode == RuntimeMode.OFFLINE) {
+            "重新初始化离线通道"
+        } else {
+            "重新创建对话"
+        }
+        return restartPrompt(
+            id = "invalid_language_$code",
+            title = "语言不支持",
+            message = "当前语言不受支持。请选择支持的语言后$action。\n\n错误[$code]：$message",
+            restartText = "重新选择",
         )
     }
 

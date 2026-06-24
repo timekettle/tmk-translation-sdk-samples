@@ -250,7 +250,7 @@ final class DemoSettingsViewController: UIViewController {
 
     @objc private func onNetworkEnvironment() {
         let alert = UIAlertController(title: "网络环境", message: nil, preferredStyle: .actionSheet)
-        [.dev, .test, .uat, .pre, .pre_jp, .pre_us].forEach { environment in
+        [.dev, .test, .pre].forEach { environment in
             alert.addAction(UIAlertAction(title: environment.rawValue.uppercased(), style: .default) { [weak self] _ in
                 self?.viewModel.setNetworkEnvironment(environment)
             })

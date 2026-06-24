@@ -92,7 +92,7 @@ final class DemoHomeViewModel {
         state.isStartEnabled = false
         publishState()
 
-        let handleResult: (Result<TmkSupportedLanguagesResponse, TmkTranslationError>) -> Void = { [weak self] result in
+        let handleResult: (Result<TmkLocaleListResponse, TmkTranslationError>) -> Void = { [weak self] result in
             guard let self, currentRequestID == self.requestID else { return }
             switch result {
             case .success(let response):
@@ -120,9 +120,9 @@ final class DemoHomeViewModel {
 
         switch source {
         case .online:
-            _ = TmkTranslationSDK.shared.getSupportedLanguages(source: .online, uiLocales: ["zh-CN"], handleResult)
+            _ = TmkTranslationSDK.shared.getOnlineSupportedLanguages(handleResult)
         case .offline:
-            _ = TmkTranslationSDK.shared.getSupportedLanguages(source: .offline, uiLocales: ["zh-CN"], handleResult)
+            _ = TmkTranslationSDK.shared.getOfflineSupportedLanguages(handleResult)
         }
     }
 
@@ -176,11 +176,11 @@ final class DemoHomeViewModel {
         }
     }
 
-    private static func makeLanguageOptions(from response: TmkSupportedLanguagesResponse) -> [DemoLanguageOption] {
+    private static func makeLanguageOptions(from response: TmkLocaleListResponse) -> [DemoLanguageOption] {
         response.localeOptions.map {
             DemoLanguageOption(actualCode: $0.code,
                                familyCode: $0.code.split(separator: "-").first.map(String.init) ?? $0.code,
-                               title: $0.uiLang.isEmpty ? $0.nativeLang : $0.uiLang)
+                               title: $0.displayName)
         }
     }
 }

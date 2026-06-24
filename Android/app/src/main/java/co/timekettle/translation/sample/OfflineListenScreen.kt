@@ -57,6 +57,8 @@ data class OfflineListenScreen(
         var settingsExpanded by remember { mutableStateOf(false) }
         var showSpeakerDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
+        val offlineLanguageOptions = (rememberOfflineLanguageOptions().state
+            as? LanguageOptionsState.Ready)?.options ?: emptyMap()
 
         LaunchedEffect(viewModel, this.sourceLang, this.targetLang) {
             viewModel.setLanguagesIfNeeded(this@OfflineListenScreen.sourceLang, this@OfflineListenScreen.targetLang)
@@ -165,6 +167,7 @@ data class OfflineListenScreen(
                 showDetailInfo = showDetailInfo,
                 onToggleDetail = { showDetailInfo = !showDetailInfo },
                 bidirectional = false,
+                displayNames = offlineLanguageOptions,
             )
 
             if (showDetailInfo) {
