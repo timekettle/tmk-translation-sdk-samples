@@ -97,12 +97,16 @@ class HomeScreen : Screen {
         val effectiveMode = MODE_OPTION_BY_ID[effectiveModeId] ?: MODE_OPTIONS.first()
         val startLabel = "开始${effectiveMode.label}"
 
-        val onlineLangs = rememberOnlineLanguageOptions()
-
-        val langOptions = when (effectiveModeId) {
-            ModeId.OFFLINE -> TranslationLanguages.offline
-            else -> onlineLangs
+        // 按需加载：默认在线；离线模式才请求离线列表（智能/竞速沿用在线）
+        val langUiState = if (effectiveModeId == ModeId.OFFLINE) {
+            rememberOfflineLanguageOptions()
+        } else {
+            rememberOnlineLanguageOptions()
         }
+        val ready = langUiState.state as? LanguageOptionsState.Ready
+        val langOptions = ready?.options ?: emptyMap()
+        // 列表就绪且源/目标语言均在列表中，才允许开始翻译
+        val canStart = ready != null && sourceLang in langOptions && targetLang in langOptions
 
         // 如果当前 mode 不在允许列表，自动切到第一个
         LaunchedEffect(scenarioName) {
@@ -112,13 +116,15 @@ class HomeScreen : Screen {
             }
         }
 
-        // 切换在线/离线模式或语言列表变化时，确保当前语言仍然在可选列表中
+        // 切换在线/离线模式或语言列表变化时，确保当前语言仍然在可选列表中(空列表跳过，避免崩溃)
         LaunchedEffect(effectiveModeId, langOptions) {
-            if (sourceLang !in langOptions) {
-                sourceLang = langOptions.keys.first()
-            }
-            if (targetLang !in langOptions) {
-                targetLang = langOptions.keys.firstOrNull { it != sourceLang } ?: sourceLang
+            if (langOptions.isNotEmpty()) {
+                if (sourceLang !in langOptions) {
+                    sourceLang = langOptions.keys.first()
+                }
+                if (targetLang !in langOptions) {
+                    targetLang = langOptions.keys.firstOrNull { it != sourceLang } ?: sourceLang
+                }
             }
         }
 
@@ -172,6 +178,38 @@ class HomeScreen : Screen {
                     onSwap = { val t = sourceLang; sourceLang = targetLang; targetLang = t }
                 )
 
+                // 语言列表加载态/失败态提示
+                when (langUiState.state) {
+                    is LanguageOptionsState.Loading -> {
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            "语言列表加载中…",
+                            fontSize = 12.sp,
+                            color = TextDim,
+                            modifier = Modifier.fillMaxWidth(),
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                    is LanguageOptionsState.Failed -> {
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("语言列表加载失败", fontSize = 12.sp, color = OfflineColor)
+                            Spacer(Modifier.width(8.dp))
+                            TextButton(
+                                onClick = { langUiState.retry() },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            ) {
+                                Text("重试", fontSize = 12.sp, color = PrimaryLight)
+                            }
+                        }
+                    }
+                    is LanguageOptionsState.Ready -> Unit
+                }
+
                 Spacer(Modifier.height(20.dp))
             }
 
@@ -184,19 +222,29 @@ class HomeScreen : Screen {
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Button(
-                        onClick = { navigator.push(resolveScreen(scenario, effectiveModeId, sourceLang, targetLang)) },
+                        onClick = {
+                            if (canStart) {
+                                navigator.push(resolveScreen(scenario, effectiveModeId, sourceLang, targetLang))
+                            }
+                        },
+                        enabled = canStart,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(52.dp),
                         shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.Transparent,
+                            disabledContainerColor = Color.Transparent,
+                        ),
                         contentPadding = PaddingValues(0.dp),
                     ) {
                         Box(
-                            Modifier.fillMaxSize().background(
-                                Brush.linearGradient(listOf(PrimaryColor, Color(0xFF8B5CF6))),
-                                RoundedCornerShape(10.dp)
-                            ), contentAlignment = Alignment.Center
+                            Modifier.fillMaxSize()
+                                .then(if (canStart) Modifier else Modifier.alpha(.4f))
+                                .background(
+                                    Brush.linearGradient(listOf(PrimaryColor, Color(0xFF8B5CF6))),
+                                    RoundedCornerShape(10.dp)
+                                ), contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 startLabel,

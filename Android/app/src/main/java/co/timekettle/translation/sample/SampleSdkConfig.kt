@@ -1,6 +1,8 @@
 package co.timekettle.translation.sample
 
+import android.content.Context
 import co.timekettle.translation.config.TmkTransGlobalConfig
+import co.timekettle.translation.config.TmkTranslationNetworkEnvironment
 
 object SampleSdkConfig {
 
@@ -8,7 +10,9 @@ object SampleSdkConfig {
     private const val ENV_APP_SECRET = "TMK_SAMPLE_APP_SECRET"
     private const val USER_GRADLE_PROPERTIES_PATH = "~/.gradle/gradle.properties"
 
-    fun globalConfig(): TmkTransGlobalConfig {
+    fun globalConfig(
+        networkEnvironment: TmkTranslationNetworkEnvironment = TmkTranslationNetworkEnvironment.TEST,
+    ): TmkTransGlobalConfig {
         check(BuildConfig.TMK_SAMPLE_APP_ID.isNotBlank()) {
             "Missing $ENV_APP_ID. Export it in your shell or configure it in $USER_GRADLE_PROPERTIES_PATH."
         }
@@ -18,7 +22,18 @@ object SampleSdkConfig {
 
         return TmkTransGlobalConfig.Builder()
             .setAuth(BuildConfig.TMK_SAMPLE_APP_ID, BuildConfig.TMK_SAMPLE_APP_SECRET)
+            .setOnlineAuthContext(tenantId = "timekettle")
+            .setNetworkEnvironment(networkEnvironment)
+//            .setNetworkBaseURL("https://api-rayneo.timekettle.co")
             .build()
+    }
+
+    fun globalConfig(context: Context): TmkTransGlobalConfig {
+        return globalConfig(DemoSettingsStore.loadNetworkEnvironment(context))
+    }
+
+    fun hasCredentials(): Boolean {
+        return BuildConfig.TMK_SAMPLE_APP_ID.isNotBlank() && BuildConfig.TMK_SAMPLE_APP_SECRET.isNotBlank()
     }
 
     fun buildInitErrorMessage(error: Throwable): String {

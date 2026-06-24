@@ -36,12 +36,24 @@ final class OneToOneBubbleCell: UITableViewCell {
     func configure(metaText: String,
                    sourceLangCode: String,
                    sourceText: String,
+                   sourceSegments: [DemoConversationDisplaySegment],
                    targetLangCode: String,
                    translatedText: String,
-                   isRightBubble: Bool) {
-        let source = sourceText.isEmpty ? "..." : sourceText
-        let target = translatedText.isEmpty ? "..." : translatedText
-        contentLabel.text = "\(metaText)\n\n源语言(\(sourceLangCode))：\(source)\n目标语言(\(targetLangCode))：\(target)"
+                   translatedSegments: [DemoConversationDisplaySegment],
+                   isRightBubble: Bool,
+                   isBubbleEnded: Bool) {
+        contentLabel.attributedText = DemoConversationSegmentRenderer.makeBubbleText(
+            metaText: metaText,
+            sourceLangCode: sourceLangCode,
+            sourceSegments: sourceSegments,
+            sourceFallbackText: sourceText,
+            targetLangCode: targetLangCode,
+            translatedSegments: translatedSegments,
+            translatedFallbackText: translatedText,
+            font: contentLabel.font
+        )
+        bubbleView.layer.borderWidth = isBubbleEnded ? 1 : 0
+        bubbleView.layer.borderColor = bubbleBorderColor(isRightBubble: isRightBubble, isBubbleEnded: isBubbleEnded)
         bubbleView.snp.remakeConstraints { make in
             make.top.bottom.equalToSuperview().inset(6)
             make.width.lessThanOrEqualTo(contentView.snp.width).multipliedBy(0.78)
@@ -53,5 +65,11 @@ final class OneToOneBubbleCell: UITableViewCell {
                 bubbleView.backgroundColor = UIColor.systemGray5
             }
         }
+    }
+
+    private func bubbleBorderColor(isRightBubble: Bool, isBubbleEnded: Bool) -> CGColor? {
+        guard isBubbleEnded else { return nil }
+        let color = isRightBubble ? UIColor.systemBlue : UIColor.systemGreen
+        return color.cgColor
     }
 }

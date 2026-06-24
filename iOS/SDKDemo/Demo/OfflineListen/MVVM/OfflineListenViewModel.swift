@@ -87,13 +87,11 @@ final class OfflineListenViewModel: NSObject {
         let packageInfos = TmkTranslationSDK.shared.getOfflineModelPackageInfos(
             srcLang: selectedSourceLang,
             dstLang: selectedTargetLang,
-            modelRootDirectory: modelRootDirectory,
             scenario: .listen
         )
         let ready = TmkTranslationSDK.shared.isOfflineModelReady(
             srcLang: selectedSourceLang,
             dstLang: selectedTargetLang,
-            modelRootDirectory: modelRootDirectory,
             scenario: .listen
         )
         DispatchQueue.main.async {
@@ -152,7 +150,6 @@ final class OfflineListenViewModel: NSObject {
         guard TmkTranslationSDK.shared.isOfflineModelReady(
             srcLang: selectedSourceLang,
             dstLang: selectedTargetLang,
-            modelRootDirectory: modelRootDirectory,
             scenario: .listen
         ) else {
             updateStatus("当前模型资源不完整，需要先下载离线资源")
@@ -170,11 +167,12 @@ final class OfflineListenViewModel: NSObject {
                                                                framesPerBuffer: 512))
         }
         guard let voiceIO else { return }
+        configureInterruptionHandling(for: voiceIO)
         do {
-            try TmkVoiceProcessingIO.configureAudioSession(sampleRate: 16000,
-                                                           framesPerBuffer: 512,
-                                                           mode: .voiceChat,
-                                                           useSpeaker: true)
+            try voiceIO.activateAudioSession(sampleRate: 16000,
+                                             framesPerBuffer: 512,
+                                             mode: .voiceChat,
+                                             useSpeaker: true)
         } catch {
             updateStatus("音频会话配置失败：\(error.localizedDescription)")
             return
@@ -215,6 +213,26 @@ final class OfflineListenViewModel: NSObject {
         }
         lastPlaybackChannels = 0
         updateStatus("收听已停止")
+    }
+
+    /// 配置采集中断/恢复事件处理：来电等中断结束后录音器会自动恢复，这里仅同步 UI 文案。
+    private func configureInterruptionHandling(for voiceIO: TmkVoiceProcessingIO) {
+        voiceIO.onInterruptionEvent = { [weak self] event in
+            guard let self else { return }
+            switch event {
+            case .interrupted:
+                self.updateStatus("通话中断，已暂停收听...")
+            case .resumed:
+                self.updateStatus("离线收听中...")
+            case .resumeFailed(let error):
+                self.updateStatus("恢复收听失败，请重试：\(error.localizedDescription)")
+                self.setListeningActive(false)
+                self.updateStateOnMain {
+                    $0.canStopListening = false
+                    $0.canStartListening = self.channel != nil
+                }
+            }
+        }
     }
 
     func applyLanguages(source: String, target: String) {
@@ -270,10 +288,9 @@ final class OfflineListenViewModel: NSObject {
 }
 
 private extension OfflineListenViewModel {
-    static func makeLanguageOptions(from response: TmkSupportedLanguagesResponse) -> [OfflineLanguageOption] {
+    static func makeLanguageOptions(from response: TmkLocaleListResponse) -> [OfflineLanguageOption] {
         response.localeOptions.map {
-            let title = $0.uiLang.isEmpty ? $0.nativeLang : $0.uiLang
-            return (code: $0.code, name: title)
+            return (code: $0.code, name: $0.displayName)
         }
     }
 
@@ -288,7 +305,7 @@ private extension OfflineListenViewModel {
     }
 
     func loadOfflineSupportedLanguages() {
-        _ = TmkTranslationSDK.shared.getSupportedLanguages(source: .offline) { [weak self] result in
+        _ = TmkTranslationSDK.shared.getOfflineSupportedLanguages { [weak self] result in
             guard let self else { return }
             guard case .success(let response) = result else { return }
             let options = Self.makeLanguageOptions(from: response)
@@ -366,7 +383,6 @@ private extension OfflineListenViewModel {
         TmkTranslationSDK.shared.downloadOfflineModels(
             srcLang: selectedSourceLang,
             dstLang: selectedTargetLang,
-            modelRootDirectory: modelRootDirectory,
             scenario: .listen,
             listener: self
         )
@@ -380,7 +396,6 @@ private extension OfflineListenViewModel {
         guard TmkTranslationSDK.shared.isOfflineModelReady(
             srcLang: selectedSourceLang,
             dstLang: selectedTargetLang,
-            modelRootDirectory: modelRootDirectory,
             scenario: .listen
         ) else {
             downloadButtonState = .notDownloaded
@@ -541,8 +556,6 @@ private extension OfflineListenViewModel {
         return isListeningActive
     }
 
-
-
     func applyBubbleSnapshot(_ snapshot: DemoConversationBubbleSnapshot) {
         DispatchQueue.main.async {
             let key = DemoConversationBubbleAssembler.rowKey(bubbleId: snapshot.bubbleId, lane: .left)
@@ -605,6 +618,7 @@ private extension OfflineListenViewModel {
 extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloadListener {
     func onRecognized(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
+        NSLog("%@", DemoTmkResultLogFormatter.makeLine(scene: "OfflineListen", stage: "ASR", result: result, isFinal: isFinal))
         guard let event = DemoConversationEventAdapter.makeRecognizedEvent(from: result, isFinal: isFinal) else { return }
         let normalized = DemoConversationEvent(bubbleId: event.bubbleId,
                                                sessionId: event.sessionId,
@@ -621,6 +635,7 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
 
     func onTranslate(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
+        NSLog("%@", DemoTmkResultLogFormatter.makeLine(scene: "OfflineListen", stage: "MT", result: result, isFinal: isFinal))
         guard let event = DemoConversationEventAdapter.makeTranslatedEvent(from: result, isFinal: isFinal) else { return }
         let normalized = DemoConversationEvent(bubbleId: event.bubbleId,
                                                sessionId: event.sessionId,

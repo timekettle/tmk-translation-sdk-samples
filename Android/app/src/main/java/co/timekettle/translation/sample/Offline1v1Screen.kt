@@ -61,6 +61,8 @@ data class Offline1v1Screen(
         var showSpeakerDialog by remember { mutableStateOf(false) }
         var showTtsOutputDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
+        val offlineLanguageOptions = (rememberOfflineLanguageOptions().state
+            as? LanguageOptionsState.Ready)?.options ?: emptyMap()
 
         LaunchedEffect(viewModel, this.sourceLang, this.targetLang) {
             viewModel.setLanguagesIfNeeded(this@Offline1v1Screen.sourceLang, this@Offline1v1Screen.targetLang)
@@ -175,6 +177,7 @@ data class Offline1v1Screen(
                 targetLang = targetLang,
                 showDetailInfo = showDetailInfo,
                 onToggleDetail = { showDetailInfo = !showDetailInfo },
+                displayNames = offlineLanguageOptions,
             )
 
             if (showDetailInfo) {

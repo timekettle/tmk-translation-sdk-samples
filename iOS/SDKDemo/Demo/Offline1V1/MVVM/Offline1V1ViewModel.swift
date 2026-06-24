@@ -42,7 +42,7 @@ enum OfflineModelButtonState: Equatable {
 
 /// 离线一对一 ViewModel。
 /// 复用 OneToOneViewState / OneToOneRowViewData，去除在线房间相关流程，
-/// 使用 createOfflineTranslationChannel 创建通道，pcmChannels = 2（立体声输入），语言列表使用 SDK 提供的离线支持列表。
+/// 使用 createOfflineTranslationChannel 创建通道，语言列表使用 SDK 提供的离线支持列表。
 final class Offline1V1ViewModel: NSObject {
     @Published private(set) var state = OneToOneViewState()
     let rowMutation = PassthroughSubject<ChatListMutation<OneToOneRowViewData>, Never>()
@@ -59,14 +59,18 @@ final class Offline1V1ViewModel: NSObject {
 
     private var rows: [OneToOneRowViewData] = []
     private var bubbleIndexMap: [String: Int] = [:]
+    private var bubbleLaneMap: [String: OneToOneRowViewData.Lane] = [:]
     private let bubbleAssembler = DemoConversationBubbleAssembler()
     private var pendingRowsPublishWorkItem: DispatchWorkItem?
     private var lastPublishedRows: [OneToOneRowViewData] = []
     private var selectedSourceLang = "zh"
     private var selectedTargetLang = "en"
+    private var selectedRightLang: String { selectedSourceLang }
+    private var selectedLeftLang: String { selectedTargetLang }
     private var selectedLeftSpeakerGender: TmkSpeakerGender? = .male
     private var selectedRightSpeakerGender: TmkSpeakerGender? = .female
-    @Published private(set) var offlineAudioChannelMode: TmkOfflineAudioChannelMode = .stereo
+    @Published private(set) var channelAudioMode: TmkChannelAudioMode = .standard
+    private var selectedChannelModeConfiguration: OneToOneChannelModeConfiguration = OneToOneStandardChannelModeConfiguration()
     private let maxDisplayedRows = 200
     private var downloadStatusHeader = ""
 
@@ -93,9 +97,7 @@ final class Offline1V1ViewModel: NSObject {
         guard let path = Bundle.main.path(forResource: "right_audio", ofType: "pcm") else { return nil }
         return try? Data(contentsOf: URL(fileURLWithPath: path))
     }()
-    private var localPCMOffset: Int = 0
-    private var localPCMLoopResumeAt: CFAbsoluteTime?
-    private let localAudioLoopRestartDelay: TimeInterval = 2
+    private lazy var leftFileAudioLoopBuffer = OneToOneLocalAudioLoopBuffer(pcmData: localPCMData)
     private var offlineSupportChecked = false
     private var offlineTranslationSupported = false
 
@@ -115,7 +117,7 @@ final class Offline1V1ViewModel: NSObject {
             $0.targetLanguage = self.selectedTargetLang
             $0.currentMode = "offline"
             $0.currentScenario = "oneToOne"
-            $0.configuredChannels = 2
+            $0.configuredChannels = self.channelModeConfiguration.pcmChannels
         }
         verifyAuthThenRefreshOfflineState(autoStartIfReady: true)
     }
@@ -133,15 +135,13 @@ final class Offline1V1ViewModel: NSObject {
             return
         }
         let packageInfos = TmkTranslationSDK.shared.getOfflineModelPackageInfos(
-            srcLang: selectedSourceLang,
-            dstLang: selectedTargetLang,
-            modelRootDirectory: modelRootDirectory,
+            srcLang: selectedRightLang,
+            dstLang: selectedLeftLang,
             scenario: .oneToOne
         )
         let ready = TmkTranslationSDK.shared.isOfflineModelReady(
-            srcLang: selectedSourceLang,
-            dstLang: selectedTargetLang,
-            modelRootDirectory: modelRootDirectory,
+            srcLang: selectedRightLang,
+            dstLang: selectedLeftLang,
             scenario: .oneToOne
         )
         DispatchQueue.main.async {
@@ -198,9 +198,8 @@ final class Offline1V1ViewModel: NSObject {
             return
         }
         guard TmkTranslationSDK.shared.isOfflineModelReady(
-            srcLang: selectedSourceLang,
-            dstLang: selectedTargetLang,
-            modelRootDirectory: modelRootDirectory,
+            srcLang: selectedRightLang,
+            dstLang: selectedLeftLang,
             scenario: .oneToOne
         ) else {
             updateStatus("当前模型资源不完整，需要先下载离线资源")
@@ -219,11 +218,13 @@ final class Offline1V1ViewModel: NSObject {
                                                                framesPerBuffer: 1024))
         }
         guard let voiceIO else { return }
+        hasStoppedListening = false
+        configureInterruptionHandling(for: voiceIO)
         do {
-            try TmkVoiceProcessingIO.configureAudioSession(sampleRate: 16000,
-                                                           framesPerBuffer: 1024,
-                                                           mode: .voiceChat,
-                                                           useSpeaker: true)
+            try voiceIO.activateAudioSession(sampleRate: 16000,
+                                             framesPerBuffer: 1024,
+                                             mode: .voiceChat,
+                                             useSpeaker: true)
         } catch {
             updateStatus("音频会话配置失败：\(error.localizedDescription)")
             return
@@ -233,8 +234,19 @@ final class Offline1V1ViewModel: NSObject {
             let captureChannels = Int(format.mChannelsPerFrame)
             self.updateCaptureAudioInfo(sampleRate: Int(format.mSampleRate), channels: captureChannels)
             // 本地音频 -> 左声道，麦克风录音 -> 右声道。
-            let stereo = self.mixLocalToLeftAndMicToRight(micMono: data)
-            channel?.pushStreamAudioData(stereo, channelCount: 2, extraChunk: nil)
+            let recordData = data.count.isMultiple(of: 2) ? data : Data(data.prefix(data.count - 1))
+            guard recordData.isEmpty == false else { return }
+            let fileChunk = self.nextLeftFileAudioChunk(expectedLength: recordData.count)
+            guard let channel else { return }
+            let plans = self.channelModeConfiguration.makeInputAudioPushPlan(fileData: fileChunk.data, rightMicData: recordData)
+            for plan in plans {
+                switch plan.destination {
+                case .interleaved(let channelCount):
+                    channel.pushStreamAudioData(plan.data, channelCount: channelCount, extraChunk: nil)
+                case .speaker(let speakerChannel):
+                    channel.pushStreamAudioData(plan.data, speakerChannel: speakerChannel, extraChunk: nil)
+                }
+            }
         }
         voiceIO.requestRecordPermission { [weak self] granted in
             guard let self else { return }
@@ -267,6 +279,26 @@ final class Offline1V1ViewModel: NSObject {
         updateStatus("收听已停止")
     }
 
+    /// 配置采集中断/恢复事件处理：来电等中断结束后录音器会自动恢复，这里仅同步 UI 文案。
+    private func configureInterruptionHandling(for voiceIO: TmkVoiceProcessingIO) {
+        voiceIO.onInterruptionEvent = { [weak self] event in
+            guard let self else { return }
+            switch event {
+            case .interrupted:
+                self.updateStatus("通话中断，已暂停收听...")
+            case .resumed:
+                self.updateStatus("离线一对一收听中...")
+            case .resumeFailed(let error):
+                self.updateStatus("恢复收听失败，请重试：\(error.localizedDescription)")
+                self.setListeningActive(false)
+                self.updateStateOnMain {
+                    $0.canStopListening = false
+                    $0.canStartListening = self.channel != nil
+                }
+            }
+        }
+    }
+
     func setPlaybackMode(_ mode: OneToOnePlaybackMode) {
         playbackMode = mode
         // 切换播放音源时清空历史播放缓存，避免旧声道残留音频影响新声道体验。
@@ -274,15 +306,19 @@ final class Offline1V1ViewModel: NSObject {
         updateStateOnMain { $0.playbackMode = mode }
     }
 
-    func setOfflineAudioChannelMode(_ mode: TmkOfflineAudioChannelMode) {
-        guard offlineAudioChannelMode != mode else { return }
-        offlineAudioChannelMode = mode
-        let title = mode == .stereo ? "Stereo" : "Mono"
+    func setChannelAudioMode(_ mode: TmkChannelAudioMode) {
+        guard channelAudioMode != mode else { return }
+        channelAudioMode = mode
+        selectedChannelModeConfiguration = OneToOneChannelModeConfigurationFactory.make(mode: mode)
+        let title = mode.oneToOneDemoTitle
+        updateStateOnMain {
+            $0.configuredChannels = self.channelModeConfiguration.pcmChannels
+        }
         guard channel != nil else {
-            updateStatus("离线一对一 TTS 输出模式已切换为 \(title)，将在通道创建后生效")
+            updateStatus("离线一对一通道模式已切换为 \(title)，将在通道创建后生效")
             return
         }
-        resetAndRecreateChannel(reason: "离线一对一 TTS 输出模式已切换为 \(title)，正在重启离线通道...")
+        resetAndRecreateChannel(reason: "离线一对一通道模式已切换为 \(title)，正在重启离线通道...")
     }
 
     func applySourceLanguage(_ code: String) {
@@ -349,15 +385,18 @@ final class Offline1V1ViewModel: NSObject {
 }
 
 private extension Offline1V1ViewModel {
-    static func makeLanguageOptions(from response: TmkSupportedLanguagesResponse) -> [OfflineOneToOneLanguageOption] {
+    var channelModeConfiguration: OneToOneChannelModeConfiguration {
+        selectedChannelModeConfiguration
+    }
+
+    static func makeLanguageOptions(from response: TmkLocaleListResponse) -> [OfflineOneToOneLanguageOption] {
         response.localeOptions.map {
-            let title = $0.uiLang.isEmpty ? $0.nativeLang : $0.uiLang
-            return (code: $0.code, name: title)
+            return (code: $0.code, name: $0.displayName)
         }
     }
 
     func loadOfflineSupportedLanguages() {
-        _ = TmkTranslationSDK.shared.getSupportedLanguages(source: .offline) { [weak self] result in
+        _ = TmkTranslationSDK.shared.getOfflineSupportedLanguages { [weak self] result in
             guard let self else { return }
             guard case .success(let response) = result else { return }
             let options = Self.makeLanguageOptions(from: response)
@@ -433,9 +472,8 @@ private extension Offline1V1ViewModel {
         downloadStatusText = "准备下载..."
         showCancelButton = true
         TmkTranslationSDK.shared.downloadOfflineModels(
-            srcLang: selectedSourceLang,
-            dstLang: selectedTargetLang,
-            modelRootDirectory: modelRootDirectory,
+            srcLang: selectedRightLang,
+            dstLang: selectedLeftLang,
             scenario: .oneToOne,
             listener: self
         )
@@ -447,9 +485,8 @@ private extension Offline1V1ViewModel {
             return
         }
         guard TmkTranslationSDK.shared.isOfflineModelReady(
-            srcLang: selectedSourceLang,
-            dstLang: selectedTargetLang,
-            modelRootDirectory: modelRootDirectory,
+            srcLang: selectedRightLang,
+            dstLang: selectedLeftLang,
             scenario: .oneToOne
         ) else {
             downloadButtonState = .notDownloaded
@@ -465,11 +502,11 @@ private extension Offline1V1ViewModel {
         let builder = TmkTranslationChannelConfig.Builder()
             .setMode(.offline)
             .setScenario(.oneToOne)
-            .setSourceLang(selectedSourceLang)
-            .setTargetLang(selectedTargetLang)
+            .setSourceLang(selectedRightLang)
+            .setTargetLang(selectedLeftLang)
             .setPCMSampleRate(16_000)
-            .setPCMChannels(2)
-            .setOfflineAudioChannelMode(offlineAudioChannelMode)
+            .setPCMChannels(channelModeConfiguration.pcmChannels)
+            .setChannelAudioMode(channelAudioMode)
             .setModelRootDirectory(modelRootDirectory)
         let speakers = configuredSpeakers()
         if speakers.isEmpty == false {
@@ -585,6 +622,7 @@ private extension Offline1V1ViewModel {
     func resetRows() {
         rows.removeAll()
         bubbleIndexMap.removeAll()
+        bubbleLaneMap.removeAll()
         bubbleAssembler.reset()
         lastPublishedRows = []
         pendingRowsPublishWorkItem?.cancel()
@@ -594,48 +632,16 @@ private extension Offline1V1ViewModel {
 
     /// 将本地 PCM 文件放入左声道，将麦克风单声道放入右声道。
     func mixLocalToLeftAndMicToRight(micMono: Data) -> Data {
-        guard let localPCM = localPCMData, localPCM.isEmpty == false else {
-            // 无本地文件时，左声道补零，右声道使用麦克风。
-            let silence = Data(count: micMono.count)
-            return TmkTranslationPCMTools.mixStereo16LE(left: silence, right: micMono) ?? micMono
-        }
-        let frameSize = micMono.count
-        if let resumeAt = localPCMLoopResumeAt {
-            let now = CFAbsoluteTimeGetCurrent()
-            if now < resumeAt {
-                let silence = Data(count: frameSize)
-                return TmkTranslationPCMTools.mixStereo16LE(left: silence, right: micMono) ?? micMono
-            }
-            localPCMLoopResumeAt = nil
-            localPCMOffset = 0
-        }
+        let leftChunk = nextLeftFileAudioChunk(expectedLength: micMono.count)
+        return TmkTranslationPCMTools.mixStereo16LE(left: leftChunk.data, right: micMono) ?? micMono
+    }
 
-        var leftSlice = Data(capacity: frameSize)
-        var remain = frameSize
-        while remain > 0 {
-            guard localPCMOffset < localPCM.count else {
-                localPCMLoopResumeAt = CFAbsoluteTimeGetCurrent() + localAudioLoopRestartDelay
-                break
-            }
-            let available = min(remain, localPCM.count - localPCMOffset)
-            guard available > 0 else { break }
-            leftSlice.append(localPCM.subdata(in: localPCMOffset..<(localPCMOffset + available)))
-            localPCMOffset += available
-            remain -= available
-            if localPCMOffset >= localPCM.count {
-                localPCMLoopResumeAt = CFAbsoluteTimeGetCurrent() + localAudioLoopRestartDelay
-                break
-            }
-        }
-        if leftSlice.count < frameSize {
-            leftSlice.append(Data(count: frameSize - leftSlice.count))
-        }
-        return TmkTranslationPCMTools.mixStereo16LE(left: leftSlice, right: micMono) ?? micMono
+    func nextLeftFileAudioChunk(expectedLength: Int) -> OneToOneLocalAudioLoopChunk {
+        leftFileAudioLoopBuffer.nextLoopChunk(expectedLength: expectedLength)
     }
 
     func resetLocalPCMPlaybackState() {
-        localPCMOffset = 0
-        localPCMLoopResumeAt = nil
+        leftFileAudioLoopBuffer.reset()
     }
 
     func updateStatus(_ text: String) {
@@ -681,13 +687,93 @@ private extension Offline1V1ViewModel {
         return isListeningActive
     }
 
-
-
     func extractChannel(from result: TmkResult<String>) -> OneToOneRowViewData.Lane {
         if let ch = result.extraData["channel"] as? String {
             return ch == "right" ? .right : .left
         }
         return .left
+    }
+
+    func lane(from result: TmkResult<String>) -> OneToOneRowViewData.Lane? {
+        if let channel = (result.extraData["channel"] as? String)?.lowercased() {
+            return parseLane(channel: channel)
+        }
+        return nil
+    }
+
+    func parseLane(channel: String) -> OneToOneRowViewData.Lane? {
+        if channel == OneToOneRowViewData.Lane.left.rawValue { return .left }
+        if channel == OneToOneRowViewData.Lane.right.rawValue { return .right }
+        return nil
+    }
+
+    func resolveLane(bubbleId: String,
+                     sessionId: Int,
+                     explicitLane: OneToOneRowViewData.Lane?,
+                     sourceLangCode: String,
+                     targetLangCode: String) -> OneToOneRowViewData.Lane {
+        if let explicitLane {
+            bubbleLaneMap[bubbleId] = explicitLane
+            return explicitLane
+        }
+        if let lane = bubbleLaneMap[bubbleId] {
+            return lane
+        }
+        _ = sessionId
+        let sourceLower = sourceLangCode.lowercased()
+        let targetLower = targetLangCode.lowercased()
+        let inferred: OneToOneRowViewData.Lane
+        if sourceLower.hasPrefix(sourceLanguagePrefix()) || targetLower.hasPrefix(targetLanguagePrefix()) {
+            inferred = .right
+        } else {
+            inferred = .left
+        }
+        bubbleLaneMap[bubbleId] = inferred
+        return inferred
+    }
+
+    func fixedLanguagePair(for lane: OneToOneRowViewData.Lane) -> (source: String, target: String) {
+        switch lane {
+        case .right:
+            return (selectedSourceLang, selectedTargetLang)
+        case .left:
+            return (selectedTargetLang, selectedSourceLang)
+        }
+    }
+
+    func normalizedConversationEvent(from event: DemoConversationEvent,
+                                     explicitLane: OneToOneRowViewData.Lane?) -> DemoConversationEvent {
+        let lane = resolveLane(bubbleId: event.bubbleId,
+                               sessionId: event.sessionId,
+                               explicitLane: explicitLane,
+                               sourceLangCode: event.sourceLangCode,
+                               targetLangCode: event.targetLangCode)
+        let demoLane: DemoConversationLane = lane == .right ? .right : .left
+        let languagePair = fixedLanguagePair(for: lane)
+        return DemoConversationEvent(bubbleId: event.bubbleId,
+                                     sessionId: event.sessionId,
+                                     lane: demoLane,
+                                     stage: event.stage,
+                                     isFinal: event.isFinal,
+                                     text: event.text,
+                                     sourceLangCode: languagePair.source,
+                                     targetLangCode: languagePair.target,
+                                     chunkId: event.chunkId)
+    }
+
+    func sourceLanguagePrefix() -> String {
+        String(selectedSourceLang.split(separator: "-").first ?? "").lowercased()
+    }
+
+    func targetLanguagePrefix() -> String {
+        String(selectedTargetLang.split(separator: "-").first ?? "").lowercased()
+    }
+
+    func audioRoute(from result: TmkResult<String>) -> TmkTranslatedAudioRoute? {
+        let routeValue = result.extraData["audio_route"]
+        if let route = routeValue as? TmkTranslatedAudioRoute { return route }
+        if let route = routeValue as? String { return TmkTranslatedAudioRoute(rawValue: route) }
+        return nil
     }
 
     func bubbleKey(_ bubbleId: String, _ lane: OneToOneRowViewData.Lane) -> String {
@@ -762,44 +848,37 @@ private extension Offline1V1ViewModel {
 extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadListener {
     func onRecognized(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
+        NSLog("%@", DemoTmkResultLogFormatter.makeLine(scene: "Offline1V1", stage: "ASR", result: result, isFinal: isFinal))
         guard let event = DemoConversationEventAdapter.makeRecognizedEvent(from: result, isFinal: isFinal) else { return }
-        let snapshots = bubbleAssembler.consume(event)
+        let normalized = normalizedConversationEvent(from: event, explicitLane: lane(from: result))
+        let snapshots = bubbleAssembler.consume(normalized)
         guard snapshots.isEmpty == false else { return }
         snapshots.forEach(applyBubbleSnapshot)
     }
 
     func onTranslate(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
+        NSLog("%@", DemoTmkResultLogFormatter.makeLine(scene: "Offline1V1", stage: "MT", result: result, isFinal: isFinal))
         guard let event = DemoConversationEventAdapter.makeTranslatedEvent(from: result, isFinal: isFinal) else { return }
-        let snapshots = bubbleAssembler.consume(event)
+        let normalized = normalizedConversationEvent(from: event, explicitLane: lane(from: result))
+        let snapshots = bubbleAssembler.consume(normalized)
         guard snapshots.isEmpty == false else { return }
         snapshots.forEach(applyBubbleSnapshot)
     }
 
     func onAudioDataReceive(from engine: AbstractChannelEngine, result: TmkResult<String>, data: Data, channelCount: Int) {
         _ = engine
-        if let ttsEvent = DemoConversationEventAdapter.makeAudioEvent(from: result) {
-            let snapshots = bubbleAssembler.consume(ttsEvent)
-            snapshots.forEach(applyBubbleSnapshot)
-        }
-        guard result.data == "translated_audio" else { return }
+        guard result.data == "translated_audio", data.isEmpty == false else { return }
         guard getListeningActive() else { return }
-        let lane = extractChannel(from: result)
-        // 仅播放当前选中音源对应声道，未选中声道直接丢弃，避免静音包挤占播放缓冲。
-        if playbackMode == .left, lane != .left { return }
-        if playbackMode == .right, lane != .right { return }
         updateStateOnMain { $0.playbackChannels = channelCount }
-        // 根据事件来源声道选择播放数据。
-        let playbackData: Data
-        if channelCount == 2 {
-            if let split = TmkTranslationPCMTools.splitStereoInterleaved16LE(data) {
-                playbackData = (lane == .left) ? split.left : split.right
-            } else {
-                playbackData = data
-            }
-        } else {
-            playbackData = data
-        }
+        guard let playbackData = OneToOneTranslatedAudioPlaybackSelector.selectPlaybackData(
+            data: data,
+            channelCount: channelCount,
+            playbackMode: playbackMode,
+            audioRoute: audioRoute(from: result),
+            sourceLane: extractChannel(from: result),
+            extraData: result.extraData
+        ) else { return }
         voiceIO?.enqueuePlaybackPCM(playbackData)
     }
 

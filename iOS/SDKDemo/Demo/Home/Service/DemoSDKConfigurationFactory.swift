@@ -20,6 +20,7 @@ enum DemoSDKConfigurationFactory {
             .setOnlineAuthContext(tenantId: defaultTenantId)
             .setLogEnabled(config.consoleLogEnabled)
             .setNetworkEnvironment(config.networkEnvironment)
+            .setNetworkBaseURL(URL(string: "https://api-rayneo.timekettle.co")!)
             .setDiagnosisEnabled(config.diagnosisEnabled)
             .build()
     }
