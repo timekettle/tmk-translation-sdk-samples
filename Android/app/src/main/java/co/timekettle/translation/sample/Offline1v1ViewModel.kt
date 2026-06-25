@@ -11,6 +11,9 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import co.timekettle.translation.Cancelable
+import co.timekettle.translation.TmkTranslationChannel
+import co.timekettle.translation.TmkTranslationException
+import co.timekettle.translation.TmkTranslationSDK
 import co.timekettle.offlinesdk.vad.VadDetector
 import co.timekettle.translation.config.TmkTransChannelConfig
 import co.timekettle.translation.core.AbstractChannelEngine

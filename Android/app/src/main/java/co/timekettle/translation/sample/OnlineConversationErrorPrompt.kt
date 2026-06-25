@@ -1,5 +1,6 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.TmkTranslationException
 import co.timekettle.translation.model.TmkTranslationChannelStateReason
 import co.timekettle.translation.model.TmkTranslationChannelStateSnapshot
 

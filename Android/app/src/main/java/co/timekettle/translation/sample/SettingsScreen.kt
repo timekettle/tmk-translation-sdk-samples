@@ -20,6 +20,7 @@ import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 
 import co.timekettle.offlinesdk.diagnosis.SdkDiagnosisManager
+import co.timekettle.translation.TmkTranslationSDK
 import co.timekettle.translation.config.TmkTranslationNetworkEnvironment
 import co.timekettle.translation.listener.AuthCallback
 
@@ -152,12 +153,14 @@ class SettingsScreen : Screen {
             // 诊断日志导出依赖 FileProvider，对外 samples 不暴露该诊断面，故省略导出入口。
 
             Spacer(Modifier.height(32.dp))
-            Text("TmkTranslationSDK v${BuildConfig.TMK_SDK_VERSION}", fontSize = 11.sp, color = TextDim,
+            Text(settingsSdkVersionLabel(TmkTranslationSDK.sdkVersion), fontSize = 11.sp, color = TextDim,
                 modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
             Spacer(Modifier.height(16.dp))
         }
     }
 }
+
+internal fun settingsSdkVersionLabel(sdkVersion: String): String = "TmkTranslationSDK v$sdkVersion"
 
 @Composable
 private fun StatusText(status: DemoEngineStatus) {
