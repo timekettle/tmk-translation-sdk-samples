@@ -10,7 +10,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import co.timekettle.translation.TmkTranslationSDK
 import co.timekettle.translation.listener.TmkLocaleListCallback
-import c0.d as TmkLocaleListResponse
+import co.timekettle.translation.model.TmkLocaleListResponse
 import kotlin.coroutines.resume
 import kotlinx.coroutines.suspendCancellableCoroutine
 
@@ -100,23 +100,10 @@ private fun rememberLanguageOptions(online: Boolean): LanguageOptionsUiState {
 }
 
 /** 把结构化响应映射为 UI 下拉所需的 code → 显示名 Map。 */
-private fun TmkLocaleListResponse.toDisplayMap(): Map<String, String> {
-    val languages = publicFieldValue(this, "b") as? Iterable<*> ?: return emptyMap()
-    val options = languages.flatMap { language ->
-        publicFieldValue(language, "c") as? Iterable<*> ?: emptyList<Any>()
-    }
-    return options
-        .mapNotNull { option ->
-            val code = publicFieldValue(option, "a") as? String ?: return@mapNotNull null
-            val displayName = publicFieldValue(option, "b") as? String ?: code
-            code.takeIf { it.isNotEmpty() }?.let { it to displayName.ifBlank { code } }
-        }
-        .distinctBy { it.first }
-        .toMap()
-}
-
-private fun publicFieldValue(target: Any?, name: String): Any? =
-    target?.javaClass?.getField(name)?.get(target)
+private fun TmkLocaleListResponse.toDisplayMap(): Map<String, String> =
+    localeOptions
+        .filter { it.code.isNotEmpty() }
+        .associate { it.code to it.displayName.ifBlank { it.code } }
 
 /** 桥接 SDK 的 Callback 接口为 suspend 调用,随协程取消而取消请求。 */
 private suspend fun fetchLocaleList(online: Boolean): TmkLocaleListResponse =

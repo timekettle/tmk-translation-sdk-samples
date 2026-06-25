@@ -2,13 +2,13 @@ PODS:
   - AgoraAudio_Special_iOS (4.5.2.183.1)
   - AgoraRtm/RtmKit (2.2.6)
   - SnapKit (5.7.1)
-  - TmkTranslationSDK (1.2.0-rc1):
+  - TmkTranslationSDK (1.2.0-rc2):
     - AgoraAudio_Special_iOS (~> 4.5.2.4)
     - AgoraRtm/RtmKit (= 2.2.6)
 
 DEPENDENCIES:
   - SnapKit
-  - TmkTranslationSDK (from `https://raw.githubusercontent.com/timekettle/TmkTranslationSDK-iOS/rc/Specs/TmkTranslationSDK/1.2.0-rc1/TmkTranslationSDK.podspec`)
+  - TmkTranslationSDK (from `https://raw.githubusercontent.com/timekettle/TmkTranslationSDK-iOS/rc/Specs/TmkTranslationSDK/1.2.0-rc2/TmkTranslationSDK.podspec`)
 
 SPEC REPOS:
   trunk:
@@ -18,14 +18,14 @@ SPEC REPOS:
 
 EXTERNAL SOURCES:
   TmkTranslationSDK:
-    :podspec: https://raw.githubusercontent.com/timekettle/TmkTranslationSDK-iOS/rc/Specs/TmkTranslationSDK/1.2.0-rc1/TmkTranslationSDK.podspec
+    :podspec: https://raw.githubusercontent.com/timekettle/TmkTranslationSDK-iOS/rc/Specs/TmkTranslationSDK/1.2.0-rc2/TmkTranslationSDK.podspec
 
 SPEC CHECKSUMS:
   AgoraAudio_Special_iOS: b397eea1b6a58cdc3a6b529dbfb02930fd3222c2
   AgoraRtm: bd7a04a21f8063f7105540da0243e6b0a93c116e
   SnapKit: d612e99e678a2d3b95bf60b0705ed0a35c03484a
-  TmkTranslationSDK: 71f7cc086bfbb7ecc3ac5d65884c82aa17f0ceff
+  TmkTranslationSDK: 3ff20f862fc49d26c738db71d652d53df0be8f6e
 
-PODFILE CHECKSUM: 05628a9e72efa44f2a87cb76bcd485839a2dbe40
+PODFILE CHECKSUM: 82aa8acbbe286b387915b678d1aa9aa34230db24
 
 COCOAPODS: 1.16.2
