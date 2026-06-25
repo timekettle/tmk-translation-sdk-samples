@@ -6,7 +6,7 @@ plugins {
     alias(libs.plugins.hilt.android)
 }
 
-val sampleSdkVersion = providers.gradleProperty("TMK_SDK_VERSION").orElse("1.1.2").get()
+val sampleSdkVersion = providers.gradleProperty("TMK_SDK_VERSION").orElse("1.2.0-beta14").get()
 val sampleAppId = providers.environmentVariable("TMK_SAMPLE_APP_ID")
     .orElse(providers.gradleProperty("TMK_SAMPLE_APP_ID"))
     .orElse("")

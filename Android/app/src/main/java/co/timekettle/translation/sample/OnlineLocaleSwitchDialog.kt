@@ -84,7 +84,7 @@ private fun LocaleDropdown(
         modifier = modifier.fillMaxWidth(),
     ) {
         OutlinedTextField(
-            value = languages[selectedCode] ?: TranslationLanguages.displayName(selectedCode),
+            value = languages[selectedCode]?.let { "$it ($selectedCode)" } ?: selectedCode,
             onValueChange = {},
             readOnly = true,
             label = { Text(label) },
@@ -99,7 +99,7 @@ private fun LocaleDropdown(
         ) {
             languages.forEach { (code, name) ->
                 DropdownMenuItem(
-                    text = { Text(name) },
+                    text = { Text("$name ($code)") },
                     onClick = {
                         onSelected(code)
                         expanded = false

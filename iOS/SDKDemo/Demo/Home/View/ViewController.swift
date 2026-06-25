@@ -326,6 +326,7 @@ final class ViewController: UIViewController {
         navigationController?.navigationBar.scrollEdgeAppearance = appearance
         navigationController?.navigationBar.compactAppearance = appearance
         navigationController?.navigationBar.tintColor = DemoTheme.primaryLight
+        // 录音测试入口依赖 SDK 源仓库内部的 AudioTestController(位于 Demo 目录之外),samples 工程不包含该工具,故移除该入口。
         navigationItem.rightBarButtonItem = UIBarButtonItem(customView: makeNavigationButton(title: "设置",
                                                                                               action: #selector(onOpenSettings)))
     }

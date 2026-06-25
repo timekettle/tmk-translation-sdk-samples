@@ -1,4 +1,6 @@
 package co.timekettle.translation.sample
+import co.timekettle.translation.TmkTranslationChannel
+import co.timekettle.translation.TmkTranslationSDK
 
 import android.Manifest
 import android.app.Application
@@ -11,13 +13,14 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import co.timekettle.translation.Cancelable
-import co.timekettle.translation.TmkTranslationChannel
-import co.timekettle.translation.TmkTranslationSDK
 import co.timekettle.offlinesdk.vad.VadDetector
+import co.timekettle.translation.config.TmkCreateChannelOptions
 import co.timekettle.translation.config.TmkTransChannelConfig
 import co.timekettle.translation.config.TmkTransGlobalConfig
+import co.timekettle.translation.config.TmkTranslationRoomConfig
 import co.timekettle.translation.core.AbstractChannelEngine
 import co.timekettle.translation.enums.Scenario
+import co.timekettle.translation.enums.TmkOnlineTranslateEngine
 import co.timekettle.translation.enums.TranslationMode
 import co.timekettle.translation.lingcast.common.enums.TransModeType
 import co.timekettle.translation.listener.ActionCallback
@@ -25,8 +28,6 @@ import co.timekettle.translation.listener.AuthCallback
 import co.timekettle.translation.listener.CreateChannelCallback
 import co.timekettle.translation.listener.CreateRoomCallback
 import co.timekettle.translation.listener.TmkTranslationListener
-import co.timekettle.translation.model.BubbleRowData
-import co.timekettle.translation.model.OnlineBubbleManager
 import co.timekettle.translation.model.Result
 import co.timekettle.translation.model.SpeakerChannel
 import co.timekettle.translation.model.SpeakerGender
@@ -39,7 +40,6 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.io.InputStream
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 
@@ -61,8 +61,10 @@ class Online1v1ViewModel @Inject constructor(
     private data class TtsFrame(val data: ByteArray, val channelCount: Int)
 
     private var channel: TmkTranslationChannel? = null
-    private var speakerCancelable: Cancelable? = null
     private var room: TmkTranslationRoom? = null
+    private var roomCancelable: Cancelable? = null
+    private var channelCancelable: Cancelable? = null
+    private var speakerCancelable: Cancelable? = null
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
     private var audioTrackChannelCount: Int = 0
@@ -74,14 +76,18 @@ class Online1v1ViewModel @Inject constructor(
     @Volatile private var isTtsPlayerRunning = false
     private var leftVadDetector: VadDetector? = null
     private var rightVadDetector: VadDetector? = null
-    private var assetPcmStream: InputStream? = null
     @Volatile private var isRecording = false
     @Volatile private var released = false
     private val pageSessionId = AtomicInteger(0)
     private val isPreparingChannel = java.util.concurrent.atomic.AtomicBoolean(false)
     private var recordingThread: Thread? = null
-    private val bubbleManager = OnlineBubbleManager()
+    private val bubbleAssembler = DemoConversationBubbleAssembler()
+    /** 当前应高亮的 session_id（源文蓝色），由 online_tts_state.is_end 控制。 */
+    private val blueSessions = mutableSetOf<String>()
+    /** 当前应高亮的 chunk_id（译文蓝色），由 online_tts_state.is_end 控制。 */
+    private val blueChunks = mutableSetOf<String>()
     private val networkEventPolicy = DemoOnlineNetworkEventPolicy()
+
     private val idleChannelSnapshot = TmkTranslationChannelStateSnapshot(
         state = TmkTranslationChannelState.IDLE,
         reason = TmkTranslationChannelStateReason.NONE,
@@ -99,12 +105,16 @@ class Online1v1ViewModel @Inject constructor(
     val isChannelReady: StateFlow<Boolean> = _isChannelReady.asStateFlow()
     private val _isLocaleUpdating = MutableStateFlow(false)
     val isLocaleUpdating: StateFlow<Boolean> = _isLocaleUpdating.asStateFlow()
+    private val _isTranslateEngineUpdating = MutableStateFlow(false)
+    val isTranslateEngineUpdating: StateFlow<Boolean> = _isTranslateEngineUpdating.asStateFlow()
+    private val _isScenarioUpdating = MutableStateFlow(false)
+    val isScenarioUpdating: StateFlow<Boolean> = _isScenarioUpdating.asStateFlow()
     private val _isStarting = MutableStateFlow(false)
     val isStarting: StateFlow<Boolean> = _isStarting.asStateFlow()
     private val _logMessages = MutableStateFlow<List<String>>(emptyList())
     val logMessages: StateFlow<List<String>> = _logMessages.asStateFlow()
-    private val _bubbles = MutableStateFlow<List<BubbleRowData>>(emptyList())
-    val bubbles: StateFlow<List<BubbleRowData>> = _bubbles.asStateFlow()
+    private val _bubbles = MutableStateFlow<List<DemoConversationBubbleSnapshot>>(emptyList())
+    val bubbles: StateFlow<List<DemoConversationBubbleSnapshot>> = _bubbles.asStateFlow()
     private val _statusText = MutableStateFlow("初始化中...")
     val statusText: StateFlow<String> = _statusText.asStateFlow()
     private val _remoteCloseRoomPromptVisible = MutableStateFlow(false)
@@ -127,6 +137,10 @@ class Online1v1ViewModel @Inject constructor(
     val leftSpeakerGender: StateFlow<SpeakerGender> = _leftSpeakerGender.asStateFlow()
     private val _rightSpeakerGender = MutableStateFlow(SpeakerGender.FEMALE)
     val rightSpeakerGender: StateFlow<SpeakerGender> = _rightSpeakerGender.asStateFlow()
+    private val _onlineTranslateEngine = MutableStateFlow(TmkOnlineTranslateEngine.FAST)
+    val onlineTranslateEngine: StateFlow<TmkOnlineTranslateEngine> = _onlineTranslateEngine.asStateFlow()
+    private val _roomScenarioOption = MutableStateFlow(OnlineRoomScenarioOption.defaultOption)
+    val roomScenarioOption: StateFlow<OnlineRoomScenarioOption> = _roomScenarioOption.asStateFlow()
     private var hasLockedLanguages = false
 
     fun setLanguagesIfNeeded(s: String, t: String) {
@@ -148,6 +162,10 @@ class Online1v1ViewModel @Inject constructor(
         }
     }
 
+    private fun refreshChannelReadyFromState() {
+        _isChannelReady.value = channel != null && isSdkChannelReady()
+    }
+
     private fun canRetrySdkChannel(): Boolean {
         val snapshot = _channelState.value
         return snapshot.state == TmkTranslationChannelState.FAILED && snapshot.isRecoverable
@@ -160,33 +178,36 @@ class Online1v1ViewModel @Inject constructor(
             TmkTranslationChannelState.RECONNECTING -> true
             else -> false
         }
-        _isChannelReady.value = when (snapshot.state) {
-            TmkTranslationChannelState.RUNNING,
-            TmkTranslationChannelState.DEGRADED -> true
-            else -> false
-        }
+        refreshChannelReadyFromState()
+        applyRuntimeAction(DemoConversationRuntimePolicy.action(snapshot))
 
         when (snapshot.state) {
-            TmkTranslationChannelState.STARTING -> _statusText.value = "通道连接中..."
-            TmkTranslationChannelState.RUNNING -> {
-                if (!_isStarted.value) _statusText.value = "通道已连接，可以开始收听"
-            }
-            TmkTranslationChannelState.RECONNECTING -> _statusText.value = "通道重连中..."
-            TmkTranslationChannelState.DEGRADED -> _statusText.value = "通道能力受损，仍可继续收听"
             TmkTranslationChannelState.STOPPING -> {
                 if (_isStarted.value) stopListening()
-                _statusText.value = "通道停止中..."
             }
             TmkTranslationChannelState.STOPPED -> {
                 if (_isStarted.value) stopListening()
-                if (!_remoteCloseRoomPromptVisible.value) _statusText.value = "通道已停止"
             }
             TmkTranslationChannelState.FAILED -> {
                 if (_isStarted.value) stopListening()
-                _statusText.value = "通道异常: ${snapshot.message}"
                 showConversationErrorPrompt(OnlineConversationErrorPrompts.fromSnapshot(snapshot))
             }
-            TmkTranslationChannelState.IDLE -> Unit
+            else -> Unit
+        }
+    }
+
+    private fun applyRuntimeAction(action: DemoConversationRuntimeAction) {
+        when (action) {
+            DemoConversationRuntimeAction.None,
+            DemoConversationRuntimeAction.Ignore -> Unit
+            is DemoConversationRuntimeAction.Status -> {
+                if (action.text == "通道未启动") return
+                if (action.text == "通道已停止" && _remoteCloseRoomPromptVisible.value) return
+                if (_isStarted.value && action.text == "在线通道已就绪，点击“开始收听”开始采集") return
+                _statusText.value = action.text
+            }
+            is DemoConversationRuntimeAction.WeakNetwork -> _statusText.value = action.text
+            is DemoConversationRuntimeAction.Reconnecting -> _statusText.value = action.text
         }
     }
 
@@ -200,13 +221,35 @@ class Online1v1ViewModel @Inject constructor(
         _logMessages.value = listOf(msg) + _logMessages.value.take(99)
     }
 
-    private fun publishBubbles() { _bubbles.value = bubbleManager.snapshot() }
+    private fun publishBubbles() {
+        _bubbles.value = bubbleAssembler.snapshotWithSegments().map { snapshot ->
+            DemoConversationHighlighter.applyHighlight(snapshot, blueSessions, blueChunks)
+        }
+    }
 
+    /**
+     * 收到 online_tts_state：按 is_end 着色（false→蓝，true→默认）。
+     * 源文按 session_id 命中、译文按 chunk_id 命中，随后重渲染所有气泡。
+     */
+    private fun applyTtsHighlight(args: Any?) {
+        val result = args as? Result<*> ?: return
+        val isEnd = (result.extraData?.get("is_end") as? Boolean) ?: result.isLast
+        val sessionId = result.sessionId.takeIf { it.isNotBlank() }
+        val chunkId = result.extraData?.get("chunk_id")?.toString()?.takeIf { it.isNotBlank() }
+        if (isEnd) {
+            sessionId?.let { blueSessions.remove(it) }
+            chunkId?.let { blueChunks.remove(it) }
+        } else {
+            sessionId?.let { blueSessions.add(it) }
+            chunkId?.let { blueChunks.add(it) }
+        }
+        publishBubbles()
+    }
 
     fun initSDK() {
         try {
             if (!_isInitialized.value) {
-                TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig())
+                TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig(application))
                 _isInitialized.value = true
                 _initErrorMessage.value = null
                 addLog("SDK 初始化完成")
@@ -268,63 +311,103 @@ class Online1v1ViewModel @Inject constructor(
         addLog("创建在线 1v1 翻译通道...")
         _statusText.value = "正在创建房间..."
 
-        TmkTranslationSDK.createTmkTranslationRoom(object : CreateRoomCallback {
+        roomCancelable?.cancel()
+        roomCancelable = TmkTranslationSDK.createTmkTranslationRoom(buildRoomConfig(), object : CreateRoomCallback {
             override fun onSuccess(room: TmkTranslationRoom) {
-                if (!isActiveSession(sessionId)) { isPreparingChannel.set(false); return }
+                roomCancelable = null
+                if (!isActiveSession(sessionId)) {
+                    TmkTranslationSDK.releaseChannel()
+                    isPreparingChannel.set(false)
+                    return
+                }
                 this@Online1v1ViewModel.room = room
                 _currentRoomNo.value = room.roomId
                 _statusText.value = "房间已创建，正在创建通道..."
                 addLog("创建房间成功: ${room.roomId}")
 
-                val channelConfig = TmkTransChannelConfig.Builder()
-                    .setRoom(room)
-                    .setMode(TranslationMode.ONLINE)
-                    .setScenario(Scenario.ONE_TO_ONE)
-                    .setTransModeType(TransModeType.ONE_TO_ONE)
-                    // 对齐 iOS Demo：在线一对一左声道是目标语言侧，右声道是源语言/麦克风侧。
-                    .setSourceLang(_targetLang.value)
-                    .setTargetLang(_sourceLang.value)
-                    .setSpeakers(currentSpeakers())
-                    .setSampleRate(SAMPLE_RATE)
-                    .setChannelNum(2)
-                    .build()
+                val channelConfig = buildOnlineChannelConfig(room)
 
                 addLog("left=${_targetLang.value} right=${_sourceLang.value}")
 
-                TmkTranslationSDK.createTranslationChannel(
+                channelCancelable?.cancel()
+                channelCancelable = TmkTranslationSDK.createTranslationChannel(
                     application,
                     channelConfig,
                     translationListener,
                     object : CreateChannelCallback {
                         override fun onSuccess(ch: TmkTranslationChannel) {
+                            channelCancelable = null
                             if (!isActiveSession(sessionId)) {
-                                ch.stop(); ch.destroy()
+                                TmkTranslationSDK.releaseChannel()
                                 isPreparingChannel.set(false)
                                 return
                             }
                             channel = ch
+                            refreshChannelReadyFromState()
                             addLog("创建在线 1v1 Channel 成功")
                             isPreparingChannel.set(false)
                             addLog("在线 1v1 Channel 已就绪")
                         }
 
                         override fun onError(errorId: Int, e: Exception) {
+                            channelCancelable = null
                             isPreparingChannel.set(false)
                             if (!isActiveSession(sessionId)) return
                             addLog("创建 Channel 失败: [$errorId] ${e.message}")
                             _statusText.value = "通道启动失败: ${e.message}"
                         }
-                    }
+                    },
+                    TmkCreateChannelOptions.defaultConfig()
                 )
             }
 
             override fun onError(errorId: Int, e: Exception) {
+                roomCancelable = null
                 isPreparingChannel.set(false)
                 if (!isActiveSession(sessionId)) return
                 addLog("创建房间失败: [$errorId] ${e.message}")
                 _statusText.value = "房间创建失败: ${e.message}"
             }
         })
+    }
+
+    private fun buildRoomConfig(): TmkTranslationRoomConfig {
+        val channelLanguages = OnlineOneToOneLanguageMapping.fromDemoSelection(
+            sourceLang = _sourceLang.value,
+            targetLang = _targetLang.value,
+        )
+        return TmkTranslationRoomConfig.Builder()
+            .setScenario(Scenario.ONE_TO_ONE)
+            // SDK 建房参数按 left/right 写入;Demo 业务语义固定为 source=right、target=left。
+            .setSourceLang(channelLanguages.leftLang)
+            .setTargetLang(channelLanguages.rightLang)
+            .setSpeakers(currentSpeakers())
+            .setOnlineTranslateEngine(_onlineTranslateEngine.value)
+            .setRoomScenario(_roomScenarioOption.value.roomScenario)
+            .build()
+    }
+
+    private fun buildOnlineChannelConfig(room: TmkTranslationRoom?): TmkTransChannelConfig {
+        val channelLanguages = OnlineOneToOneLanguageMapping.fromDemoSelection(
+            sourceLang = _sourceLang.value,
+            targetLang = _targetLang.value,
+        )
+        val builder = TmkTransChannelConfig.Builder()
+            .setMode(TranslationMode.ONLINE)
+            .setScenario(Scenario.ONE_TO_ONE)
+            .setTransModeType(TransModeType.ONE_TO_ONE)
+            // SDK 建房参数按 left/right 写入；Demo 业务语义固定为 source=right、target=left。
+            .setSourceLang(channelLanguages.leftLang)
+            .setTargetLang(channelLanguages.rightLang)
+            .setSpeakers(currentSpeakers())
+            .setOnlineTranslateEngine(_onlineTranslateEngine.value)
+            .setRoomScenario(_roomScenarioOption.value.roomScenario)
+            .setSampleRate(SAMPLE_RATE)
+            .setChannelNum(2)
+        if (room != null) {
+            builder.setRoom(room)
+        }
+        return builder.build()
     }
 
     fun updateRoomLocale(sourceLang: String, targetLang: String) {
@@ -361,6 +444,72 @@ class Online1v1ViewModel @Inject constructor(
                     _isLocaleUpdating.value = false
                     addLog("语言切换失败: [$errorId] ${e.message}")
                     _statusText.value = "语言切换失败: ${e.message}"
+                }
+            }
+        )
+    }
+
+    fun updateTranslateEngine(engine: TmkOnlineTranslateEngine) {
+        val sessionId = pageSessionId.get()
+        val currentRoom = room
+        if (currentRoom == null || channel == null || !isSdkChannelReady()) {
+            _onlineTranslateEngine.value = engine
+            addLog("翻译引擎已设置为 ${engine.name}，将在创建房间时生效")
+            _statusText.value = "翻译引擎已切换，将在创建房间时生效"
+            return
+        }
+        if (_isTranslateEngineUpdating.value) return
+        _isTranslateEngineUpdating.value = true
+        _statusText.value = "正在切换翻译引擎..."
+        currentRoom.updateTranslateEngine(
+            engine = engine,
+            callback = object : ActionCallback {
+                override fun onSuccess(result: Result<Unit>) {
+                    if (!isActiveSession(sessionId)) return
+                    _onlineTranslateEngine.value = engine
+                    _isTranslateEngineUpdating.value = false
+                    addLog("翻译引擎切换成功: ${engine.name}(${engine.value})")
+                    _statusText.value = "翻译引擎已切换，下一句话生效"
+                }
+
+                override fun onError(errorId: Int, e: Exception) {
+                    if (!isActiveSession(sessionId)) return
+                    _isTranslateEngineUpdating.value = false
+                    addLog("翻译引擎切换失败: [$errorId] ${e.message}")
+                    _statusText.value = "翻译引擎切换失败: ${e.message}"
+                }
+            }
+        )
+    }
+
+    fun updateRoomScenario(option: OnlineRoomScenarioOption) {
+        val sessionId = pageSessionId.get()
+        val currentRoom = room
+        if (currentRoom == null) {
+            _roomScenarioOption.value = option
+            addLog("房间能力已设置为${option.title}(${option.roomScenario.value})，将在创建房间时生效")
+            _statusText.value = "房间能力已切换为${option.title}，将在创建房间时生效"
+            return
+        }
+        if (_isScenarioUpdating.value) return
+        _isScenarioUpdating.value = true
+        _statusText.value = "正在切换房间能力..."
+        currentRoom.updateScenario(
+            scenario = option.roomScenario,
+            callback = object : ActionCallback {
+                override fun onSuccess(result: Result<Unit>) {
+                    if (!isActiveSession(sessionId)) return
+                    _roomScenarioOption.value = option
+                    _isScenarioUpdating.value = false
+                    addLog("房间能力切换成功: ${option.title}(${option.roomScenario.value})")
+                    _statusText.value = "房间能力已切换为${option.title}，下一句话生效"
+                }
+
+                override fun onError(errorId: Int, e: Exception) {
+                    if (!isActiveSession(sessionId)) return
+                    _isScenarioUpdating.value = false
+                    addLog("房间能力切换失败: [$errorId] ${e.message}")
+                    _statusText.value = "房间能力切换失败: ${e.message}"
                 }
             }
         )
@@ -431,13 +580,12 @@ class Online1v1ViewModel @Inject constructor(
             r: co.timekettle.translation.model.Result<String>?,
             isFinal: Boolean
         ) {
+            Log.d(TAG, DemoTmkResultLogFormatter.makeLine("Online1V1", "ASR", r, isFinal))
             val text = r?.data ?: ""
             val ch = normalizeChannel(r?.extraData?.get("channel"))
-            val bid = bubbleManager.extractBubbleId(r)
-            val sid = r?.sessionId ?: ""
             val (src, dst) = languagePairForChannel(ch)
 
-            bubbleManager.upsertSource(sid, bid, src, dst, text, isFinal, channel = ch)
+            DemoConversationEventAdapter.makeRecognizedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
 
             if (!isFinal) return
@@ -450,13 +598,12 @@ class Online1v1ViewModel @Inject constructor(
             r: co.timekettle.translation.model.Result<String>?,
             isFinal: Boolean
         ) {
+            Log.d(TAG, DemoTmkResultLogFormatter.makeLine("Online1V1", "MT", r, isFinal))
             val text = r?.data ?: ""
             val ch = normalizeChannel(r?.extraData?.get("channel"))
-            val bid = bubbleManager.extractBubbleId(r)
-            val sid = r?.sessionId ?: ""
             val (src, dst) = languagePairForChannel(ch)
 
-            bubbleManager.upsertTranslation(sid, bid, src, dst, text, isFinal, channel = ch)
+            DemoConversationEventAdapter.makeTranslatedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
 
             if (!isFinal) return
@@ -499,7 +646,21 @@ class Online1v1ViewModel @Inject constructor(
             }
             networkEventPolicy.statusForEvent(eventName, args)?.let { status ->
                 addLog("网络事件提示: $eventName $status")
-                _statusText.value = status
+                applyRuntimeAction(DemoConversationRuntimeAction.WeakNetwork(status))
+                return
+            }
+            if (eventName == "online_bubble_end") {
+                val result = args as? co.timekettle.translation.model.Result<*> ?: return
+                val bubbleId = result.bubbleId.takeIf { it.isNotBlank() }
+                    ?: result.extraData?.get("bubble_id")?.toString()?.takeIf { it.isNotBlank() }
+                    ?: return
+                val affectedRows = bubbleAssembler.markBubbleEnded(bubbleId)
+                Log.d(TAG, DemoTmkResultLogFormatter.makeBubbleEndLine("Online1V1", result, affectedRows.size))
+                publishBubbles()
+                return
+            }
+            if (eventName == "online_tts_state") {
+                applyTtsHighlight(args)
                 return
             }
         }
@@ -533,7 +694,9 @@ class Online1v1ViewModel @Inject constructor(
     }
 
     private fun clearConversation() {
-        bubbleManager.clear()
+        bubbleAssembler.clear()
+        blueSessions.clear()
+        blueChunks.clear()
         _bubbles.value = emptyList()
     }
 
@@ -552,15 +715,18 @@ class Online1v1ViewModel @Inject constructor(
         isRecording = true
         audioRecord?.startRecording()
 
-        assetPcmStream = application.assets.open("en_simple.pcm")
         addLog("双声道推流 (左:资产PCM, 右:麦克风)")
         _captureSampleRate.value = SAMPLE_RATE
         _captureChannels.value = 2
 
         rightVadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
             setCallback(object : VadDetector.Callback {
-                override fun onVadStart() { addLog("VAD R → 开始说话") }
-                override fun onVadEnd() { addLog("VAD R → 停止说话") }
+                override fun onVadStart() {
+                    addLog("VAD R → 开始说话")
+                }
+                override fun onVadEnd() {
+                    addLog("VAD R → 停止说话")
+                }
             })
             init()
         }
@@ -571,19 +737,11 @@ class Online1v1ViewModel @Inject constructor(
             val leftBuf = ByteArray(bytesPerCh)
             val rightBuf = ByteArray(bytesPerCh)
             val stereoBuf = ByteArray(bytesPerCh * 2)
+            val leftLoopBuffer = DemoLocalAudioLoopBuffer(readDemoPcmAsset("en_simple.pcm"))
 
             while (isRecording && isActiveSession(sessionId)) {
-                // 对齐 iOS Demo：左声道固定资产 PCM，右声道麦克风。
-                var lo = 0
-                while (lo < bytesPerCh && isRecording) {
-                    val r = assetPcmStream?.read(leftBuf, lo, bytesPerCh - lo) ?: -1
-                    if (r == -1) {
-                        assetPcmStream?.close()
-                        assetPcmStream = application.assets.open("en_simple.pcm")
-                    } else if (r > 0) {
-                        lo += r
-                    }
-                }
+                // 对齐 iOS Demo：左声道资产 PCM 播完后先推 3 秒静音，再从头循环。
+                leftLoopBuffer.fillNextLoopChunk(leftBuf)
 
                 var ro = 0
                 while (ro < bytesPerCh && isRecording) {
@@ -591,7 +749,7 @@ class Online1v1ViewModel @Inject constructor(
                     if (r > 0) ro += r
                 }
 
-                // 对齐 iOS Demo：在线一对一只用右声道麦克风触发 VAD。
+                // 对齐 iOS Demo：在线一对一只用右声道麦克风做 VAD 检测。
                 rightVadDetector?.pushAudioBytes(rightBuf)
 
                 // 交织成立体声
@@ -609,6 +767,15 @@ class Online1v1ViewModel @Inject constructor(
             }
         }, "$TAG-Recorder").apply { start() }
         return true
+    }
+
+    private fun readDemoPcmAsset(fileName: String): ByteArray? {
+        return try {
+            application.assets.open(fileName).use { it.readBytes() }
+        } catch (e: Exception) {
+            addLog("读取资产PCM失败: ${e.message}")
+            null
+        }
     }
 
     private fun playTtsAudio(data: ByteArray, channelCount: Int) {
@@ -772,8 +939,6 @@ class Online1v1ViewModel @Inject constructor(
         recordingThread?.interrupt()
         try { recordingThread?.join(300) } catch (_: InterruptedException) {}
         recordingThread = null
-        try { assetPcmStream?.close() } catch (_: Exception) {}
-        assetPcmStream = null
         _captureSampleRate.value = 0
         _captureChannels.value = 0
         _playbackChannels.value = 0
@@ -784,16 +949,21 @@ class Online1v1ViewModel @Inject constructor(
         released = true
         nextPageSession()
         isPreparingChannel.set(false)
-        stopAudioCapture()
+        roomCancelable?.cancel()
+        roomCancelable = null
+        channelCancelable?.cancel()
+        channelCancelable = null
         speakerCancelable?.cancel()
         speakerCancelable = null
+        stopAudioCapture()
         addLog("录音已停止")
 
-        channel?.destroy()
+        TmkTranslationSDK.releaseChannel()
         channel = null
         room = null
         _currentRoomNo.value = "-"
         _isLocaleUpdating.value = false
+        _isTranslateEngineUpdating.value = false
         _isStarted.value = false
         _isStarting.value = false
         _isChannelReady.value = false

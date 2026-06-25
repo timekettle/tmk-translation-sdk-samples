@@ -8,7 +8,9 @@ target 'SDKDemo' do
   use_frameworks!
 
   # Pods for SDKDemo
-  pod 'TmkTranslationSDK', '1.1.2'
+  # 预发布(rc 渠道)版本的 podspec 只提交到 spec 仓库的 rc 分支,未推送到 trunk/CDN,
+  # 故通过该渠道分支上 podspec 的 raw URL 直接引用。
+  pod 'TmkTranslationSDK', :podspec => 'https://raw.githubusercontent.com/timekettle/TmkTranslationSDK-iOS/rc/Specs/TmkTranslationSDK/1.2.0-rc1/TmkTranslationSDK.podspec'
   pod 'SnapKit'
 
   target 'SDKDemoTests' do

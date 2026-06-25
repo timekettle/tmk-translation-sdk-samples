@@ -28,16 +28,33 @@ final class OneToOneViewModel: NSObject {
     private var rows: [OneToOneRowViewData] = []
     private var rowIndexMap: [String: Int] = [:]
     private var bubbleLaneMap: [String: OneToOneRowViewData.Lane] = [:]
+    /// raw sessionId → 所在行 rowKey（源文按 session 命中）。
+    private var rawSessionRowKey: [Int: String] = [:]
+    /// raw chunkId → 所在行 rowKey（译文按 chunk 命中）。
+    private var rawChunkRowKey: [String: String] = [:]
+    /// 当前应高亮的 session_id（源文蓝色），由 online_tts_state.is_end 控制。
+    private var blueSessions: Set<Int> = []
+    /// 当前应高亮的 chunk_id（译文蓝色），由 online_tts_state.is_end 控制。
+    private var blueChunks: Set<String> = []
     private let bubbleAssembler = DemoConversationBubbleAssembler()
     private var pendingRowsPublishWorkItem: DispatchWorkItem?
     private var lastPublishedRows: [OneToOneRowViewData] = []
 
     private var targetPlaybackUIDs: Set<Int> = []
     private var activePlaybackUID: Int?
+    private var playbackLaneByUID: [Int: OneToOneRowViewData.Lane] = [:]
     private var selectedSourceLang = "zh-CN"
     private var selectedTargetLang = "en-US"
+    private var selectedRightLang: String { selectedSourceLang }
+    private var selectedLeftLang: String { selectedTargetLang }
     private var selectedLeftSpeakerGender: TmkSpeakerGender = .male
     private var selectedRightSpeakerGender: TmkSpeakerGender = .female
+    private var selectedTranslateEngine: TmkOnlineTranslateEngine = .fast
+    private var selectedScenarioOption: OneToOneScenarioOption = .defaultOption
+    private var selectedChannelModeConfiguration: OneToOneChannelModeConfiguration = OneToOneStandardChannelModeConfiguration()
+    private var selectedDialogConversationAudioMode: TmkDialogConversationAudioMode {
+        selectedChannelModeConfiguration.audioMode
+    }
     private var supportedLanguages: Set<String> = []
     private var isAuthVerified = false
 
@@ -60,9 +77,7 @@ final class OneToOneViewModel: NSObject {
             ?? Bundle.main.path(forResource: "right_audio", ofType: "pcm") else { return nil }
         return try? Data(contentsOf: URL(fileURLWithPath: path))
     }()
-    private var localPCMOffset: Int = 0
-    private var localPCMLoopResumeAt: CFAbsoluteTime?
-    private let localAudioLoopRestartDelay: TimeInterval = 2
+    private lazy var leftFileAudioLoopBuffer = OneToOneLocalAudioLoopBuffer(pcmData: localPCMData)
     private let networkEventPolicy = DemoOnlineNetworkEventPolicy()
 
     var currentLeftSpeakerGender: TmkSpeakerGender {
@@ -87,6 +102,10 @@ final class OneToOneViewModel: NSObject {
             $0.isCaptureEnabled = self.isCaptureEnabled
             $0.sourceLanguage = self.selectedSourceLang
             $0.targetLanguage = self.selectedTargetLang
+            $0.translateEngine = self.selectedTranslateEngine
+            $0.scenarioOption = self.selectedScenarioOption
+            $0.dialogConversationAudioMode = self.selectedDialogConversationAudioMode
+            $0.configuredChannels = self.selectedChannelModeConfiguration.pcmChannels
         }
         startOnlineListening()
     }
@@ -111,31 +130,34 @@ final class OneToOneViewModel: NSObject {
                                                                framesPerBuffer: 1024))
         }
         guard let voiceIO else { return }
+        // VAD 检测依赖 SDK 源仓库内部组件，samples 工程不引入该组件，
+        // 这里保留 resolveVADState 钩子但返回默认 .silence，输入回调照常运行。
+        voiceIO.resolveVADState = { _, _ in .silence }
+
+        configureInterruptionHandling(for: voiceIO)
 
         do {
-            try TmkVoiceProcessingIO.configureAudioSession(sampleRate: 16000,
-                                                           framesPerBuffer: 1024,
-                                                           mode: .voiceChat,
-                                                           useSpeaker: true)
+            try voiceIO.activateAudioSession(sampleRate: 16000,
+                                             framesPerBuffer: 1024,
+                                             mode: .voiceChat,
+                                             useSpeaker: true)
         } catch {
             updateStatus("音频会话配置失败：\(error.localizedDescription)")
             return
         }
 
-        voiceIO.onInputPCM = { [weak self, weak channel] data, format, _ in
+        voiceIO.onInputPCM = { [weak self, weak channel] data, format, vadState in
             guard let self else { return }
+            _ = vadState
             let micChannels = Int(format.mChannelsPerFrame)
             let micSampleRate = Int(format.mSampleRate)
-            self.updateCaptureAudioInfo(sampleRate: micSampleRate, channels: 2)
-            _ = micChannels
-            // VoiceProcessingIO 采集配置为单声道，直接使用输入数据作为左声道。
-            //右边推的源语言，则SDK返回的音频中，源语言的翻译结果会在右声道返回。
+            self.updateCaptureAudioInfo(sampleRate: micSampleRate, channels: micChannels)
+            // VoiceProcessingIO 采集配置为单声道，当前 Demo 作为 right 路输入。
             let recordData = data.count.isMultiple(of: 2) ? data : Data(data.prefix(data.count - 1))
             guard recordData.isEmpty == false else { return }
-            let fileData = self.nextRightAudioChunk(expectedLength: recordData.count)
-            let mixed = TmkTranslationPCMTools.mixStereo16LE(left:fileData, right: recordData) ?? Data()
-            guard mixed.isEmpty == false else { return }
-            channel?.pushStreamAudioData(mixed, channelCount: 2, extraChunk: nil)
+            let fileChunk = self.nextLeftFileAudioChunk(expectedLength: recordData.count)
+            guard let channel else { return }
+            self.pushInputAudio(fileData: fileChunk.data, rightMicData: recordData, channel: channel)
         }
 
         voiceIO.requestRecordPermission { [weak self] granted in
@@ -169,12 +191,33 @@ final class OneToOneViewModel: NSObject {
         resetLocalPCMPlaybackState()
         setListeningActive(false)
         activePlaybackUID = nil
+        playbackLaneByUID.removeAll()
         updateStateOnMain {
             $0.canStopListening = false
             $0.canStartListening = self.channel != nil
             $0.canSharePCM = self.hasPCMData
         }
         updateStatus("收听已停止")
+    }
+
+    /// 配置采集中断/恢复事件处理：来电等中断结束后录音器会自动恢复，这里仅同步 UI 文案。
+    private func configureInterruptionHandling(for voiceIO: TmkVoiceProcessingIO) {
+        voiceIO.onInterruptionEvent = { [weak self] event in
+            guard let self else { return }
+            switch event {
+            case .interrupted:
+                self.updateStatus("通话中断，已暂停收听...")
+            case .resumed:
+                self.updateStatus("正在收听中...")
+            case .resumeFailed(let error):
+                self.updateStatus("恢复收听失败，请重试：\(error.localizedDescription)")
+                self.setListeningActive(false)
+                self.updateStateOnMain {
+                    $0.canStopListening = false
+                    $0.canStartListening = self.channel != nil
+                }
+            }
+        }
     }
 
     var currentPCMURLs: [URL] {
@@ -196,13 +239,14 @@ final class OneToOneViewModel: NSObject {
         stateLock.lock()
         playbackMode = mode
         stateLock.unlock()
+        voiceIO?.clearPlaybackBuffer()
         updateStateOnMain { $0.playbackMode = mode }
     }
 
     func fetchSupportedLanguages(
-        _ completion: @escaping (Result<TmkSupportedLanguagesResponse, TmkTranslationError>) -> Void
+        _ completion: @escaping (Result<TmkLocaleListResponse, TmkTranslationError>) -> Void
     ) {
-        _ = TmkTranslationSDK.shared.getSupportedLanguages(source: .online) { [weak self] result in
+        _ = TmkTranslationSDK.shared.getOnlineSupportedLanguages { [weak self] result in
             guard let self else {
                 completion(result)
                 return
@@ -290,10 +334,114 @@ final class OneToOneViewModel: NSObject {
             }
         }
     }
+
+    func updateTranslateEngine(_ translateEngine: TmkOnlineTranslateEngine) {
+        selectedTranslateEngine = translateEngine
+        updateStateOnMain {
+            $0.translateEngine = translateEngine
+        }
+        guard let room else {
+            updateStatus("翻译引擎已保存，将在在线房间创建时生效")
+            return
+        }
+        updateStatus("正在切换翻译引擎...")
+        _ = room.updateTranslateEngine(translateEngine) { [weak self] result in
+            switch result {
+            case .success:
+                self?.updateStatus("翻译引擎已切换，下一句话生效")
+            case .failure(let error):
+                self?.updateStatus("翻译引擎切换失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    func updateScenarioOption(_ option: OneToOneScenarioOption) {
+        guard selectedScenarioOption != option else { return }
+        guard let room else {
+            selectedScenarioOption = option
+            updateStateOnMain {
+                $0.scenarioOption = option
+            }
+            updateStatus("房间能力已切换为\(option.title)，将在下次创建房间后生效")
+            return
+        }
+        updateStatus("正在切换房间能力为\(option.title)...")
+        _ = room.updateScenario(option.roomScenario) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.selectedScenarioOption = option
+                self.updateStateOnMain {
+                    $0.scenarioOption = option
+                }
+                self.updateStatus("房间能力已切换为\(option.title)，下一句话生效")
+            case .failure(let error):
+                self.updateStatus("房间能力切换失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    func updateDialogConversationAudioMode(_ mode: TmkDialogConversationAudioMode) {
+        guard selectedDialogConversationAudioMode != mode else { return }
+        selectedChannelModeConfiguration = OneToOneChannelModeConfigurationFactory.make(mode: mode)
+        updateStateOnMain {
+            $0.dialogConversationAudioMode = mode
+            $0.configuredChannels = self.selectedChannelModeConfiguration.pcmChannels
+        }
+        recreateRoomAndChannel(statusText: "在线一对一通道模式已切换，重新创建通道中...")
+    }
+}
+
+enum DemoTmkResultLogFormatter {
+    static func makeLine(scene: String, stage: String, result: TmkResult<String>, isFinal: Bool) -> String {
+        "[\(scene)][\(stage)][TmkResult] channel=\(channel(from: result)) lane=\(lane(from: result)) sessionId=\(result.sessionId) bubbleId=\(bubbleId(from: result)) srcCode=\(result.srcCode) dstCode=\(result.dstCode) isLast=\(result.isLast) isFinal=\(isFinal) data=\(result.data) extraData=\(formatExtraData(result.extraData))"
+    }
+
+    static func makeBubbleEndLine(scene: String,
+                                  result: TmkResult<String>,
+                                  affectedSnapshots: [DemoConversationBubbleSnapshot]) -> String {
+        let affectedLanes = affectedSnapshots.map(\.lane.rawValue).sorted().joined(separator: ",")
+        return "[\(scene)][BubbleEnd][TmkResult] channel=\(channel(from: result)) lane=\(lane(from: result)) sessionId=\(result.sessionId) bubbleId=\(bubbleId(from: result)) srcCode=\(result.srcCode) dstCode=\(result.dstCode) isLast=\(result.isLast) data=\(result.data) affectedRows=\(affectedSnapshots.count) affectedLanes=\(affectedLanes.isEmpty ? "-" : affectedLanes) extraData=\(formatExtraData(result.extraData))"
+    }
+
+    private static func bubbleId(from result: TmkResult<String>) -> String {
+        if result.bubbleId.isEmpty == false {
+            return result.bubbleId
+        }
+        if let bubbleId = result.extraData["bubble_id"] as? String, bubbleId.isEmpty == false {
+            return bubbleId
+        }
+        if let bubbleId = result.extraData["bubbleId"] as? String, bubbleId.isEmpty == false {
+            return bubbleId
+        }
+        return "sid_\(result.sessionId)"
+    }
+
+    private static func channel(from result: TmkResult<String>) -> String {
+        if let channel = result.extraData["channel"] as? String, channel.isEmpty == false {
+            return channel
+        }
+        return "-"
+    }
+
+    private static func lane(from result: TmkResult<String>) -> String {
+        let channel = channel(from: result).lowercased()
+        if channel == "left" || channel == "right" {
+            return channel
+        }
+        return "-"
+    }
+
+    private static func formatExtraData(_ extraData: [String: Any]) -> String {
+        guard extraData.isEmpty == false else { return "{}" }
+        let pairs = extraData.keys.sorted().map { key in
+            "\(key)=\(String(describing: extraData[key] ?? "nil"))"
+        }
+        return "{\(pairs.joined(separator: ", "))}"
+    }
 }
 
 private extension OneToOneViewModel {
-
     func startOnlineListening() {
         TmkTranslationSDK.shared.verifyAuth { [weak self] result in
             guard let self else { return }
@@ -310,11 +458,16 @@ private extension OneToOneViewModel {
     }
 
     func createRoomAndChannel() {
-        room = TmkTranslationSDK.shared.createTmkTranslationRoom(sourceLang: selectedSourceLang,
-                                                                 targetLang: selectedTargetLang,
-                                                                 scenario: .toSpeech,
-                                                                 channelScenario: .oneToOne,
-                                                                 speakers: configuredSpeakers()) { [weak self] result in
+        let roomConfig = TmkTranslationRoomConfig(
+            sourceLang: selectedRightLang,
+            targetLang: selectedLeftLang,
+            scenario: selectedScenarioOption.roomScenario,
+            channelScenario: .oneToOne,
+            speakers: configuredSpeakers(),
+            translateEngine: selectedTranslateEngine,
+            dialogConversationAudioMode: selectedDialogConversationAudioMode
+        )
+        TmkTranslationSDK.shared.createTmkTranslationRoom(config: roomConfig) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let room):
@@ -332,11 +485,11 @@ private extension OneToOneViewModel {
             .setRoom(room)
             .setScenario(.oneToOne)
             .setMode(.online)
-            .setSourceLang(selectedSourceLang)
-            .setTargetLang(selectedTargetLang)
+            .setSourceLang(selectedRightLang)
+            .setTargetLang(selectedLeftLang)
             .setSpeakers(configuredSpeakers())
             .setPCMSampleRate(16_000)
-            .setPCMChannels(2)
+            .setPCMChannels(selectedChannelModeConfiguration.pcmChannels)
             .build()
 
         updateStateOnMain {
@@ -364,7 +517,6 @@ private extension OneToOneViewModel {
     func stopListeningIfNeeded() {
         guard hasStoppedListening == false else { return }
         hasStoppedListening = true
-        let closingRoom = room
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
@@ -373,24 +525,25 @@ private extension OneToOneViewModel {
         resetLocalPCMPlaybackState()
         voiceIO = nil
         isPCMRecordingEnabled = false
-        channel?.stop()
+        TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         room = nil
         activePlaybackUID = nil
+        targetPlaybackUIDs.removeAll()
+        playbackLaneByUID.removeAll()
         updateStatus("已停止收听")
         Self.logger.info("oneToOne channel stopped")
-        closeRoomIfNeeded(closingRoom)
     }
 
-    func recreateRoomAndChannel() {
-        let closingRoom = room
+    func recreateRoomAndChannel(statusText: String = "语言已切换，重新创建通道中...") {
         voiceIO?.stop()
         closeAllPCMFiles()
         resetLocalPCMPlaybackState()
         setListeningActive(false)
         activePlaybackUID = nil
         targetPlaybackUIDs.removeAll()
-        channel?.stop()
+        playbackLaneByUID.removeAll()
+        TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         room = nil
         hasStoppedListening = false
@@ -403,8 +556,7 @@ private extension OneToOneViewModel {
             $0.playbackChannels = 0
             $0.currentRoomNo = "-"
         }
-        updateStatus("语言已切换，重新创建通道中...")
-        closeRoomIfNeeded(closingRoom)
+        updateStatus(statusText)
         startOnlineListening()
     }
 
@@ -413,6 +565,7 @@ private extension OneToOneViewModel {
             selectedSourceLang = source
             activePlaybackUID = nil
             targetPlaybackUIDs.removeAll()
+            playbackLaneByUID.removeAll()
             cachedPlaybackChannels = -1
             updateStateOnMain {
                 $0.playbackChannels = 0
@@ -432,6 +585,7 @@ private extension OneToOneViewModel {
                 self.selectedSourceLang = source
                 self.activePlaybackUID = nil
                 self.targetPlaybackUIDs.removeAll()
+                self.playbackLaneByUID.removeAll()
                 self.cachedPlaybackChannels = -1
                 self.channel?.updateLanguages(sourceLang: source, targetLang: self.selectedTargetLang)
                 self.updateStateOnMain {
@@ -463,6 +617,19 @@ private extension OneToOneViewModel {
         ]
     }
 
+    func pushInputAudio(fileData: Data, rightMicData: Data, channel: TmkTranslationChannel) {
+        let pushPlans = selectedChannelModeConfiguration.makeInputAudioPushPlan(fileData: fileData,
+                                                                                rightMicData: rightMicData)
+        for plan in pushPlans {
+            switch plan.destination {
+            case .interleaved(let channelCount):
+                channel.pushStreamAudioData(plan.data, channelCount: channelCount, extraChunk: nil)
+            case .speaker(let speakerChannel):
+                channel.pushStreamAudioData(plan.data, speakerChannel: speakerChannel, extraChunk: nil)
+            }
+        }
+    }
+
     func updateStatus(_ text: String) {
         updateStateOnMain { $0.statusText = text }
     }
@@ -479,6 +646,10 @@ private extension OneToOneViewModel {
         rows.removeAll()
         rowIndexMap.removeAll()
         bubbleLaneMap.removeAll()
+        rawSessionRowKey.removeAll()
+        rawChunkRowKey.removeAll()
+        blueSessions.removeAll()
+        blueChunks.removeAll()
         bubbleAssembler.reset()
         lastPublishedRows.removeAll()
         pendingRowsPublishWorkItem?.cancel()
@@ -514,6 +685,7 @@ private extension OneToOneViewModel {
         DispatchQueue.main.async {
             let lane: OneToOneRowViewData.Lane = snapshot.lane == .right ? .right : .left
             let key = self.rowKey(bubbleId: snapshot.bubbleId, lane: lane)
+            self.indexSessions(of: snapshot, key: key)
             if let rowIndex = self.rowIndexMap[key], self.rows.indices.contains(rowIndex) {
                 var row = self.rows[rowIndex]
                 row.sessionId = snapshot.sessionId
@@ -521,6 +693,9 @@ private extension OneToOneViewModel {
                 row.targetLangCode = snapshot.targetLangCode
                 row.sourceText = snapshot.sourceText
                 row.translatedText = snapshot.translatedText
+                row.sourceSegments = self.highlightedSource(snapshot.sourceSegments)
+                row.translatedSegments = self.highlightedTranslated(snapshot.translatedSegments)
+                row.isBubbleEnded = snapshot.isBubbleEnded
                 self.rows[rowIndex] = row
                 self.rowMutation.send(.update(row: row, index: rowIndex, heightMayChange: true))
             } else {
@@ -530,13 +705,75 @@ private extension OneToOneViewModel {
                                               sourceLangCode: snapshot.sourceLangCode,
                                               targetLangCode: snapshot.targetLangCode,
                                               sourceText: snapshot.sourceText,
-                                              translatedText: snapshot.translatedText)
+                                              translatedText: snapshot.translatedText,
+                                              sourceSegments: self.highlightedSource(snapshot.sourceSegments),
+                                              translatedSegments: self.highlightedTranslated(snapshot.translatedSegments),
+                                              isBubbleEnded: snapshot.isBubbleEnded)
                 self.rows.append(row)
                 let rowIndex = self.rows.count - 1
                 self.rowIndexMap[key] = rowIndex
                 self.rowMutation.send(.insert(row: row, index: rowIndex))
             }
             self.trimRowsIfNeeded()
+            self.schedulePublishRows()
+        }
+    }
+
+    /// 源语言片段按 blueSessions（session_id）计算高亮。
+    func highlightedSource(_ segments: [DemoConversationDisplaySegment]) -> [DemoConversationDisplaySegment] {
+        segments.map { segment in
+            var copy = segment
+            copy.isHighlighted = blueSessions.isEmpty == false
+                && segment.rawSessionIds.isDisjoint(with: blueSessions) == false
+            return copy
+        }
+    }
+
+    /// 目标语言片段按 blueChunks（chunk_id）计算高亮。
+    func highlightedTranslated(_ segments: [DemoConversationDisplaySegment]) -> [DemoConversationDisplaySegment] {
+        segments.map { segment in
+            var copy = segment
+            copy.isHighlighted = blueChunks.isEmpty == false
+                && segment.rawChunkIds.isDisjoint(with: blueChunks) == false
+            return copy
+        }
+    }
+
+    /// 用快照里每段的 rawSessionIds / rawChunkIds 建立 → rowKey 映射，保证与行 key 完全一致。
+    func indexSessions(of snapshot: DemoConversationBubbleSnapshot, key: String) {
+        for segment in snapshot.sourceSegments + snapshot.translatedSegments {
+            for rawId in segment.rawSessionIds {
+                rawSessionRowKey[rawId] = key
+            }
+            for chunkId in segment.rawChunkIds {
+                rawChunkRowKey[chunkId] = key
+            }
+        }
+    }
+
+    /// 收到 online_tts_state：按 is_end 着色（false→蓝，true→默认）。
+    /// 源文按 session_id 命中，译文按 chunk_id 命中；重渲染命中的行。
+    func applyTTSHighlight(sessionId: Int, chunkId: String?, isEnd: Bool) {
+        DispatchQueue.main.async {
+            if isEnd {
+                self.blueSessions.remove(sessionId)
+                if let chunkId, chunkId.isEmpty == false { self.blueChunks.remove(chunkId) }
+            } else {
+                self.blueSessions.insert(sessionId)
+                if let chunkId, chunkId.isEmpty == false { self.blueChunks.insert(chunkId) }
+            }
+            var keys = Set<String>()
+            if let key = self.rawSessionRowKey[sessionId] { keys.insert(key) }
+            if let chunkId, let key = self.rawChunkRowKey[chunkId] { keys.insert(key) }
+            for key in keys {
+                guard let idx = self.rowIndexMap[key], self.rows.indices.contains(idx) else { continue }
+                var row = self.rows[idx]
+                row.sourceSegments = self.highlightedSource(row.sourceSegments)
+                row.translatedSegments = self.highlightedTranslated(row.translatedSegments)
+                guard row != self.rows[idx] else { continue }
+                self.rows[idx] = row
+                self.rowMutation.send(.update(row: row, index: idx, heightMayChange: false))
+            }
             self.schedulePublishRows()
         }
     }
@@ -555,6 +792,14 @@ private extension OneToOneViewModel {
         }
         rowIndexMap = newIndexMap
         rebuildBubbleLaneMap()
+        // 收敛 session/chunk 相关字典/集合到当前仍存在的行，避免无限增长。
+        let liveSegments = rows.flatMap { $0.sourceSegments + $0.translatedSegments }
+        let liveSessions = Set(liveSegments.flatMap { $0.rawSessionIds })
+        let liveChunks = Set(liveSegments.flatMap { $0.rawChunkIds })
+        rawSessionRowKey = rawSessionRowKey.filter { liveSessions.contains($0.key) }
+        rawChunkRowKey = rawChunkRowKey.filter { liveChunks.contains($0.key) }
+        blueSessions.formIntersection(liveSessions)
+        blueChunks.formIntersection(liveChunks)
     }
 
     func schedulePublishRows() {
@@ -640,7 +885,8 @@ private extension OneToOneViewModel {
                                      isFinal: event.isFinal,
                                      text: event.text,
                                      sourceLangCode: languagePair.source,
-                                     targetLangCode: languagePair.target)
+                                     targetLangCode: languagePair.target,
+                                     chunkId: event.chunkId)
     }
 
     func refreshTargetPlaybackUIDs(from room: TmkTranslationRoom) {
@@ -663,6 +909,30 @@ private extension OneToOneViewModel {
             .filter { isSelfUID($0) == false }
         targetPlaybackUIDs = Set(preferred.isEmpty ? nonSourceFallback : preferred)
         activePlaybackUID = targetPlaybackUIDs.first
+        playbackLaneByUID = makePlaybackLaneMap(from: dialog)
+    }
+
+    func makePlaybackLaneMap(from dialog: TmkTranslationRoomDialogResponse) -> [Int: OneToOneRowViewData.Lane] {
+        var laneByUID: [Int: OneToOneRowViewData.Lane] = [:]
+        for speaker in dialog.speakers {
+            guard let uid = Int(speaker.subscribeUid),
+                  let lane = parseLane(channel: speaker.channel.lowercased()) else {
+                continue
+            }
+            laneByUID[uid] = lane
+        }
+        if laneByUID.isEmpty == false {
+            return laneByUID
+        }
+        for item in dialog.translationList {
+            guard let uid = Int(item.subscribeUid) else { continue }
+            if item.locale.lowercased().hasPrefix(sourceLanguagePrefix()) {
+                laneByUID[uid] = .right
+            } else if item.locale.lowercased().hasPrefix(targetLanguagePrefix()) {
+                laneByUID[uid] = .left
+            }
+        }
+        return laneByUID
     }
 
     func sourceLanguagePrefix() -> String {
@@ -722,44 +992,11 @@ private extension OneToOneViewModel {
     }
 
     func resetLocalPCMPlaybackState() {
-        localPCMOffset = 0
-        localPCMLoopResumeAt = nil
+        leftFileAudioLoopBuffer.reset()
     }
 
-    func nextRightAudioChunk(expectedLength: Int) -> Data {
-        guard expectedLength > 0 else { return Data() }
-        guard let localPCM = localPCMData, localPCM.isEmpty == false else {
-            return Data(repeating: 0, count: expectedLength)
-        }
-        if let resumeAt = localPCMLoopResumeAt {
-            let now = CFAbsoluteTimeGetCurrent()
-            if now < resumeAt {
-                return Data(repeating: 0, count: expectedLength)
-            }
-            localPCMLoopResumeAt = nil
-            localPCMOffset = 0
-        }
-        var leftSlice = Data(capacity: expectedLength)
-        var remain = expectedLength
-        while remain > 0 {
-            guard localPCMOffset < localPCM.count else {
-                localPCMLoopResumeAt = CFAbsoluteTimeGetCurrent() + localAudioLoopRestartDelay
-                break
-            }
-            let available = min(remain, localPCM.count - localPCMOffset)
-            guard available > 0 else { break }
-            leftSlice.append(localPCM.subdata(in: localPCMOffset..<(localPCMOffset + available)))
-            localPCMOffset += available
-            remain -= available
-            if localPCMOffset >= localPCM.count {
-                localPCMLoopResumeAt = CFAbsoluteTimeGetCurrent() + localAudioLoopRestartDelay
-                break
-            }
-        }
-        if leftSlice.count < expectedLength {
-            leftSlice.append(Data(repeating: 0, count: expectedLength - leftSlice.count))
-        }
-        return leftSlice
+    func nextLeftFileAudioChunk(expectedLength: Int) -> OneToOneLocalAudioLoopChunk {
+        leftFileAudioLoopBuffer.nextLoopChunk(expectedLength: expectedLength)
     }
 
     func makeStereoFromMono(_ mono: Data) -> Data {
@@ -786,6 +1023,21 @@ private extension OneToOneViewModel {
         return stereo
     }
 
+    func audioUID(from result: TmkResult<String>) -> Int? {
+        let uidValue = result.extraData["uid"]
+        if let intValue = uidValue as? Int { return intValue }
+        if let uintValue = uidValue as? UInt { return Int(uintValue) }
+        if let strValue = uidValue as? String { return Int(strValue) }
+        return result.sessionId > 0 ? result.sessionId : nil
+    }
+
+    func audioRoute(from result: TmkResult<String>) -> TmkTranslatedAudioRoute? {
+        let routeValue = result.extraData["audio_route"]
+        if let route = routeValue as? TmkTranslatedAudioRoute { return route }
+        if let route = routeValue as? String { return TmkTranslatedAudioRoute(rawValue: route) }
+        return nil
+    }
+
     func setListeningActive(_ active: Bool) {
         stateLock.lock()
         isListeningActive = active
@@ -810,19 +1062,6 @@ private extension OneToOneViewModel {
         return isCaptureEnabled
     }
 
-
-    func closeRoomIfNeeded(_ room: TmkTranslationRoom?) {
-        guard let room else { return }
-        _ = room.closeRoom { result in
-            switch result {
-            case .success:
-                Self.logger.info("oneToOne close room success")
-            case .failure(let error):
-                Self.logger.error("oneToOne close room failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-    }
-
     func applyRuntimeAction(_ action: DemoConversationRuntimeAction) {
         switch action {
         case .none, .ignore:
@@ -832,20 +1071,19 @@ private extension OneToOneViewModel {
              .reconnecting(let text):
             updateStatus(text)
         case .prompt(let prompt):
-            stopConversationForPrompt(status: prompt.title, closeRoom: true)
+            stopConversationForPrompt(status: prompt.title)
             DispatchQueue.main.async { [weak self] in
                 self?.remoteCloseRoomPrompt.send(prompt)
             }
         }
     }
 
-    func stopConversationForPrompt(status: String, closeRoom: Bool) {
+    func stopConversationForPrompt(status: String) {
         guard hasStoppedListening == false else {
             updateStatus(status)
             return
         }
         hasStoppedListening = true
-        let closingRoom = closeRoom ? room : nil
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
@@ -854,11 +1092,12 @@ private extension OneToOneViewModel {
         resetLocalPCMPlaybackState()
         voiceIO = nil
         isPCMRecordingEnabled = false
-        channel?.stop()
+        TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         room = nil
         activePlaybackUID = nil
         targetPlaybackUIDs.removeAll()
+        playbackLaneByUID.removeAll()
         cachedCaptureSampleRate = -1
         cachedCaptureChannels = -1
         cachedPlaybackChannels = -1
@@ -872,13 +1111,13 @@ private extension OneToOneViewModel {
             $0.playbackChannels = 0
         }
         updateStatus(status)
-        closeRoomIfNeeded(closingRoom)
     }
 }
 
 extension OneToOneViewModel: TmkTranslationListener {
     func onRecognized(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
+        NSLog("%@", DemoTmkResultLogFormatter.makeLine(scene: "Online1V1", stage: "ASR", result: result, isFinal: isFinal))
         guard let event = DemoConversationEventAdapter.makeRecognizedEvent(from: result, isFinal: isFinal) else { return }
         let normalized = normalizedConversationEvent(from: event, explicitLane: lane(from: result))
         let snapshots = bubbleAssembler.consume(normalized)
@@ -888,6 +1127,7 @@ extension OneToOneViewModel: TmkTranslationListener {
 
     func onTranslate(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
+        NSLog("%@", DemoTmkResultLogFormatter.makeLine(scene: "Online1V1", stage: "MT", result: result, isFinal: isFinal))
         guard let event = DemoConversationEventAdapter.makeTranslatedEvent(from: result, isFinal: isFinal) else { return }
         let normalized = normalizedConversationEvent(from: event, explicitLane: lane(from: result))
         let snapshots = bubbleAssembler.consume(normalized)
@@ -903,19 +1143,16 @@ extension OneToOneViewModel: TmkTranslationListener {
                 guard let self else { return }
                 guard self.getListeningActive() else { return }
                 self.updatePlaybackChannel(channelCount)
-//                let uidValue = result.extraData["uid"]
-//                let uid: Int? = {
-//                    if let intValue = uidValue as? Int { return intValue }
-//                    if let uintValue = uidValue as? UInt { return Int(uintValue) }
-//                    if let strValue = uidValue as? String { return Int(strValue) }
-//                    return nil
-//                }()
-//                
-//                guard uid != nil else { return }
+                let uid = self.audioUID(from: result)
+                let audioRoute = self.audioRoute(from: result)
                 let stereoData: Data
                 let leftData: Data
                 let rightData: Data
-                if channelCount >= 2, let split = TmkTranslationPCMTools.splitStereoInterleaved16LE(data) {
+                if audioRoute == .left || audioRoute == .right {
+                    stereoData = Data()
+                    leftData = data
+                    rightData = data
+                } else if channelCount >= 2, let split = TmkTranslationPCMTools.splitStereoInterleaved16LE(data) {
                     stereoData = data
                     leftData = split.left
                     rightData = split.right
@@ -924,22 +1161,44 @@ extension OneToOneViewModel: TmkTranslationListener {
                     rightData = data
                     stereoData = self.makeStereoFromMono(data)
                 }
+                let lane: OneToOneRowViewData.Lane?
+                switch audioRoute {
+                case .left:
+                    lane = .left
+                case .right:
+                    lane = .right
+                case .stereo:
+                    lane = nil
+                case .none:
+                    lane = uid.flatMap { self.playbackLaneByUID[$0] }
+                }
                 if self.isPCMRecordingEnabled {
                     if self.pcmOutputDirectory == nil {
                         self.preparePCMOutputDirectory()
                     }
-                    let roomID = Int(self.room?.channelDialogResponse?.roomNo ?? "0") ?? 0
-                    self.writePCMData(stereoData, uid: roomID, kind: .stereo)
-                    self.writePCMData(leftData, uid: roomID, kind: .left)
-                    self.writePCMData(rightData, uid: roomID, kind: .right)
+                    let fileUID = uid ?? Int(self.room?.channelDialogResponse?.roomNo ?? "0") ?? 0
+                    if audioRoute == .stereo {
+                        self.writePCMData(stereoData, uid: fileUID, kind: .stereo)
+                        self.writePCMData(leftData, uid: fileUID, kind: .left)
+                        self.writePCMData(rightData, uid: fileUID, kind: .right)
+                    } else if let lane {
+                        self.writePCMData(data, uid: fileUID, kind: lane == .left ? .left : .right)
+                    } else {
+                        self.writePCMData(stereoData, uid: fileUID, kind: .stereo)
+                        self.writePCMData(leftData, uid: fileUID, kind: .left)
+                        self.writePCMData(rightData, uid: fileUID, kind: .right)
+                    }
                 }
-                let output: Data
-                switch self.getPlaybackMode() {
-                case .left:
-                    output = leftData
-                case .right:
-                    output = rightData
-                }
+                let playbackMode = self.getPlaybackMode()
+                let sourceLane = lane ?? (playbackMode == .left ? OneToOneRowViewData.Lane.left : .right)
+                guard let output = OneToOneTranslatedAudioPlaybackSelector.selectPlaybackData(
+                    data: data,
+                    channelCount: channelCount,
+                    playbackMode: playbackMode,
+                    audioRoute: audioRoute,
+                    sourceLane: sourceLane,
+                    extraData: result.extraData
+                ) else { return }
                 self.voiceIO?.enqueuePlaybackPCM(output)
             }
         }
@@ -957,6 +1216,26 @@ extension OneToOneViewModel: TmkTranslationListener {
         let networkAction = networkEventPolicy.action(forEvent: name, args: args)
         if networkAction != .none {
             applyRuntimeAction(networkAction)
+            return
+        }
+        if name == "online_bubble_end",
+           let result = args as? TmkResult<String> {
+            let snapshots = bubbleAssembler.markBubbleEnded(bubbleId: result.bubbleId)
+            NSLog("%@", DemoTmkResultLogFormatter.makeBubbleEndLine(scene: "Online1V1",
+                                                                     result: result,
+                                                                     affectedSnapshots: snapshots))
+            snapshots.forEach(applyBubbleSnapshot)
+            return
+        }
+        if name == "online_tts_state",
+           let result = args as? TmkResult<String> {
+            NSLog("%@", DemoTmkResultLogFormatter.makeLine(scene: "Online1V1",
+                                                           stage: "TTSState",
+                                                           result: result,
+                                                           isFinal: result.isLast))
+            let isEnd = (result.extraData["is_end"] as? Bool) ?? result.isLast
+            let chunk = result.extraData["chunk_id"] as? String
+            applyTTSHighlight(sessionId: result.sessionId, chunkId: chunk, isEnd: isEnd)
             return
         }
         if name == "online_started" {
@@ -980,11 +1259,12 @@ extension OneToOneViewModel: TmkTranslationListener {
         resetLocalPCMPlaybackState()
         voiceIO = nil
         isPCMRecordingEnabled = false
-        channel?.stop()
+        TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         room = nil
         activePlaybackUID = nil
         targetPlaybackUIDs.removeAll()
+        playbackLaneByUID.removeAll()
         cachedCaptureSampleRate = -1
         cachedCaptureChannels = -1
         cachedPlaybackChannels = -1

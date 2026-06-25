@@ -12,6 +12,7 @@
 import Foundation
 import AudioToolbox
 import AVFoundation
+import OSLog
 
 final class TmkVoiceProcessingIO {
     enum State {
@@ -28,9 +29,27 @@ final class TmkVoiceProcessingIO {
         case silence
     }
 
+    /// 采集中断相关事件，业务层据此更新 UI 文案/按钮状态。
+    enum InterruptionEvent {
+        /// 录音被系统中断（来电、Siri、闹钟等），采集已暂停。
+        case interrupted
+        /// 中断结束后采集已自动恢复。
+        case resumed
+        /// 中断结束后自动恢复失败，需要业务层提示并允许用户重试。
+        case resumeFailed(Error)
+    }
+
     // 录音数据回调（业务层拿到后自行处理）
     typealias InputPCMHandler = (_ pcmData: Data, _ format: AudioStreamBasicDescription, _ vadState: VADState) -> Void
     typealias VADStateResolver = (_ pcmData: Data, _ format: AudioStreamBasicDescription) -> VADState
+
+    // 记录最近一次激活会话所用参数，用于中断结束后由自身重新激活会话。
+    private struct AudioSessionSetup {
+        let sampleRate: Double
+        let framesPerBuffer: UInt32
+        let mode: AVAudioSession.Mode
+        let useSpeaker: Bool
+    }
 
     // 采样配置
     private let config: TmkVPConfig
@@ -49,8 +68,20 @@ final class TmkVoiceProcessingIO {
     var onInputPCM: InputPCMHandler?
     // VAD 状态由业务层外部注入；未设置时表示当前不启用 VAD，回调中的 vadState 无实际语义。
     var resolveVADState: VADStateResolver?
+    // 采集中断/恢复事件回调（统一切回主线程触发），业务层据此更新 UI。
+    var onInterruptionEvent: ((InterruptionEvent) -> Void)?
     // 外部可读取当前实际采集声道数
     var activeChannels: UInt32 { activeStreamDescription.mChannelsPerFrame }
+
+    private static let logger = Logger(subsystem: "co.timekettle.demo", category: "VoiceProcessingIO")
+    // 最近一次会话激活参数，供中断结束/服务重置后自身重新激活会话使用。
+    private var lastSessionSetup: AudioSessionSetup?
+    // 是否处于「运行中被系统中断」状态，仅此情况下在中断结束时自动恢复。
+    private var interruptedWhileRunning = false
+    // 已注册的系统通知 observer token，stop()/deinit 时精确移除，避免重复注册与误响应。
+    private var notificationTokens: [NSObjectProtocol] = []
+    // 串行化所有中断恢复动作，避免多通知并发重入 AudioUnit 操作。
+    private let interruptionQueue = DispatchQueue(label: "co.timekettle.demo.voiceio.interruption")
 
     init(config: TmkVPConfig = TmkVPConfig()) {
         self.config = config
@@ -120,6 +151,22 @@ final class TmkVoiceProcessingIO {
         }
     }
 
+    /// 激活会话并记住参数，使录音器在中断结束/服务重置后能自行重新激活。
+    /// 业务层应改用本实例方法替代直接调用 static configureAudioSession。
+    func activateAudioSession(sampleRate: Double,
+                              framesPerBuffer: UInt32,
+                              mode: AVAudioSession.Mode = .voiceChat,
+                              useSpeaker: Bool = true) throws {
+        try Self.configureAudioSession(sampleRate: sampleRate,
+                                       framesPerBuffer: framesPerBuffer,
+                                       mode: mode,
+                                       useSpeaker: useSpeaker)
+        lastSessionSetup = AudioSessionSetup(sampleRate: sampleRate,
+                                             framesPerBuffer: framesPerBuffer,
+                                             mode: mode,
+                                             useSpeaker: useSpeaker)
+    }
+
     // 启动音频单元（开始采集与播放）
     func start() throws {
         if isRunning { return }
@@ -129,6 +176,7 @@ final class TmkVoiceProcessingIO {
         let status = AudioOutputUnitStart(audioUnit!)
         try Self.check(status)
         setState(.running)
+        registerInterruptionObserversIfNeeded()
     }
 
     // 暂停（停止回调但保留 AudioUnit）
@@ -149,10 +197,151 @@ final class TmkVoiceProcessingIO {
 
     // 停止并清空播放缓冲
     func stop() {
+        removeInterruptionObservers()
+        interruptedWhileRunning = false
         guard let unit = audioUnit else { return }
         setState(.stopped)
         AudioOutputUnitStop(unit)
         playbackBuffer.reset()
+    }
+
+    // MARK: - 中断 / 路由变化 / 服务重置处理
+
+    /// 注册系统音频通知（仅在采集运行后注册一次）。
+    private func registerInterruptionObserversIfNeeded() {
+        guard notificationTokens.isEmpty else { return }
+        let center = NotificationCenter.default
+        let interruption = center.addObserver(forName: AVAudioSession.interruptionNotification,
+                                              object: nil,
+                                              queue: nil) { [weak self] note in
+            self?.handleInterruption(note)
+        }
+        let routeChange = center.addObserver(forName: AVAudioSession.routeChangeNotification,
+                                             object: nil,
+                                             queue: nil) { [weak self] note in
+            self?.handleRouteChange(note)
+        }
+        let reset = center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification,
+                                       object: nil,
+                                       queue: nil) { [weak self] _ in
+            self?.handleMediaServicesReset()
+        }
+        notificationTokens = [interruption, routeChange, reset]
+    }
+
+    /// 注销系统音频通知。
+    private func removeInterruptionObservers() {
+        let center = NotificationCenter.default
+        notificationTokens.forEach { center.removeObserver($0) }
+        notificationTokens.removeAll()
+    }
+
+    /// 处理中断通知：来电/Siri/闹钟等。
+    private func handleInterruption(_ note: Notification) {
+        guard let info = note.userInfo,
+              let rawType = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: rawType) else { return }
+
+        switch type {
+        case .began:
+            interruptionQueue.async { [weak self] in
+                guard let self else { return }
+                guard self.isRunning else { return }
+                self.interruptedWhileRunning = true
+                try? self.pause()
+                Self.logger.info("interruption began -> paused")
+                self.emitEvent(.interrupted)
+            }
+        case .ended:
+            // 部分通话场景 .shouldResume 不可靠，这里只要此前确为运行中被中断，就尝试恢复。
+            interruptionQueue.async { [weak self] in
+                guard let self else { return }
+                guard self.interruptedWhileRunning else { return }
+                self.interruptedWhileRunning = false
+                self.recoverCapture(reason: "interruptionEnded", rebuild: false)
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    /// 处理路由变化：拔出耳机等导致采集停摆时自动恢复。
+    private func handleRouteChange(_ note: Notification) {
+        guard let info = note.userInfo,
+              let rawReason = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: rawReason) else { return }
+        // 仅在旧设备不可用（如拔出耳机）时介入；其余路由变化由系统平滑处理。
+        guard reason == .oldDeviceUnavailable else { return }
+        interruptionQueue.async { [weak self] in
+            guard let self else { return }
+            // 仅在采集仍为 .running 时介入：业务层主动 pause()(state == .paused)不应被路由变化自动恢复。
+            guard self.isRunning else { return }
+            // 拔耳机后 AudioUnit 已被系统停掉但 state 仍为 .running，resume 无法复位，故走完整重建。
+            self.recoverCapture(reason: "routeChange", rebuild: true)
+        }
+    }
+
+    /// 处理音频服务重置：AudioUnit 句柄已失效，必须完整重建。
+    private func handleMediaServicesReset() {
+        interruptionQueue.async { [weak self] in
+            guard let self else { return }
+            guard self.shouldBeCapturing else { return }
+            self.interruptedWhileRunning = false
+            self.recoverCapture(reason: "mediaServicesReset", rebuild: true)
+        }
+    }
+
+    /// 统一的采集恢复入口（已在 interruptionQueue 串行执行）。
+    /// - Parameter rebuild: 是否需要先销毁并重建 AudioUnit（服务重置场景为 true）。
+    private func recoverCapture(reason: String, rebuild: Bool) {
+        guard let setup = lastSessionSetup else {
+            Self.logger.error("recoverCapture(\(reason, privacy: .public)) skipped: no session setup")
+            emitEvent(.resumeFailed(NSError(domain: "TmkVoiceProcessingIO",
+                                            code: -10,
+                                            userInfo: [NSLocalizedDescriptionKey: "缺少会话配置，无法恢复采集"])))
+            return
+        }
+        do {
+            try Self.configureAudioSession(sampleRate: setup.sampleRate,
+                                           framesPerBuffer: setup.framesPerBuffer,
+                                           mode: setup.mode,
+                                           useSpeaker: setup.useSpeaker)
+            if rebuild {
+                disposeAudioUnit()
+                setState(.idle)
+                try start()
+            } else {
+                do {
+                    try resume()
+                } catch {
+                    // resume 失败兜底：销毁后完整重建采集单元。
+                    Self.logger.error("resume failed, rebuilding: \(error.localizedDescription, privacy: .public)")
+                    disposeAudioUnit()
+                    setState(.idle)
+                    try start()
+                }
+            }
+            Self.logger.info("recoverCapture(\(reason, privacy: .public)) success rebuild=\(rebuild, privacy: .public)")
+            emitEvent(.resumed)
+        } catch {
+            Self.logger.error("recoverCapture(\(reason, privacy: .public)) failed: \(error.localizedDescription, privacy: .public)")
+            emitEvent(.resumeFailed(error))
+        }
+    }
+
+    /// 当前是否应处于采集状态（运行中或因中断暂停）。
+    private var shouldBeCapturing: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return state == .running || state == .paused
+    }
+
+    /// 统一切回主线程触发对外事件。
+    private func emitEvent(_ event: InterruptionEvent) {
+        guard let handler = onInterruptionEvent else { return }
+        DispatchQueue.main.async {
+            handler(event)
+        }
     }
 
     // 创建并配置 VoiceProcessingIO
