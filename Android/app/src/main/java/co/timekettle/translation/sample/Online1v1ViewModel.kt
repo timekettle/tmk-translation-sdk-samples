@@ -42,6 +42,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
+import co.timekettle.translation.enums.TmkTranslateDeliveryMode
 
 @HiltViewModel
 class Online1v1ViewModel @Inject constructor(
@@ -140,7 +141,7 @@ class Online1v1ViewModel @Inject constructor(
     val leftSpeakerGender: StateFlow<SpeakerGender> = _leftSpeakerGender.asStateFlow()
     private val _rightSpeakerGender = MutableStateFlow(SpeakerGender.FEMALE)
     val rightSpeakerGender: StateFlow<SpeakerGender> = _rightSpeakerGender.asStateFlow()
-    private val _onlineTranslateEngine = MutableStateFlow(TmkOnlineTranslateEngine.FAST)
+    private val _onlineTranslateEngine = MutableStateFlow(TmkOnlineTranslateEngine.ACCURATE)
     val onlineTranslateEngine: StateFlow<TmkOnlineTranslateEngine> = _onlineTranslateEngine.asStateFlow()
     private val _roomScenarioOption = MutableStateFlow(OnlineRoomScenarioOption.defaultOption)
     val roomScenarioOption: StateFlow<OnlineRoomScenarioOption> = _roomScenarioOption.asStateFlow()
@@ -397,6 +398,7 @@ class Online1v1ViewModel @Inject constructor(
             .setSpeakers(currentSpeakers())
             .setOnlineTranslateEngine(_onlineTranslateEngine.value)
             .setRoomScenario(_roomScenarioOption.value.roomScenario)
+            .setTranslateMode(TmkTranslateDeliveryMode.PARTIAL)
             .build()
     }
 

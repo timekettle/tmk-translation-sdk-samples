@@ -24,7 +24,7 @@ object SampleSdkConfig {
             .setAuth(BuildConfig.TMK_SAMPLE_APP_ID, BuildConfig.TMK_SAMPLE_APP_SECRET)
             .setOnlineAuthContext(tenantId = "timekettle")
             .setNetworkEnvironment(networkEnvironment)
-//            .setNetworkBaseURL("https://api-rayneo.timekettle.co")
+            .setNetworkBaseURL("https://api-rayneo.timekettle.co")
             .build()
     }
 

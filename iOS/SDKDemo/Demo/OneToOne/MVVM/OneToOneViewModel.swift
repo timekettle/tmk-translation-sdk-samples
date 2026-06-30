@@ -49,7 +49,7 @@ final class OneToOneViewModel: NSObject {
     private var selectedLeftLang: String { selectedTargetLang }
     private var selectedLeftSpeakerGender: TmkSpeakerGender = .male
     private var selectedRightSpeakerGender: TmkSpeakerGender = .female
-    private var selectedTranslateEngine: TmkOnlineTranslateEngine = .fast
+    private var selectedTranslateEngine: TmkOnlineTranslateEngine = .accurate
     private var selectedScenarioOption: OneToOneScenarioOption = .defaultOption
     private var selectedChannelModeConfiguration: OneToOneChannelModeConfiguration = OneToOneStandardChannelModeConfiguration()
     private var selectedDialogConversationAudioMode: TmkDialogConversationAudioMode {
@@ -461,6 +461,7 @@ private extension OneToOneViewModel {
             channelScenario: .oneToOne,
             speakers: configuredSpeakers(),
             translateEngine: selectedTranslateEngine,
+            translateMode: .partial,
             dialogConversationAudioMode: selectedDialogConversationAudioMode
         )
         TmkTranslationSDK.shared.createTmkTranslationRoom(config: roomConfig) { [weak self] result in
