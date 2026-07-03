@@ -146,11 +146,17 @@ jobs:
         id: ios_app
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          APP_PATH="build/ios/iphoneos/Runner.app"
           ZIP_NAME="tmk-translation-flutter-demo-${VERSION}-ios-unsigned.zip"
-          cd build/ios/iphoneos
-          zip -r "../../../$ZIP_NAME" Runner.app
-          cd ../../..
+          APP_DIR=$(find build/ios -type d -name "Runner.app" | head -1)
+          if [ -z "$APP_DIR" ]; then
+            echo "Runner.app not found, searching..."
+            find build/ios -type d -name "*.app"
+            exit 1
+          fi
+          APP_PARENT=$(dirname "$APP_DIR")
+          cd "$APP_PARENT"
+          zip -r "${OLDPWD}/$ZIP_NAME" Runner.app
+          cd "$OLDPWD"
           echo "ZIP size: $(du -h "$ZIP_NAME" | cut -f1)"
           echo "zip_path=$ZIP_NAME" >> "$GITHUB_OUTPUT"
           echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
