@@ -105,7 +105,7 @@ final class TmkVoiceProcessingIO {
                                       mode: AVAudioSession.Mode = .voiceChat,
                                       useSpeaker: Bool = true) throws {
         let session = AVAudioSession.sharedInstance()
-        var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP]
+        var options: AVAudioSession.CategoryOptions = [.allowBluetooth]
         if useSpeaker {
             options.insert(.defaultToSpeaker)
         }
