@@ -51,9 +51,10 @@ jobs:
       - name: Verify GitHub Packages access
         env:
           GH_ACCESS_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        working-directory: .
         run: |
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: token $GH_ACCESS_TOKEN" \
+            -u "${{ github.actor }}:$GH_ACCESS_TOKEN" \
             "https://maven.pkg.github.com/timekettle/tmk-translation-sdk-dist/co/timekettle/translation/tmk-translation-sdk/1.1.2/tmk-translation-sdk-1.1.2.pom")
           echo "GitHub Packages HTTP status: $HTTP_CODE"
           if [ "$HTTP_CODE" != "200" ]; then
