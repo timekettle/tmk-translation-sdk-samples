@@ -48,33 +48,6 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
-      - name: Verify GitHub Packages access
-        env:
-          GH_ACCESS_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        working-directory: .
-        run: |
-          echo "Testing tmk-translation-sdk-dist..."
-          HTTP1=$(curl -s -o /dev/null -w "%{http_code}" \
-            -u "${{ github.actor }}:$GH_ACCESS_TOKEN" \
-            "https://maven.pkg.github.com/timekettle/tmk-translation-sdk-dist/co/timekettle/translation/tmk-translation-sdk/1.1.2/tmk-translation-sdk-1.1.2.pom")
-          echo "  tmk-translation-sdk-dist: HTTP $HTTP1"
-
-          echo "Testing tmk-translation-sdk..."
-          HTTP2=$(curl -s -o /dev/null -w "%{http_code}" \
-            -u "${{ github.actor }}:$GH_ACCESS_TOKEN" \
-            "https://maven.pkg.github.com/timekettle/tmk-translation-sdk/co/timekettle/translation/tmk-translation-sdk/1.1.2/tmk-translation-sdk-1.1.2.pom")
-          echo "  tmk-translation-sdk: HTTP $HTTP2"
-
-          if [ "$HTTP1" != "200" ] && [ "$HTTP2" != "200" ]; then
-            echo "::error::Neither repo returned 200. Checking available versions..."
-            curl -s -u "${{ github.actor }}:$GH_ACCESS_TOKEN" \
-              "https://maven.pkg.github.com/timekettle/tmk-translation-sdk-dist/co/timekettle/translation/tmk-translation-sdk/maven-metadata.xml" || true
-            echo ""
-            curl -s -u "${{ github.actor }}:$GH_ACCESS_TOKEN" \
-              "https://maven.pkg.github.com/timekettle/tmk-translation-sdk/co/timekettle/translation/tmk-translation-sdk/maven-metadata.xml" || true
-            exit 1
-          fi
-
       - name: Build APK
         env:
           GITHUB_ACTOR: ${{ github.actor }}
