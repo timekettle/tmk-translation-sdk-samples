@@ -1,0 +1,163 @@
+name: Flutter Build
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Flutter/apps/tmk_translation_demo
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        working-directory: .
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="v0.0.0-dev"
+          fi
+          VERSION="${TAG#v}"
+          BUILD_NUMBER=$(git rev-list --count HEAD)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION, Build: $BUILD_NUMBER, Tag: $TAG"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Restore Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('Flutter/apps/tmk_translation_demo/android/**/*.gradle*', 'Flutter/apps/tmk_translation_demo/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GH_ACCESS_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          flutter build apk --release \
+            --build-name=${{ steps.version.outputs.version }} \
+            --build-number=${{ steps.version.outputs.build_number }}
+
+      - name: Locate APK
+        id: apk
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          APK_PATH="build/app/outputs/flutter-apk/tmk-translation-sdk-samples-${VERSION}.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            APK_PATH=$(find build/app/outputs -name "*.apk" -not -name "*-unsigned*" | head -1)
+          fi
+          echo "APK: $APK_PATH"
+          echo "APK size: $(du -h "$APK_PATH" | cut -f1)"
+          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
+          echo "apk_name=tmk-translation-flutter-demo-${VERSION}-android.apk" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flutter-demo-android-apk
+          path: Flutter/apps/tmk_translation_demo/${{ steps.apk.outputs.apk_path }}
+          retention-days: 14
+
+      - name: Upload to GitHub Release
+        if: github.event_name == 'release'
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          APK_SRC="Flutter/apps/tmk_translation_demo/${{ steps.apk.outputs.apk_path }}"
+          APK_DEST="${{ steps.apk.outputs.apk_name }}"
+          cp "$APK_SRC" "$APK_DEST"
+          gh release upload "${{ steps.version.outputs.tag }}" "$APK_DEST" --clobber
+
+  build-ios:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: Flutter/apps/tmk_translation_demo
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        working-directory: .
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="v0.0.0-dev"
+          fi
+          VERSION="${TAG#v}"
+          BUILD_NUMBER=$(git rev-list --count HEAD)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION, Build: $BUILD_NUMBER, Tag: $TAG"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build iOS (no codesign)
+        run: |
+          flutter build ios --release --no-codesign \
+            --build-name=${{ steps.version.outputs.version }} \
+            --build-number=${{ steps.version.outputs.build_number }}
+
+      - name: Package iOS app
+        id: ios_app
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          APP_PATH="build/ios/iphoneos/Runner.app"
+          ZIP_NAME="tmk-translation-flutter-demo-${VERSION}-ios-unsigned.zip"
+          cd build/ios/iphoneos
+          zip -r "../../../$ZIP_NAME" Runner.app
+          cd ../../..
+          echo "ZIP size: $(du -h "$ZIP_NAME" | cut -f1)"
+          echo "zip_path=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flutter-demo-ios-app
+          path: Flutter/apps/tmk_translation_demo/${{ steps.ios_app.outputs.zip_path }}
+          retention-days: 14
+
+      - name: Upload to GitHub Release
+        if: github.event_name == 'release'
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          gh release upload "${{ steps.version.outputs.tag }}" \
+            "Flutter/apps/tmk_translation_demo/${{ steps.ios_app.outputs.zip_path }}" \
+            --clobber
