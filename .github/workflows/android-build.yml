@@ -52,9 +52,10 @@ jobs:
         env:
           GPR_USER: ${{ secrets.GPR_USER }}
           GPR_KEY: ${{ secrets.GPR_KEY }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GH_ACCESS_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          ./gradlew assembleDebug \
-            -PTMK_SDK_VERSION=${{ steps.version.outputs.version }}
+          ./gradlew assembleDebug
 
       - name: Rename APK
         id: rename
