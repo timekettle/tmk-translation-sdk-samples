@@ -1,0 +1,83 @@
+name: Android Build
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Android
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        working-directory: .
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="v0.0.0-dev"
+          fi
+          VERSION="${TAG#v}"
+          BUILD_NUMBER=$(git rev-list --count HEAD)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION, Build: $BUILD_NUMBER, Tag: $TAG"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Restore Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('Android/**/*.gradle*', 'Android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Build APK
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GH_ACCESS_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          ./gradlew assembleDebug
+
+      - name: Rename APK
+        id: rename
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          APK_SRC="app/build/outputs/apk/debug/app-debug.apk"
+          APK_DEST="app/build/outputs/apk/debug/tmk-translation-sample-${VERSION}-android.apk"
+          mv "$APK_SRC" "$APK_DEST"
+          echo "APK size: $(du -h "$APK_DEST" | cut -f1)"
+          echo "apk_path=$APK_DEST" >> "$GITHUB_OUTPUT"
+          echo "apk_name=tmk-translation-sample-${VERSION}-android.apk" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tmk-translation-sample-android-apk
+          path: Android/${{ steps.rename.outputs.apk_path }}
+          retention-days: 14
+
+      - name: Upload to GitHub Release
+        if: github.event_name == 'release'
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          gh release upload "${{ steps.version.outputs.tag }}" \
+            "Android/${{ steps.rename.outputs.apk_path }}" \
+            --clobber
