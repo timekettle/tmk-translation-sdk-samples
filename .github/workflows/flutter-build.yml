@@ -66,6 +66,7 @@ jobs:
           GITHUB_ACTOR: ${{ github.actor }}
           GH_ACCESS_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
+          sed -i 's/TMK_SDK_VERSION=.*/TMK_SDK_VERSION=1.1.2/' android/gradle.properties
           flutter build apk --release \
             --build-name=${{ steps.version.outputs.version }} \
             --build-number=${{ steps.version.outputs.build_number }}
@@ -107,6 +108,10 @@ jobs:
         working-directory: Flutter/apps/tmk_translation_demo
     steps:
       - uses: actions/checkout@v4
+
+      - name: Configure git to use HTTPS instead of SSH
+        working-directory: .
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
 
       - name: Extract version from tag
         id: version
