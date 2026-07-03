@@ -48,10 +48,21 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
+      - name: Verify GitHub Packages access
+        env:
+          GH_ACCESS_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_ACCESS_TOKEN" \
+            "https://maven.pkg.github.com/timekettle/tmk-translation-sdk-dist/co/timekettle/translation/tmk-translation-sdk/1.1.2/tmk-translation-sdk-1.1.2.pom")
+          echo "GitHub Packages HTTP status: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::GitHub Packages auth failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+
       - name: Build APK
         env:
-          GPR_USER: ${{ secrets.GPR_USER }}
-          GPR_KEY: ${{ secrets.GPR_KEY }}
           GITHUB_ACTOR: ${{ github.actor }}
           GH_ACCESS_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
