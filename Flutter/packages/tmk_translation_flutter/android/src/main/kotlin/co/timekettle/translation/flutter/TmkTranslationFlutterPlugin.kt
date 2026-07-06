@@ -30,7 +30,6 @@ import co.timekettle.translation.listener.TmkTranslationListener
 import co.timekettle.sdk.common.enums.TransModeType
 import co.timekettle.translation.model.OfflineBubbleManager
 import co.timekettle.translation.model.OnlineBubbleManager
-import co.timekettle.translation.model.TmkTranslationChannelStateSnapshot
 import co.timekettle.translation.model.TmkTranslationRoom
 import co.timekettle.translation.model.TmkLocaleListResponse
 import co.timekettle.translation.model.TmkTranslationChannelStateSnapshot
@@ -961,8 +960,6 @@ private abstract class BaseAudioListenSession(
             stop()
         }
 
-        override fun onStateChanged(fromEngine: AbstractChannelEngine?, snapshot: TmkTranslationChannelStateSnapshot) = Unit
-
         override fun onEvent(eventName: String, args: Any?) = Unit
 
         override fun onStateChanged(
@@ -1188,8 +1185,6 @@ private abstract class BaseOneToOneSession(
             emitError("translation_error", "[$code] $msg")
             stop()
         }
-
-        override fun onStateChanged(fromEngine: AbstractChannelEngine?, snapshot: TmkTranslationChannelStateSnapshot) = Unit
 
         override fun onEvent(eventName: String, args: Any?) = Unit
 
