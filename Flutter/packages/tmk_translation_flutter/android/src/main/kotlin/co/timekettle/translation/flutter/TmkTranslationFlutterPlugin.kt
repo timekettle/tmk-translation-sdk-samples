@@ -29,7 +29,6 @@ import co.timekettle.translation.listener.TmkTranslationListener
 import co.timekettle.translation.lingcast.common.enums.TransModeType
 import co.timekettle.translation.model.OfflineBubbleManager
 import co.timekettle.translation.model.OnlineBubbleManager
-import co.timekettle.translation.model.TmkTranslationChannelStateSnapshot
 import co.timekettle.translation.model.TmkTranslationRoom
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
@@ -959,8 +958,6 @@ private abstract class BaseAudioListenSession(
             stop()
         }
 
-        override fun onStateChanged(fromEngine: AbstractChannelEngine?, snapshot: TmkTranslationChannelStateSnapshot) = Unit
-
         override fun onEvent(eventName: String, args: Any?) = Unit
     }
 
@@ -1181,8 +1178,6 @@ private abstract class BaseOneToOneSession(
             emitError("translation_error", "[$code] $msg")
             stop()
         }
-
-        override fun onStateChanged(fromEngine: AbstractChannelEngine?, snapshot: TmkTranslationChannelStateSnapshot) = Unit
 
         override fun onEvent(eventName: String, args: Any?) = Unit
     }
