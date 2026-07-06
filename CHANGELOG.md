@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.1](https://github.com/timekettle/tmk-translation-sdk-samples/compare/v1.2.0...v1.2.1) (2026-07-06)
+
+
+### Bug Fixes
+
+* inject TMK_SAMPLE_APP_ID/SECRET into CI builds ([05fa85c](https://github.com/timekettle/tmk-translation-sdk-samples/commit/05fa85c3f9e8745776bf9eb11f826e820f2b3658))
+* resolve Flutter build failures (SDK version + iOS SSH auth) ([a1ed963](https://github.com/timekettle/tmk-translation-sdk-samples/commit/a1ed96364ca062291ff151e9b7d787451add8a58))
+
 ## [1.2.0](https://github.com/timekettle/tmk-translation-sdk-samples/compare/v1.1.1...v1.2.0) (2026-07-03)
 
 
