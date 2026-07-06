@@ -69,7 +69,11 @@ repositories {
 }
 
 dependencies {
+<<<<<<< HEAD
     def sdkVersion = project.findProperty("TMK_SDK_VERSION") ?: "1.2.0-beta17"
+=======
+    def sdkVersion = project.findProperty("TMK_SDK_VERSION") ?: "1.1.2"
+>>>>>>> a1ed963 (fix: resolve Flutter build failures (SDK version + iOS SSH auth))
 
     implementation("co.timekettle.translation:tmk-translation-sdk:${sdkVersion}")
     testImplementation("org.jetbrains.kotlin:kotlin-test")

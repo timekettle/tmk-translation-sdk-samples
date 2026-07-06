@@ -1188,6 +1188,8 @@ private abstract class BaseOneToOneSession(
             stop()
         }
 
+        override fun onStateChanged(fromEngine: AbstractChannelEngine?, snapshot: co.timekettle.translation.model.TmkTranslationChannelStateSnapshot) = Unit
+
         override fun onEvent(eventName: String, args: Any?) = Unit
 
         override fun onStateChanged(
