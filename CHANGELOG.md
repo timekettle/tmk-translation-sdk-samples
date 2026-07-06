@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.2](https://github.com/timekettle/tmk-translation-sdk-samples/compare/v1.2.1...v1.2.2) (2026-07-06)
+
+
+### Bug Fixes
+
+* replace non-existent .allowBluetoothHFP with .allowBluetooth ([852bf79](https://github.com/timekettle/tmk-translation-sdk-samples/commit/852bf7981f94bce5a1842409de151ad706d21f7c))
+
 ## [1.2.1](https://github.com/timekettle/tmk-translation-sdk-samples/compare/v1.2.0...v1.2.1) (2026-07-06)
 
 
