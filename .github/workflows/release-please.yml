@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - release/skill-validation
+      - feat/platform-flutter
 
 permissions:
   contents: write

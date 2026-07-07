@@ -15,8 +15,7 @@ Flutter bridge for the TMK translation SDK.
   s.source           = { :path => '.' }
   s.source_files = 'Classes/**/*'
   s.dependency 'Flutter'
-  # TmkTranslationSDK 版本由 app 的 Podfile 指定 (需要使用 rc 分支的 1.2.0-rc3)
-  s.dependency 'TmkTranslationSDK'
+  s.dependency 'TmkTranslationSDK', '1.2.0-beta17'
   s.platform = :ios, '15.0'
   s.resource_bundles = {
     'tmk_translation_flutter_resources' => ['Resources/**/*']
