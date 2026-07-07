@@ -4,7 +4,7 @@ import Foundation
 import TmkTranslationSDK
 
 public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
-    private static let serviceRootURL = URL(string: "https://tmk-translation-test.timekettle.net/")!
+    private static let serviceRootURL = URL(string: "https://api-rayneo.timekettle.co")!
 
     private let settingsStore = TmkSettingsStore()
     private var eventSink: FlutterEventSink?
@@ -258,7 +258,7 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
     }
 
     private static func sdkNetworkBaseURL() -> URL {
-        serviceRootURL.appendingPathComponent("apis")
+        serviceRootURL
     }
 }
 

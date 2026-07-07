@@ -32,6 +32,12 @@ target 'Runner' do
   use_frameworks!
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+
+  # 覆盖 TmkTranslationSDK 版本为 rc 分支的 1.2.0-rc3
+  # 1.2.0-rc3 为预发布版,其 podspec 仅推送到公开 spec 仓库的 rc 分支,
+  # 不在默认分支 main 上;而 CocoaPods 的 source 只读取默认分支,无法解析到该版本。
+  # 因此这里用 :podspec 直接锁定 rc 分支上该版本 podspec 的 raw 地址。
+  pod 'TmkTranslationSDK', :podspec => 'https://raw.githubusercontent.com/timekettle/TmkTranslationSDK-iOS/rc/Specs/TmkTranslationSDK/1.2.0-rc3/TmkTranslationSDK.podspec'
 end
 
 post_install do |installer|

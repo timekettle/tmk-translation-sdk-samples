@@ -263,6 +263,8 @@ class TmkTranslationFlutterPlugin :
         SdkDiagnosisManager.setConsoleEnabled(settings.consoleLogEnabled)
         val globalConfig = TmkTransGlobalConfig.Builder()
             .setAuth(credentials.first, credentials.second)
+            .setOnlineAuthContext(tenantId = "timekettle")
+            .setNetworkBaseURL("https://api-rayneo.timekettle.co")
             .build()
         TmkTranslationSDK.sdkInit(applicationContext as Application, globalConfig)
     }
