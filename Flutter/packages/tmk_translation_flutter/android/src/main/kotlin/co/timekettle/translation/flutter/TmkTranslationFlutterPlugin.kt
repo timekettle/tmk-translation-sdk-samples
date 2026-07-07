@@ -19,6 +19,7 @@ import co.timekettle.translation.TmkTranslationChannel
 import co.timekettle.translation.TmkTranslationSDK
 import co.timekettle.translation.config.TmkTransChannelConfig
 import co.timekettle.translation.config.TmkTransGlobalConfig
+import co.timekettle.translation.config.TmkTranslationNetworkEnvironment
 import co.timekettle.translation.core.AbstractChannelEngine
 import co.timekettle.translation.enums.Scenario
 import co.timekettle.translation.enums.TranslationMode
@@ -264,6 +265,7 @@ class TmkTranslationFlutterPlugin :
         val globalConfig = TmkTransGlobalConfig.Builder()
             .setAuth(credentials.first, credentials.second)
             .setOnlineAuthContext(tenantId = "timekettle")
+            .setNetworkEnvironment(TmkTranslationNetworkEnvironment.TEST)
             .setNetworkBaseURL("https://api-rayneo.timekettle.co")
             .build()
         TmkTranslationSDK.sdkInit(applicationContext as Application, globalConfig)

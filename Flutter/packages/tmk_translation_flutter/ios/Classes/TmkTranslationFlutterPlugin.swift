@@ -192,6 +192,7 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
             .setAuth(appId: credentials.appId, secret: credentials.appSecret)
             .setOnlineAuthContext(tenantId: "timekettle")
             .setLogEnabled(settings.consoleLogEnabled)
+            .setNetworkEnvironment(.test)
             .setNetworkBaseURL(Self.sdkNetworkBaseURL())
             .setDiagnosisEnabled(settings.diagnosisEnabled)
             .build()
