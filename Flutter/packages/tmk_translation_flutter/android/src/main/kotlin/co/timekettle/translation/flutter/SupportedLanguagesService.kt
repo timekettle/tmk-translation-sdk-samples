@@ -6,7 +6,6 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 
 internal object SupportedLanguagesService {
     private const val DEFAULT_CONNECT_TIMEOUT_MS = 5_000
@@ -144,7 +143,7 @@ internal object SupportedLanguagesService {
     }
 
     private fun String.urlEncode(): String {
-        return URLEncoder.encode(this, StandardCharsets.UTF_8)
+        return URLEncoder.encode(this, Charsets.UTF_8.name())
     }
 
     private fun normalizeServiceRootUrl(baseUrl: String): String {
