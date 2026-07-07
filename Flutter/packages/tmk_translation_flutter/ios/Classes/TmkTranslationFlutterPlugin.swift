@@ -4,8 +4,6 @@ import Foundation
 import TmkTranslationSDK
 
 public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
-    private static let serviceRootURL = URL(string: "https://tmk-translation-test.timekettle.net/")!
-
     private let settingsStore = TmkSettingsStore()
     private var eventSink: FlutterEventSink?
     private var sessions: [String: BaseSession] = [:]
@@ -117,15 +115,14 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
     private func handleGetSupportedLanguages(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         let arguments = call.arguments as? [String: Any] ?? [:]
         let sourceValue = arguments["source"] as? String ?? "online"
-        let source: TmkSupportedLanguagesSource = sourceValue == "offline" ? .offline : .online
-        _ = TmkTranslationSDK.shared.getSupportedLanguages(source: source, uiLocales: ["zh-CN"]) { supportedResult in
+        let handleResult: (Result<TmkLocaleListResponse, TmkTranslationError>) -> Void = { supportedResult in
             switch supportedResult {
             case .success(let response):
                 let items = response.localeOptions.map { option in
                     [
                         "code": option.code,
                         "familyCode": option.code.split(separator: "-").first.map(String.init) ?? option.code,
-                        "title": option.uiLang.isEmpty ? option.nativeLang : option.uiLang
+                        "title": option.displayName.isEmpty ? option.code : option.displayName
                     ]
                 }
                 result(items)
@@ -134,6 +131,11 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
                                     message: error.localizedDescription,
                                     details: nil))
             }
+        }
+        if sourceValue == "offline" {
+            _ = TmkTranslationSDK.shared.getOfflineSupportedLanguages(handleResult)
+        } else {
+            _ = TmkTranslationSDK.shared.getOnlineSupportedLanguages(handleResult)
         }
     }
 
@@ -192,7 +194,6 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
             .setAuth(appId: credentials.appId, secret: credentials.appSecret)
             .setOnlineAuthContext(tenantId: "timekettle")
             .setLogEnabled(settings.consoleLogEnabled)
-            .setNetworkBaseURL(Self.sdkNetworkBaseURL())
             .setDiagnosisEnabled(settings.diagnosisEnabled)
             .build()
         TmkTranslationSDK.shared.destroy()
@@ -254,11 +255,7 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
     private static func makeVersionText() -> String {
         let version = Bundle(for: TmkTranslationSDK.self)
             .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        return "TmkTranslationSDK v\(version ?? "1.0.0")"
-    }
-
-    private static func sdkNetworkBaseURL() -> URL {
-        serviceRootURL.appendingPathComponent("apis")
+        return "TmkTranslationSDK v\(version ?? "1.2.0-beta17")"
     }
 }
 

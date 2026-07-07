@@ -54,7 +54,7 @@ android {
 }
 
 dependencies {
-    def sdkVersion = project.findProperty("TMK_SDK_VERSION") ?: "1.0.0"
+    def sdkVersion = project.findProperty("TMK_SDK_VERSION") ?: "1.2.0-beta17"
 
     implementation("co.timekettle.translation:tmk-translation-sdk:${sdkVersion}")
     testImplementation("org.jetbrains.kotlin:kotlin-test")
