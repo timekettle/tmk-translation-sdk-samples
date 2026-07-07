@@ -143,7 +143,7 @@ internal object SupportedLanguagesService {
     }
 
     private fun String.urlEncode(): String {
-        return URLEncoder.encode(this, "UTF-8")
+        return URLEncoder.encode(this, Charsets.UTF_8.name())
     }
 
     private fun normalizeServiceRootUrl(baseUrl: String): String {
