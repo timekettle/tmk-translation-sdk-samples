@@ -1,19 +1,60 @@
 # tmk_translation_demo
 
-A new Flutter project.
+TMK Translation SDK 的 Flutter 示例 App，用于验证 `tmk_translation_flutter` 插件在 Flutter 应用中的完整接入流程。
 
-## Getting Started
+## 模块定位
 
-This project is a starting point for a Flutter application.
+```text
+tmk_translation_demo
+  → packages/tmk_translation_flutter
+    → packages/tmk_translation_platform_interface
+    → iOS/Android TMK Translation SDK
+```
 
-A few resources to get you started if this is your first Flutter project:
+Demo App 只通过 `package:tmk_translation_flutter/tmk_translation_flutter.dart` 使用 SDK 能力，不直接调用原生 iOS/Android SDK。
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+## 主要能力
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+- 初始化 SDK 并展示在线/离线能力状态。
+- 加载在线或离线语言列表。
+- 支持收听模式和一对一模式。
+- 支持在线和离线翻译模式的 UI 入口。
+- 创建、启动、停止和释放翻译会话。
+- 展示会话指标：房间号、场景、模式、采样率、采集声道、回放声道等。
+- 订阅插件事件并渲染识别/翻译气泡。
+
+## 关键代码
+
+- `lib/main.dart`：Flutter 入口。
+- `lib/src/app.dart`：MaterialApp 配置。
+- `lib/src/screens/home_screen.dart`：首页、SDK 初始化、语言加载、模式选择。
+- `lib/src/screens/session_screen.dart`：会话创建、启停、事件订阅和状态展示。
+- `lib/src/screens/settings_screen.dart`：诊断、日志、网络环境等调试配置。
+- `lib/src/conversation_bubbles.dart`：SDK 事件到气泡列表的聚合渲染管线。
+
+## 运行到 iOS 设备
+
+先确认设备：
+
+```bash
+flutter devices
+```
+
+运行到指定设备，例如 XR：
+
+```bash
+cd Flutter/apps/tmk_translation_demo
+flutter run -d <device-id>
+```
+
+## 凭证配置
+
+iOS 示例通过 `ios/Runner/Info.plist` 读取：
+
+- `TMKSampleAppID` → `$(TMK_SAMPLE_APP_ID)`
+- `TMKSampleAppSecret` → `$(TMK_SAMPLE_APP_SECRET)`
+
+真实值应放在本地 xcconfig 或构建环境中，不要提交到仓库。
 
 ## 气泡渲染机制
 

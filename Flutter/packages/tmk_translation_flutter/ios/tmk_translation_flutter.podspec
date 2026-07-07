@@ -15,7 +15,7 @@ Flutter bridge for the TMK translation SDK.
   s.source           = { :path => '.' }
   s.source_files = 'Classes/**/*'
   s.dependency 'Flutter'
-  s.dependency 'TmkTranslationSDK', '1.0.0'
+  s.dependency 'TmkTranslationSDK', '1.2.0-beta17'
   s.platform = :ios, '15.0'
   s.resource_bundles = {
     'tmk_translation_flutter_resources' => ['Resources/**/*']

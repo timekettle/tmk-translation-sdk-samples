@@ -14,7 +14,6 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import co.timekettle.offlinesdk.ModelPaths
 import co.timekettle.offlinesdk.OfflineModelManager
-import co.timekettle.offlinesdk.diagnosis.SdkDiagnosisManager
 import co.timekettle.translation.TmkTranslationChannel
 import co.timekettle.translation.TmkTranslationSDK
 import co.timekettle.translation.config.TmkTransChannelConfig
@@ -25,11 +24,14 @@ import co.timekettle.translation.enums.TranslationMode
 import co.timekettle.translation.listener.AuthCallback
 import co.timekettle.translation.listener.CreateChannelCallback
 import co.timekettle.translation.listener.CreateRoomCallback
+import co.timekettle.translation.listener.TmkLocaleListCallback
 import co.timekettle.translation.listener.TmkTranslationListener
-import co.timekettle.translation.lingcast.common.enums.TransModeType
+import co.timekettle.sdk.common.enums.TransModeType
 import co.timekettle.translation.model.OfflineBubbleManager
 import co.timekettle.translation.model.OnlineBubbleManager
 import co.timekettle.translation.model.TmkTranslationRoom
+import co.timekettle.translation.model.TmkLocaleListResponse
+import co.timekettle.translation.model.TmkTranslationChannelStateSnapshot
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -37,7 +39,6 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.InputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.concurrent.thread
 
 class TmkTranslationFlutterPlugin :
     FlutterPlugin,
@@ -162,28 +163,27 @@ class TmkTranslationFlutterPlugin :
 
     private fun handleGetSupportedLanguages(call: MethodCall, result: MethodChannel.Result) {
         val source = call.argument<String>("source") ?: "online"
-        if (source == "offline") {
-            result.success(TranslationLanguages.listFor(source))
-            return
-        }
+        val callback = object : TmkLocaleListCallback {
+            override fun onSuccess(response: TmkLocaleListResponse) {
+                mainHandler.post {
+                    result.success(response.toFlutterLanguageOptions())
+                }
+            }
 
-        thread(name = "tmk-supported-languages") {
-            val payload = runCatching {
-                SupportedLanguagesService.fetchOnlineLanguages(
-                    baseUrl = SupportedLanguagesService.defaultServiceRootUrl(),
-                    uiLocales = listOf("zh-CN"),
-                )
-            }.getOrElse { error ->
-                Log.w(
-                    TAG,
-                    "getSupportedLanguages online fetch failed, falling back to bundled list: ${error.message}",
-                    error,
-                )
-                TranslationLanguages.listFor("online")
+            override fun onError(errorId: Int, e: Exception) {
+                mainHandler.post {
+                    result.error(
+                        "supported_languages_failed",
+                        e.message ?: "Failed to load supported languages",
+                        mapOf("errorId" to errorId),
+                    )
+                }
             }
-            mainHandler.post {
-                result.success(payload)
-            }
+        }
+        if (source == "offline") {
+            TmkTranslationSDK.getOfflineSupportedLanguages(callback = callback)
+        } else {
+            TmkTranslationSDK.getOnlineSupportedLanguages(callback = callback)
         }
     }
 
@@ -208,7 +208,7 @@ class TmkTranslationFlutterPlugin :
                             "autoRefreshSummary" to "暂无数据",
                             "autoRefreshDetail" to "当前 Android SDK 未暴露自动刷新细节",
                         ),
-                        "versionText" to "TmkTranslationSDK v1.0.0",
+                        "versionText" to "TmkTranslationSDK v${TmkTranslationSDK.sdkVersion}",
                     ),
                 )
             }
@@ -233,7 +233,7 @@ class TmkTranslationFlutterPlugin :
                             "autoRefreshSummary" to "暂无数据",
                             "autoRefreshDetail" to "当前 Android SDK 未暴露自动刷新细节",
                         ),
-                        "versionText" to "TmkTranslationSDK v1.0.0",
+                        "versionText" to "TmkTranslationSDK v${TmkTranslationSDK.sdkVersion}",
                     ),
                 )
             }
@@ -259,10 +259,11 @@ class TmkTranslationFlutterPlugin :
 
     private fun initializeSdk(appId: String?, appSecret: String?, settings: TmkSettings) {
         val credentials = resolveCredentials(appId, appSecret)
-        SdkDiagnosisManager.setEnabled(settings.diagnosisEnabled)
-        SdkDiagnosisManager.setConsoleEnabled(settings.consoleLogEnabled)
         val globalConfig = TmkTransGlobalConfig.Builder()
             .setAuth(credentials.first, credentials.second)
+            .setOnlineAuthContext(tenantId = "timekettle")
+            .setDiagnosisEnabled(settings.diagnosisEnabled)
+            .setDiagnosisConsoleEnabled(settings.consoleLogEnabled)
             .build()
         TmkTranslationSDK.sdkInit(applicationContext as Application, globalConfig)
     }
@@ -959,6 +960,11 @@ private abstract class BaseAudioListenSession(
         }
 
         override fun onEvent(eventName: String, args: Any?) = Unit
+
+        override fun onStateChanged(
+            fromEngine: AbstractChannelEngine?,
+            snapshot: TmkTranslationChannelStateSnapshot,
+        ) = Unit
     }
 
     private fun startRecording() {
@@ -1180,6 +1186,11 @@ private abstract class BaseOneToOneSession(
         }
 
         override fun onEvent(eventName: String, args: Any?) = Unit
+
+        override fun onStateChanged(
+            fromEngine: AbstractChannelEngine?,
+            snapshot: TmkTranslationChannelStateSnapshot,
+        ) = Unit
     }
 
     private fun startStreaming() {
