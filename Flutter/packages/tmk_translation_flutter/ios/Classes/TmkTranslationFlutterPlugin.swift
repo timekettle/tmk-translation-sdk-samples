@@ -116,12 +116,14 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
         let arguments = call.arguments as? [String: Any] ?? [:]
         let sourceValue = arguments["source"] as? String ?? "online"
         let handleResult: (Result<TmkLocaleListResponse, TmkTranslationError>) -> Void = { supportedResult in
+        let handleResult: (Result<TmkLocaleListResponse, TmkTranslationError>) -> Void = { supportedResult in
             switch supportedResult {
             case .success(let response):
                 let items = response.localeOptions.map { option in
                     [
                         "code": option.code,
                         "familyCode": option.code.split(separator: "-").first.map(String.init) ?? option.code,
+                        "title": option.displayName.isEmpty ? option.code : option.displayName
                         "title": option.displayName.isEmpty ? option.code : option.displayName
                     ]
                 }
@@ -131,6 +133,11 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
                                     message: error.localizedDescription,
                                     details: nil))
             }
+        }
+        if sourceValue == "offline" {
+            _ = TmkTranslationSDK.shared.getOfflineSupportedLanguages(handleResult)
+        } else {
+            _ = TmkTranslationSDK.shared.getOnlineSupportedLanguages(handleResult)
         }
         if sourceValue == "offline" {
             _ = TmkTranslationSDK.shared.getOfflineSupportedLanguages(handleResult)
@@ -194,8 +201,6 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
             .setAuth(appId: credentials.appId, secret: credentials.appSecret)
             .setOnlineAuthContext(tenantId: "timekettle")
             .setLogEnabled(settings.consoleLogEnabled)
-            .setNetworkEnvironment(.test)
-            .setNetworkBaseURL(Self.sdkNetworkBaseURL())
             .setDiagnosisEnabled(settings.diagnosisEnabled)
             .build()
         TmkTranslationSDK.shared.destroy()
@@ -257,6 +262,7 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
     private static func makeVersionText() -> String {
         let version = Bundle(for: TmkTranslationSDK.self)
             .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        return "TmkTranslationSDK v\(version ?? "1.2.0-beta17")"
         return "TmkTranslationSDK v\(version ?? "1.2.0-beta17")"
     }
 }
