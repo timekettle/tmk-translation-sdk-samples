@@ -61,12 +61,18 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Create local.properties for Android
+        run: |
+          cat > android/local.properties << EOF
+          sdk.dir=$ANDROID_HOME
+          TMK_SAMPLE_APP_ID=${{ secrets.TMK_SAMPLE_APP_ID }}
+          TMK_SAMPLE_APP_SECRET=${{ secrets.TMK_SAMPLE_APP_SECRET }}
+          EOF
+
       - name: Build APK
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GH_ACCESS_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          TMK_SAMPLE_APP_ID: ${{ secrets.TMK_SAMPLE_APP_ID }}
-          TMK_SAMPLE_APP_SECRET: ${{ secrets.TMK_SAMPLE_APP_SECRET }}
         run: |
           flutter build apk --release \
             --build-name=${{ steps.version.outputs.version }} \

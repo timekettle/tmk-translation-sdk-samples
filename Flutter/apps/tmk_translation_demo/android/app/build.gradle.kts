@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -5,13 +7,20 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// 读取 local.properties 中的本地配置
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.inputStream().use { localProperties.load(it) }
+}
+
 val sampleAppId = providers.environmentVariable("TMK_SAMPLE_APP_ID")
     .orElse(providers.gradleProperty("TMK_SAMPLE_APP_ID"))
-    .orElse("")
+    .orElse(localProperties.getProperty("TMK_SAMPLE_APP_ID") ?: "")
     .get()
 val sampleAppSecret = providers.environmentVariable("TMK_SAMPLE_APP_SECRET")
     .orElse(providers.gradleProperty("TMK_SAMPLE_APP_SECRET"))
-    .orElse("")
+    .orElse(localProperties.getProperty("TMK_SAMPLE_APP_SECRET") ?: "")
     .get()
 
 android {

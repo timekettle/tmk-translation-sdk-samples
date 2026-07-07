@@ -1,4 +1,4 @@
-name: Android Build
+name: Flutter Build
 
 on:
   release:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: Android
+        working-directory: <flutter-app-path>
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +36,12 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '<java-version>'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
 
       - name: Restore Gradle cache
         uses: actions/cache@v4
@@ -44,32 +49,34 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('Android/**/*.gradle*', 'Android/gradle/wrapper/gradle-wrapper.properties') }}
+          key: gradle-${{ runner.os }}-${{ hashFiles('<flutter-app-path>/android/**/*.gradle*', '<flutter-app-path>/android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: |
             gradle-${{ runner.os }}-
 
+      - name: Install dependencies
+        run: flutter pub get
+
       - name: Build APK
-        env:
-          GITHUB_ACTOR: ${{ github.actor }}
-          GH_ACCESS_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          ./gradlew assembleDebug
+          flutter build apk --release \
+            --build-name=${{ steps.version.outputs.version }} \
+            --build-number=${{ steps.version.outputs.build_number }}
 
       - name: Rename APK
         id: rename
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          APK_SRC="app/build/outputs/apk/debug/app-debug.apk"
-          APK_DEST="app/build/outputs/apk/debug/tmk-translation-sample-${VERSION}-android.apk"
+          APK_SRC="build/app/outputs/flutter-apk/app-release.apk"
+          APK_DEST="build/app/outputs/flutter-apk/<app-name>-${VERSION}-android.apk"
           mv "$APK_SRC" "$APK_DEST"
           echo "APK size: $(du -h "$APK_DEST" | cut -f1)"
           echo "apk_path=$APK_DEST" >> "$GITHUB_OUTPUT"
-          echo "apk_name=tmk-translation-sample-${VERSION}-android.apk" >> "$GITHUB_OUTPUT"
+          echo "apk_name=<app-name>-${VERSION}-android.apk" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tmk-translation-sample-android-apk
-          path: Android/${{ steps.rename.outputs.apk_path }}
+          name: <app-name>-android-apk
+          path: <flutter-app-path>/${{ steps.rename.outputs.apk_path }}
           retention-days: 14
 
       - name: Upload to GitHub Release
@@ -79,5 +86,5 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           gh release upload "${{ steps.version.outputs.tag }}" \
-            "Android/${{ steps.rename.outputs.apk_path }}" \
+            "<flutter-app-path>/${{ steps.rename.outputs.apk_path }}" \
             --clobber
