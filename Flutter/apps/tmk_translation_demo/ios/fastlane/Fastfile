@@ -1,0 +1,78 @@
+default_platform(:ios)
+
+platform :ios do
+  desc "Build signed IPA for ad-hoc distribution"
+  lane :release do
+    # 1. 同步证书和 Provisioning Profile（从 Match 仓库拉取）
+    match(
+      type: "adhoc",              # 使用 ad-hoc 方式（适合蒲公英内部分发）
+      readonly: true,             # 只读模式，不创建新证书
+      app_identifier: "co.timekettle.translation.sample",
+      git_url: ENV["MATCH_GIT_URL"],
+      git_basic_authorization: Base64.strict_encode64("#{ENV['MATCH_GIT_TOKEN']}:")
+    )
+
+    # 2. 获取版本信息（从环境变量）
+    version = ENV["APP_VERSION"] || "1.0.0"
+    build_number = ENV["BUILD_NUMBER"] || "1"
+
+    UI.message("📦 Building version: #{version} (#{build_number})")
+
+    # 3. 构建并导出 IPA
+    gym(
+      workspace: "Runner.xcworkspace",
+      scheme: "Runner",
+      export_method: "ad-hoc",
+      configuration: "Release",
+      output_directory: "./build/ipa",
+      output_name: "tmk-translation-flutter-demo-#{version}.ipa",
+
+      # 签名配置
+      codesigning_identity: "iPhone Distribution",
+      export_xcargs: "-allowProvisioningUpdates",
+
+      # 版本号配置
+      xcargs: "MARKETING_VERSION=#{version} CURRENT_PROJECT_VERSION=#{build_number}",
+
+      # 导出选项
+      export_options: {
+        method: "ad-hoc",
+        signingStyle: "manual",
+        provisioningProfiles: {
+          "co.timekettle.translation.sample" => ENV["sigh_co.timekettle.translation.sample_adhoc_profile-name"] || "match AdHoc co.timekettle.translation.sample"
+        }
+      }
+    )
+
+    # 4. 输出构建信息
+    ipa_path = lane_context[SharedValues::IPA_OUTPUT_PATH]
+    UI.success("✅ IPA built successfully!")
+    UI.message("📍 Path: #{ipa_path}")
+
+    # 获取 IPA 文件大小
+    ipa_size = File.size(ipa_path) / 1024.0 / 1024.0
+    UI.message("📏 Size: #{ipa_size.round(2)} MB")
+
+    # 5. 设置环境变量供后续步骤使用
+    if ENV['GITHUB_ENV']
+      File.open(ENV['GITHUB_ENV'], 'a') do |f|
+        f.puts "IPA_PATH=#{ipa_path}"
+        f.puts "IPA_NAME=tmk-translation-flutter-demo-#{version}.ipa"
+      end
+      UI.success("🔗 Set IPA_PATH for GitHub Actions")
+    end
+  end
+
+  desc "Sync certificates for development (manual run)"
+  lane :sync_certs do
+    match(
+      type: "adhoc",
+      app_identifier: "co.timekettle.translation.sample",
+      readonly: true,
+      git_url: ENV["MATCH_GIT_URL"],
+      git_basic_authorization: Base64.strict_encode64("#{ENV['MATCH_GIT_TOKEN']}:")
+    )
+
+    UI.success("✅ Certificates synced successfully!")
+  end
+end
