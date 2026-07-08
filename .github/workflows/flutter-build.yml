@@ -157,38 +157,88 @@ jobs:
             --build-name=${{ steps.version.outputs.version }} \
             --build-number=${{ steps.version.outputs.build_number }}
 
-      - name: Package iOS app
-        id: ios_app
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          ZIP_NAME="tmk-translation-flutter-demo-${VERSION}-ios-unsigned.zip"
-          APP_DIR=$(find build/ios -type d -name "*.app" | head -1)
-          if [ -z "$APP_DIR" ]; then
-            echo "::error::No .app bundle found in build/ios"
-            exit 1
-          fi
-          APP_NAME=$(basename "$APP_DIR")
-          APP_PARENT=$(dirname "$APP_DIR")
-          echo "Found: $APP_DIR"
-          cd "$APP_PARENT"
-          zip -r "${OLDPWD}/$ZIP_NAME" "$APP_NAME"
-          cd "$OLDPWD"
-          echo "ZIP size: $(du -h "$ZIP_NAME" | cut -f1)"
-          echo "zip_path=$ZIP_NAME" >> "$GITHUB_OUTPUT"
-          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/upload-artifact@v4
+      # ============ Fastlane 签名打包 ============
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
         with:
-          name: flutter-demo-ios-app
-          path: Flutter/apps/tmk_translation_demo/${{ steps.ios_app.outputs.zip_path }}
-          retention-days: 14
+          ruby-version: 3.0.0
+          bundler-cache: true
+          working-directory: Flutter/apps/tmk_translation_demo/ios
 
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            Flutter/apps/tmk_translation_demo/ios/Pods
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods
+          key: pods-${{ runner.os }}-${{ hashFiles('Flutter/apps/tmk_translation_demo/ios/Podfile.lock') }}
+          restore-keys: |
+            pods-${{ runner.os }}-
+
+      - name: Install CocoaPods dependencies
+        working-directory: ios
+        run: pod install
+
+      - name: Build IPA with Fastlane
+        id: build_ipa
+        working-directory: ios
+        env:
+          MATCH_GIT_URL: https://github.com/timekettle/ios-certificates.git
+          MATCH_GIT_TOKEN: ${{ secrets.GH_ACCESS_TOKEN }}
+          MATCH_PASSWORD: ${{ secrets.FASTLANE_MATCH_PASSWORD }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          bundle exec fastlane ios release
+          echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
+          echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
+
+      # ============ 上传蒲公英 ============
+      - name: Set up Python
+        if: github.event_name == 'release'
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.9
+
+      - name: Install Python Dependencies
+        if: github.event_name == 'release'
+        working-directory: .
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests==2.32.5
+
+      - name: Upload to Pgyer
+        if: github.event_name == 'release'
+        working-directory: .
+        env:
+          PGYER_API_KEY: ${{ secrets.PGYER_API_KEY }}
+          IM_WEBHOOK: ${{ secrets.IM_WEBHOOK }}
+          IM_SECRET: ${{ secrets.IM_SECRET }}
+        run: |
+          python scripts/upload_to_pgyer.py \
+            --path "${IPA_PATH}" \
+            --key "${PGYER_API_KEY}" \
+            --password "" \
+            --im-webhook "${IM_WEBHOOK}" \
+            --im-secret "${IM_SECRET}"
+
+      # ============ 上传 GitHub Release ============
       - name: Upload to GitHub Release
         if: github.event_name == 'release'
         working-directory: .
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          gh release upload "${{ steps.version.outputs.tag }}" \
-            "Flutter/apps/tmk_translation_demo/${{ steps.ios_app.outputs.zip_path }}" \
-            --clobber
+          gh release upload "${{ steps.version.outputs.tag }}" "${IPA_PATH}" --clobber
+
+      # ============ 上传 Artifact（用于测试）============
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-demo-ios-ipa
+          path: ${{ env.IPA_PATH }}
+          retention-days: 14
