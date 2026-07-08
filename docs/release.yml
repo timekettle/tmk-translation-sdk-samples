@@ -1,0 +1,140 @@
+name: release
+ 
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+ 
+jobs:
+  release:
+    runs-on: macos-15
+
+    permissions:
+      contents: write
+
+    steps:
+    # 拉取主仓库代码和子模块
+    - name: Checkout repository with submodules
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GH_ACCESS_TOKEN }}
+        submodules: recursive  # 拉取子模块
+        fetch-depth: 0    # 完整克隆，避免浅克隆导致子模块无法正确更新
+
+    # 缓存 Git 子模块
+    - name: Cache Git submodules
+      uses: actions/cache@v4
+      with:
+        path: |
+          .git/modules
+        key: ${{ runner.os }}-submodules-${{ hashFiles('.gitmodules') }}
+        restore-keys: |
+          ${{ runner.os }}-submodules-
+
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: 3.0.0
+        bundler-cache: true
+
+    - name: Select Xcode 26.2.x
+      run: |
+        XCODE_PATH=$(ls /Applications | grep -E "^Xcode_26\.2" | head -n 1)
+        echo "Using $XCODE_PATH"
+        sudo xcode-select -s "/Applications/$XCODE_PATH"
+        xcodebuild -version
+
+    # 缓存 CocoaPods 依赖
+    - name: Cache CocoaPods
+      uses: actions/cache@v4
+      with:
+        path: |
+          Pods
+          ~/Library/Caches/CocoaPods
+          ~/.cocoapods
+        key: ${{ runner.os }}-pods-${{ hashFiles('**/Podfile.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-pods-
+
+    - name: Install CocoaPods
+      run: |
+        sudo gem install cocoapods # 安装 CocoaPods
+        pod repo update           # 更新本地 Pod 仓库
+        pod install             # 安装 Pod 依赖库
+
+    - name: Build release
+      env:
+        MATCH_GIT_TOKEN: ${{ secrets.GH_ACCESS_TOKEN }}
+        MATCH_PASSWORD: ${{ secrets.FASTLANE_MATCH_PASSWORD }} # 后续能否不依赖此密码
+        PGYER_API_KEY: ${{ secrets.PGYER_API_KEY }}
+        ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+      run: |
+        bundle exec fastlane ios beta
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.9  # 指定 Python 版本
+
+    - name: Install Python Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests==2.32.5
+
+    - name: Upload apk to pyger
+      env:
+        IM_WEBHOOK: ${{ secrets.IM_WEBHOOK }} # 如果不发im提醒, 则可以注释此行
+        IM_SECRET: ${{ secrets.IM_SECRET }} # 如果不发im提醒, 则可以注释此行
+        PGYER_API_KEY: ${{ secrets.PGYER_API_KEY }}
+        APK_PATH: ${{ env.APK_PATH }} # 此处 APK_PATH 可以变为更优雅的方式: 如类似steps获取上一步的输出
+      run: |
+        python scripts/upload_apk.py \
+        --path ${APK_PATH} \
+        --key ${PGYER_API_KEY} \
+        --password "" \
+        --im-webhook "${IM_WEBHOOK}" \
+        --im-secret "${IM_SECRET}"
+
+    - name: Decode APP_UPDATE_DESC_BASE64
+      id: decode_update_desc
+      run: |
+        if [ -n "${{ env.APP_UPDATE_DESC_BASE64 }}" ]; then
+          {
+            echo 'APP_UPDATE_DESC<<EOF'
+            echo "${{ env.APP_UPDATE_DESC_BASE64 }}" | base64 --decode
+            echo EOF
+          } >> "$GITHUB_ENV"
+        else
+          echo "APP_UPDATE_DESC=No update description available" >> "$GITHUB_ENV"
+        fi
+
+    - name: Create GitHub Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: true
+        body: |
+          ${{ env.APP_UPDATE_DESC }}
+
+    # - name: Dingtalk robot message
+    #   env:
+    #     IM_WEBHOOK: ${{ secrets.IM_WEBHOOK }}
+    #     IM_SECRET: ${{ secrets.IM_SECRET }}
+    #   run: |
+    #     #!/bin/bash
+    #     dingtalk_title="Timekettle(Android)更新(GitHub Action Notification)"
+    #     dingtalk_message="🚀 **GitHub Action Triggered**"
+    #     python script/dingtalk_notify.py \
+    #     --webhook "${IM_WEBHOOK}" \
+    #     --secret "${IM_SECRET}" \
+    #     --title "${dingtalk_message}" \
+    #     --message "${dingtalk_message}"
+    #   shell: bash
