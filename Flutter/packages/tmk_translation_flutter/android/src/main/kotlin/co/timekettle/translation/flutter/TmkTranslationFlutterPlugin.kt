@@ -955,8 +955,6 @@ private abstract class BaseAudioListenSession(
             playAudio(data, channelCount)
         }
 
-        override fun onStateChanged(fromEngine: AbstractChannelEngine?, snapshot: co.timekettle.translation.model.TmkTranslationChannelStateSnapshot) = Unit
-
         override fun onError(code: Int, msg: String) {
             emitError("translation_error", "[$code] $msg")
             stop()
@@ -1188,7 +1186,6 @@ private abstract class BaseOneToOneSession(
             stop()
         }
 
-        override fun onStateChanged(fromEngine: AbstractChannelEngine?, snapshot: co.timekettle.translation.model.TmkTranslationChannelStateSnapshot) = Unit
 
         override fun onEvent(eventName: String, args: Any?) = Unit
 
