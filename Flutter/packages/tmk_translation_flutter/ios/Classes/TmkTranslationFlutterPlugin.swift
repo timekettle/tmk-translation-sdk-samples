@@ -522,7 +522,7 @@ private final class OnlineListenSession: BaseSession, TmkTranslationListener {
     }
 
     private func createRoomAndChannel() {
-        room = TmkTranslationSDK.shared.createTmkTranslationRoom(
+        TmkTranslationSDK.shared.createTmkTranslationRoom(
             sourceLang: config.sourceLanguage,
             targetLang: config.targetLanguage,
             scenario: .toSpeech,
@@ -531,6 +531,7 @@ private final class OnlineListenSession: BaseSession, TmkTranslationListener {
             guard let self else { return }
             switch roomResult {
             case .success(let room):
+                self.room = room
                 self.updateRoomNo(room.channelDialogResponse?.roomNo)
                 self.updateConfiguredAudio(sampleRate: 16_000, channels: 1)
                 let channelConfig = TmkTranslationChannelConfig.Builder()
@@ -671,7 +672,7 @@ private final class OnlineOneToOneSession: BaseSession, TmkTranslationListener {
     }
 
     private func createRoomAndChannel() {
-        room = TmkTranslationSDK.shared.createTmkTranslationRoom(
+        TmkTranslationSDK.shared.createTmkTranslationRoom(
             sourceLang: config.sourceLanguage,
             targetLang: config.targetLanguage,
             scenario: .toSpeech,
@@ -680,6 +681,7 @@ private final class OnlineOneToOneSession: BaseSession, TmkTranslationListener {
             guard let self else { return }
             switch roomResult {
             case .success(let room):
+                self.room = room
                 self.updateRoomNo(room.channelDialogResponse?.roomNo)
                 self.updateConfiguredAudio(sampleRate: 16_000, channels: 2)
                 let channelConfig = TmkTranslationChannelConfig.Builder()

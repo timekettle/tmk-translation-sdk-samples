@@ -7,8 +7,6 @@ on:
   push:
     branches:
       - release/skill-validation
-    paths:
-      - '.github/workflows/flutter-build.yml'
 
 permissions:
   contents: write
