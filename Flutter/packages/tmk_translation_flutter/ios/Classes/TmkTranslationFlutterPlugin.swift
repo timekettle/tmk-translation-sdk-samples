@@ -124,7 +124,6 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
                         "code": option.code,
                         "familyCode": option.code.split(separator: "-").first.map(String.init) ?? option.code,
                         "title": option.displayName.isEmpty ? option.code : option.displayName
-                        "title": option.displayName.isEmpty ? option.code : option.displayName
                     ]
                 }
                 result(items)
