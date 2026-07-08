@@ -263,7 +263,6 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
         let version = Bundle(for: TmkTranslationSDK.self)
             .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         return "TmkTranslationSDK v\(version ?? "1.2.0-beta17")"
-        return "TmkTranslationSDK v\(version ?? "1.2.0-beta17")"
     }
 }
 
