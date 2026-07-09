@@ -1,5 +1,4 @@
 source 'https://cdn.cocoapods.org/'
-source 'https://github.com/timekettle/TmkTranslationSDK-iOS.git'
 
 platform :ios, '15.0'
 
