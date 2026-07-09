@@ -32,7 +32,10 @@ dependencies:
     sdk: flutter
 
   tmk_translation_flutter:
-    path: ../../packages/tmk_translation_flutter
+    git:
+      url: https://github.com/timekettle/tmk-translation-sdk.git
+      ref: flutter-v0.0.1
+      path: Flutter/packages/tmk_translation_flutter
 
 dev_dependencies:
   flutter_test:
