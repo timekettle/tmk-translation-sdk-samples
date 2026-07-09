@@ -8,8 +8,7 @@ platform :ios do
       type: "adhoc",              # 使用 ad-hoc 方式（适合蒲公英内部分发）
       readonly: true,             # 只读模式，不创建新证书
       app_identifier: "co.timekettle.translation.sample",
-      git_url: ENV["MATCH_GIT_URL"],
-      git_basic_authorization: Base64.strict_encode64("#{ENV['MATCH_GIT_TOKEN']}:")
+      git_url: ENV["MATCH_GIT_URL"] || "https://github.com/timekettle/ios-certificates.git"
     )
 
     # 2. 获取版本信息（从环境变量）
@@ -70,8 +69,7 @@ platform :ios do
       type: "development",        # 使用开发证书
       readonly: true,
       app_identifier: "co.timekettle.translation.sample",
-      git_url: ENV["MATCH_GIT_URL"],
-      git_basic_authorization: Base64.strict_encode64("#{ENV['MATCH_GIT_TOKEN']}:")
+      git_url: ENV["MATCH_GIT_URL"] || "https://github.com/timekettle/ios-certificates.git"
     )
 
     # 2. 获取版本信息
@@ -105,8 +103,7 @@ platform :ios do
       type: "adhoc",
       app_identifier: "co.timekettle.translation.sample",
       readonly: true,
-      git_url: ENV["MATCH_GIT_URL"],
-      git_basic_authorization: Base64.strict_encode64("#{ENV['MATCH_GIT_TOKEN']}:")
+      git_url: ENV["MATCH_GIT_URL"] || "https://github.com/timekettle/ios-certificates.git"
     )
 
     UI.success("✅ Certificates synced successfully!")
