@@ -180,18 +180,18 @@ jobs:
         working-directory: Flutter/apps/tmk_translation_demo/ios
         run: pod install
 
-      - name: Debug GH_ACCESS_TOKEN
+      - name: Debug FASTLANE_MATCH_TOKEN
         run: |
-          if [ -z "${{ secrets.GH_ACCESS_TOKEN }}" ]; then
-            echo "GH_ACCESS_TOKEN 长度: 0 (为空)"
+          if [ -z "${{ secrets.FASTLANE_MATCH_TOKEN }}" ]; then
+            echo "FASTLANE_MATCH_TOKEN 长度: 0 (为空)"
           else
-            TOKEN="${{ secrets.GH_ACCESS_TOKEN }}"
-            echo "GH_ACCESS_TOKEN 长度: ${#TOKEN}"
+            TOKEN="${{ secrets.FASTLANE_MATCH_TOKEN }}"
+            echo "FASTLANE_MATCH_TOKEN 长度: ${#TOKEN}"
           fi
 
       - name: Verify Git access to certificates repo
         run: |
-          git ls-remote "https://${{ secrets.GH_ACCESS_TOKEN }}@github.com/timekettle/ios-certificates.git" HEAD
+          git ls-remote "https://${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git" HEAD
           if [ $? -eq 0 ]; then
             echo "✅ 能够访问证书仓库"
           else
@@ -202,13 +202,13 @@ jobs:
         working-directory: .
         run: |
           git config --global credential.helper store
-          echo "https://${{ secrets.GH_ACCESS_TOKEN }}@github.com" > ~/.git-credentials
+          echo "https://${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com" > ~/.git-credentials
 
       - name: Build IPA with Fastlane
         id: build_ipa
         working-directory: Flutter/apps/tmk_translation_demo/ios
         env:
-          MATCH_GIT_URL: https://${{ secrets.GH_ACCESS_TOKEN }}@github.com/timekettle/ios-certificates.git
+          MATCH_GIT_URL: https://${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git
           MATCH_PASSWORD: ${{ secrets.FASTLANE_MATCH_PASSWORD }}
           APP_VERSION: ${{ steps.version.outputs.version }}
           BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
