@@ -180,6 +180,24 @@ jobs:
         working-directory: Flutter/apps/tmk_translation_demo/ios
         run: pod install
 
+      - name: Debug GH_ACCESS_TOKEN
+        run: |
+          if [ -z "${{ secrets.GH_ACCESS_TOKEN }}" ]; then
+            echo "GH_ACCESS_TOKEN 长度: 0 (为空)"
+          else
+            TOKEN="${{ secrets.GH_ACCESS_TOKEN }}"
+            echo "GH_ACCESS_TOKEN 长度: ${#TOKEN}"
+          fi
+
+      - name: Verify Git access to certificates repo
+        run: |
+          git ls-remote "https://${{ secrets.GH_ACCESS_TOKEN }}@github.com/timekettle/ios-certificates.git" HEAD
+          if [ $? -eq 0 ]; then
+            echo "✅ 能够访问证书仓库"
+          else
+            echo "❌ 无法访问证书仓库"
+          fi
+
       - name: Configure Git credentials for Fastlane
         working-directory: .
         run: |
