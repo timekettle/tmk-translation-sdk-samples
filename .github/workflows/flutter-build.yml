@@ -193,6 +193,8 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         run: |
+          pwd
+          ls -la Gemfile || echo "Gemfile not found"
           bundle exec fastlane ios release
           echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
           echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
