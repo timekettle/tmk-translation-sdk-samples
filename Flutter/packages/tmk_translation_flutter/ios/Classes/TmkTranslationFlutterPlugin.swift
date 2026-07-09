@@ -116,7 +116,6 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
         let arguments = call.arguments as? [String: Any] ?? [:]
         let sourceValue = arguments["source"] as? String ?? "online"
         let handleResult: (Result<TmkLocaleListResponse, TmkTranslationError>) -> Void = { supportedResult in
-        let handleResult: (Result<TmkLocaleListResponse, TmkTranslationError>) -> Void = { supportedResult in
             switch supportedResult {
             case .success(let response):
                 let items = response.localeOptions.map { option in
@@ -132,11 +131,6 @@ public final class TmkTranslationFlutterPlugin: NSObject, FlutterPlugin, Flutter
                                     message: error.localizedDescription,
                                     details: nil))
             }
-        }
-        if sourceValue == "offline" {
-            _ = TmkTranslationSDK.shared.getOfflineSupportedLanguages(handleResult)
-        } else {
-            _ = TmkTranslationSDK.shared.getOnlineSupportedLanguages(handleResult)
         }
         if sourceValue == "offline" {
             _ = TmkTranslationSDK.shared.getOfflineSupportedLanguages(handleResult)
@@ -490,6 +484,11 @@ private class BaseSession: NSObject {
         default:
             return String(describing: value)
         }
+    }
+
+    func closeRoom(_ room: TmkTranslationRoom) -> TmkTranslationRoom? {
+        _ = room.closeRoom { _ in }
+        return nil
     }
 }
 
@@ -1218,11 +1217,6 @@ private enum FixedAudioAssetResolver {
         }
         return nil
     }
-}
-
-private func closeRoom(_ room: TmkTranslationRoom) -> TmkTranslationRoom? {
-    _ = room.closeRoom { _ in }
-    return nil
 }
 
 private extension String {
