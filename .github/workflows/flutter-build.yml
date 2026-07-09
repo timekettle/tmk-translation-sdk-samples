@@ -161,7 +161,7 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: 3.0.0
+          ruby-version: 3.3
           bundler-cache: true
           working-directory: Flutter/apps/tmk_translation_demo/ios
 
