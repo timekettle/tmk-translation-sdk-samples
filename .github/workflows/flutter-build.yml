@@ -177,12 +177,12 @@ jobs:
             pods-${{ runner.os }}-
 
       - name: Install CocoaPods dependencies
-        working-directory: ios
+        working-directory: Flutter/apps/tmk_translation_demo/ios
         run: pod install
 
       - name: Build IPA with Fastlane
         id: build_ipa
-        working-directory: ios
+        working-directory: Flutter/apps/tmk_translation_demo/ios
         env:
           MATCH_GIT_URL: https://github.com/timekettle/ios-certificates.git
           MATCH_GIT_TOKEN: ${{ secrets.GH_ACCESS_TOKEN }}
@@ -193,8 +193,6 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         run: |
-          pwd
-          ls -la Gemfile || echo "Gemfile not found"
           bundle exec fastlane ios release
           echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
           echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
