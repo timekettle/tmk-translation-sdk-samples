@@ -189,26 +189,35 @@ jobs:
             echo "FASTLANE_MATCH_TOKEN 长度: ${#TOKEN}"
           fi
 
-      - name: Verify Git access to certificates repo
+      - name: Test certificate repo access with different URL formats
         run: |
-          git ls-remote "https://${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git" HEAD
-          if [ $? -eq 0 ]; then
-            echo "✅ 能够访问证书仓库"
-          else
-            echo "❌ 无法访问证书仓库"
-          fi
+          echo "Testing URL formats for git clone..."
+
+          # Format 1: token直接嵌入
+          echo "Format 1: https://TOKEN@github.com/timekettle/ios-certificates.git"
+          timeout 5 git ls-remote "https://${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git" HEAD 2>&1 | head -5 || echo "Format 1 failed"
+
+          # Format 2: git:token
+          echo "Format 2: https://git:TOKEN@github.com/timekettle/ios-certificates.git"
+          timeout 5 git ls-remote "https://git:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git" HEAD 2>&1 | head -5 || echo "Format 2 failed"
+
+          # Format 3: 用户名:token
+          echo "Format 3: https://oauth2:TOKEN@github.com/timekettle/ios-certificates.git"
+          timeout 5 git ls-remote "https://oauth2:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git" HEAD 2>&1 | head -5 || echo "Format 3 failed"
 
       - name: Configure Git credentials for Fastlane
         working-directory: .
         run: |
           git config --global credential.helper store
-          echo "https://${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com" > ~/.git-credentials
+          # 使用 git:token 格式，这是 GitHub 官方推荐的 PAT 认证方式
+          echo "https://git:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
 
       - name: Build IPA with Fastlane
         id: build_ipa
         working-directory: Flutter/apps/tmk_translation_demo/ios
         env:
-          MATCH_GIT_URL: https://${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git
+          MATCH_GIT_URL: https://git:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git
           MATCH_PASSWORD: ${{ secrets.FASTLANE_MATCH_PASSWORD }}
           APP_VERSION: ${{ steps.version.outputs.version }}
           BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
