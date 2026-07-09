@@ -7,6 +7,13 @@ type("adhoc") # 默认使用 ad-hoc 类型
 
 app_identifier(["co.timekettle.translation.sample"])
 
+# 配置解密密码
+if ENV["MATCH_PASSWORD"]
+  password(ENV["MATCH_PASSWORD"])
+elsif ENV["FASTLANE_MATCH_PASSWORD"]
+  password(ENV["FASTLANE_MATCH_PASSWORD"])
+end
+
 # 使用 App Store Connect API Key 进行认证
 if ENV["ASC_ISSUER_ID"] && ENV["ASC_KEY_ID"] && ENV["ASC_PRIVATE_KEY"]
   api_key(
