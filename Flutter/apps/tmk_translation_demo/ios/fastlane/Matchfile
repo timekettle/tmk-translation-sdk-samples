@@ -1,16 +1,19 @@
-git_url(ENV["MATCH_GIT_URL"] || "https://github.com/timekettle/ios-certificates.git")
+git_url("https://#{ENV["MATCH_GIT_TOKEN"]}@github.com/timekettle/ios-certificates.git")
+
 storage_mode("git")
+git_branch("main")
 
 type("adhoc") # 默认使用 ad-hoc 类型
 
 app_identifier(["co.timekettle.translation.sample"])
 
-# 使用 Git Token 认证（避免 SSH 密钥问题）
-git_basic_authorization(Base64.strict_encode64("#{ENV['MATCH_GIT_TOKEN']}:"))
-
-# 使用密码加密证书
-if ENV["MATCH_PASSWORD"]
-  ENV["MATCH_PASSWORD"]
-elsif ENV["FASTLANE_MATCH_PASSWORD"]
-  ENV["FASTLANE_MATCH_PASSWORD"]
+# 使用 App Store Connect API Key 进行认证
+if ENV["ASC_ISSUER_ID"] && ENV["ASC_KEY_ID"] && ENV["ASC_PRIVATE_KEY"]
+  api_key(
+    issuer_id: ENV["ASC_ISSUER_ID"],
+    key_id: ENV["ASC_KEY_ID"],
+    key_content: ENV["ASC_PRIVATE_KEY"],
+    is_key_content_base64: true,
+    in_house: false
+  )
 end

@@ -184,8 +184,7 @@ jobs:
         id: build_ipa
         working-directory: Flutter/apps/tmk_translation_demo/ios
         env:
-          MATCH_GIT_URL: https://github.com/timekettle/ios-certificates.git
-          MATCH_GIT_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          MATCH_GIT_TOKEN: ${{ secrets.GH_ACCESS_TOKEN }}
           MATCH_PASSWORD: ${{ secrets.FASTLANE_MATCH_PASSWORD }}
           APP_VERSION: ${{ steps.version.outputs.version }}
           BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
