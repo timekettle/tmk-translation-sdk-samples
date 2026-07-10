@@ -17,6 +17,11 @@ jobs:
     defaults:
       run:
         working-directory: Flutter/apps/tmk_translation_demo
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      apk_name: ${{ steps.apk.outputs.apk_name }}
+      
     steps:
       - uses: actions/checkout@v4
 
@@ -108,6 +113,42 @@ jobs:
           cp "$APK_SRC" "$APK_DEST"
           gh release upload "${{ steps.version.outputs.tag }}" "$APK_DEST" --clobber
 
+  notify-android:
+    name: Notify Android Build
+    needs: [build-android]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL || '' }}
+      FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET || '' }}
+      FEISHU_USERIDS_MAP: ${{ secrets.FEISHU_USERIDS_MAP || '' }}
+      FEISHU_SUCCESS_NOTIFY_ANDROID_USERS: ${{ vars.FEISHU_SUCCESS_NOTIFY_ANDROID_USERS || '' }}
+      FEISHU_FAILED_NOTIFY_ANDROID_USERS: ${{ vars.FEISHU_FAILED_NOTIFY_ANDROID_USERS || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Notify Feishu
+        if: always()
+        env:
+          BUILD_RESULT: ${{ needs.build-android.result }}
+          TAG: ${{ github.ref_name }}
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+        run: |
+          if [ -z "$RELEASE_URL" ] || [ "${{ github.event_name }}" != "release" ]; then
+            RELEASE_URL="$RUN_URL"
+          fi
+          bash .github/scripts/notify_workflow_feishu.sh \
+            --title "Flutter Android Build" \
+            --result "$BUILD_RESULT" \
+            --mentions-on-success "${FEISHU_SUCCESS_NOTIFY_ANDROID_USERS:-}" \
+            --mentions-on-failure "${FEISHU_FAILED_NOTIFY_ANDROID_USERS:-}" \
+            --line "仓库：${{ github.repository }}" \
+            --line "Tag：${TAG}" \
+            --line "构建版本：${{ needs.build-android.outputs.version || 'unknown' }}" \
+            --line "Release：${RELEASE_URL}"
+
   build-ios:
     runs-on: macos-latest
     defaults:
@@ -180,30 +221,6 @@ jobs:
         working-directory: Flutter/apps/tmk_translation_demo/ios
         run: pod install
 
-      - name: Debug FASTLANE_MATCH_TOKEN
-        run: |
-          if [ -z "${{ secrets.FASTLANE_MATCH_TOKEN }}" ]; then
-            echo "FASTLANE_MATCH_TOKEN 长度: 0 (为空)"
-          else
-            TOKEN="${{ secrets.FASTLANE_MATCH_TOKEN }}"
-            echo "FASTLANE_MATCH_TOKEN 长度: ${#TOKEN}"
-          fi
-
-      - name: Test certificate repo access with different URL formats
-        run: |
-          echo "Testing URL formats for git clone..."
-
-          # Format 1: token直接嵌入
-          echo "Format 1: https://TOKEN@github.com/timekettle/ios-certificates.git"
-          timeout 5 git ls-remote "https://${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git" HEAD 2>&1 | head -5 || echo "Format 1 failed"
-
-          # Format 2: git:token
-          echo "Format 2: https://git:TOKEN@github.com/timekettle/ios-certificates.git"
-          timeout 5 git ls-remote "https://git:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git" HEAD 2>&1 | head -5 || echo "Format 2 failed"
-
-          # Format 3: 用户名:token
-          echo "Format 3: https://oauth2:TOKEN@github.com/timekettle/ios-certificates.git"
-          timeout 5 git ls-remote "https://oauth2:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git" HEAD 2>&1 | head -5 || echo "Format 3 failed"
 
       - name: Configure Git credentials for Fastlane
         working-directory: .
