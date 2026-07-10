@@ -196,8 +196,8 @@ packages:
     dependency: "direct main"
     description:
       path: "Flutter/packages/tmk_translation_flutter"
-      ref: "flutter-v0.0.2"
-      resolved-ref: c4fa14b5b1ff344fe1ea8f0bf6f8005159be345a
+      ref: "flutter-v0.0.3"
+      resolved-ref: cd23aa2153a46ecc721667440e883d3bbfeca0b8
       url: "https://github.com/timekettle/tmk-translation-sdk.git"
     source: git
     version: "0.0.1"
@@ -205,8 +205,8 @@ packages:
     dependency: transitive
     description:
       path: "Flutter/packages/tmk_translation_platform_interface"
-      ref: c4fa14b5b1ff344fe1ea8f0bf6f8005159be345a
-      resolved-ref: c4fa14b5b1ff344fe1ea8f0bf6f8005159be345a
+      ref: cd23aa2153a46ecc721667440e883d3bbfeca0b8
+      resolved-ref: cd23aa2153a46ecc721667440e883d3bbfeca0b8
       url: "https://github.com/timekettle/tmk-translation-sdk.git"
     source: git
     version: "0.0.1"
