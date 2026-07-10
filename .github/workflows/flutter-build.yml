@@ -17,6 +17,11 @@ jobs:
     defaults:
       run:
         working-directory: Flutter/apps/tmk_translation_demo
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      apk_name: ${{ steps.apk.outputs.apk_name }}
+      
     steps:
       - uses: actions/checkout@v4
 
@@ -108,169 +113,181 @@ jobs:
           cp "$APK_SRC" "$APK_DEST"
           gh release upload "${{ steps.version.outputs.tag }}" "$APK_DEST" --clobber
 
-  build-ios:
-    runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: Flutter/apps/tmk_translation_demo
+  notify-android:
+    name: Notify Android Build
+    needs: [build-android]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      FEISHU_WEBHOOK_URL: ${{ secrets.IM_WEBHOOK || '' }}
+      FEISHU_WEBHOOK_SECRET: ${{ secrets.IM_SECRET || '' }}
+      FEISHU_USERIDS_MAP: ${{ secrets.FEISHU_USERIDS_MAP || '' }}
+      FEISHU_SUCCESS_NOTIFY_ANDROID_USERS: ${{ vars.FEISHU_SUCCESS_NOTIFY_ANDROID_USERS || '' }}
+      FEISHU_FAILED_NOTIFY_ANDROID_USERS: ${{ vars.FEISHU_FAILED_NOTIFY_ANDROID_USERS || '' }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Configure git to use HTTPS instead of SSH
-        working-directory: .
-        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
-
-      - name: Extract version from tag
-        id: version
-        working-directory: .
+      - name: Notify Feishu
+        if: always()
+        env:
+          BUILD_RESULT: ${{ needs.build-android.result }}
+          TAG: ${{ github.ref_name }}
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}
         run: |
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            TAG="${{ github.event.release.tag_name }}"
-          else
-            TAG="v0.0.0-dev"
+          if [ -z "$RELEASE_URL" ] || [ "${{ github.event_name }}" != "release" ]; then
+            RELEASE_URL="$RUN_URL"
           fi
-          VERSION="${TAG#v}"
-          BUILD_NUMBER=$(git rev-list --count HEAD)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Version: $VERSION, Build: $BUILD_NUMBER, Tag: $TAG"
+          bash .github/scripts/notify_workflow_feishu.sh \
+            --title "Flutter Android Build" \
+            --result "$BUILD_RESULT" \
+            --mentions-on-success "${FEISHU_SUCCESS_NOTIFY_ANDROID_USERS:-}" \
+            --mentions-on-failure "${FEISHU_FAILED_NOTIFY_ANDROID_USERS:-}" \
+            --line "仓库：${{ github.repository }}" \
+            --line "Tag：${TAG}" \
+            --line "构建版本：${{ needs.build-android.outputs.version || 'unknown' }}" \
+            --line "Release：${RELEASE_URL}"
 
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
+  # build-ios:
+  #   runs-on: macos-latest
+  #   defaults:
+  #     run:
+  #       working-directory: Flutter/apps/tmk_translation_demo
+  #   steps:
+  #     - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: flutter pub get
+  #     - name: Configure git to use HTTPS instead of SSH
+  #       working-directory: .
+  #       run: git config --global url."https://github.com/".insteadOf "git@github.com:"
 
-      - name: Create LocalSecrets.xcconfig
-        run: |
-          printf 'TMK_SAMPLE_APP_ID = %s\nTMK_SAMPLE_APP_SECRET = %s\n' \
-            "${{ secrets.TMK_SAMPLE_APP_ID }}" \
-            "${{ secrets.TMK_SAMPLE_APP_SECRET }}" \
-            > ios/Flutter/LocalSecrets.xcconfig
+  #     - name: Extract version from tag
+  #       id: version
+  #       working-directory: .
+  #       run: |
+  #         if [[ "${{ github.event_name }}" == "release" ]]; then
+  #           TAG="${{ github.event.release.tag_name }}"
+  #         else
+  #           TAG="v0.0.0-dev"
+  #         fi
+  #         VERSION="${TAG#v}"
+  #         BUILD_NUMBER=$(git rev-list --count HEAD)
+  #         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+  #         echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+  #         echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+  #         echo "Version: $VERSION, Build: $BUILD_NUMBER, Tag: $TAG"
 
-      - name: Build iOS (no codesign)
-        run: |
-          flutter build ios --release --no-codesign \
-            --build-name=${{ steps.version.outputs.version }} \
-            --build-number=${{ steps.version.outputs.build_number }}
+  #     - uses: subosito/flutter-action@v2
+  #       with:
+  #         channel: stable
+  #         cache: true
 
-      # ============ Fastlane 签名打包 ============
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: 3.3
-          bundler-cache: true
-          working-directory: Flutter/apps/tmk_translation_demo/ios
+  #     - name: Install dependencies
+  #       run: flutter pub get
 
-      - name: Cache CocoaPods
-        uses: actions/cache@v4
-        with:
-          path: |
-            Flutter/apps/tmk_translation_demo/ios/Pods
-            ~/Library/Caches/CocoaPods
-            ~/.cocoapods
-          key: pods-${{ runner.os }}-${{ hashFiles('Flutter/apps/tmk_translation_demo/ios/Podfile.lock') }}
-          restore-keys: |
-            pods-${{ runner.os }}-
+  #     - name: Create LocalSecrets.xcconfig
+  #       run: |
+  #         printf 'TMK_SAMPLE_APP_ID = %s\nTMK_SAMPLE_APP_SECRET = %s\n' \
+  #           "${{ secrets.TMK_SAMPLE_APP_ID }}" \
+  #           "${{ secrets.TMK_SAMPLE_APP_SECRET }}" \
+  #           > ios/Flutter/LocalSecrets.xcconfig
 
-      - name: Install CocoaPods dependencies
-        working-directory: Flutter/apps/tmk_translation_demo/ios
-        run: pod install
+  #     - name: Build iOS (no codesign)
+  #       run: |
+  #         flutter build ios --release --no-codesign \
+  #           --build-name=${{ steps.version.outputs.version }} \
+  #           --build-number=${{ steps.version.outputs.build_number }}
 
-      - name: Debug FASTLANE_MATCH_TOKEN
-        run: |
-          if [ -z "${{ secrets.FASTLANE_MATCH_TOKEN }}" ]; then
-            echo "FASTLANE_MATCH_TOKEN 长度: 0 (为空)"
-          else
-            TOKEN="${{ secrets.FASTLANE_MATCH_TOKEN }}"
-            echo "FASTLANE_MATCH_TOKEN 长度: ${#TOKEN}"
-          fi
+  #     # ============ Fastlane 签名打包 ============
+  #     - name: Set up Ruby
+  #       uses: ruby/setup-ruby@v1
+  #       with:
+  #         ruby-version: 3.3
+  #         bundler-cache: true
+  #         working-directory: Flutter/apps/tmk_translation_demo/ios
 
-      - name: Test certificate repo access with different URL formats
-        run: |
-          echo "Testing URL formats for git clone..."
+  #     - name: Cache CocoaPods
+  #       uses: actions/cache@v4
+  #       with:
+  #         path: |
+  #           Flutter/apps/tmk_translation_demo/ios/Pods
+  #           ~/Library/Caches/CocoaPods
+  #           ~/.cocoapods
+  #         key: pods-${{ runner.os }}-${{ hashFiles('Flutter/apps/tmk_translation_demo/ios/Podfile.lock') }}
+  #         restore-keys: |
+  #           pods-${{ runner.os }}-
 
-          # Format 1: token直接嵌入
-          echo "Format 1: https://TOKEN@github.com/timekettle/ios-certificates.git"
-          timeout 5 git ls-remote "https://${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git" HEAD 2>&1 | head -5 || echo "Format 1 failed"
+  #     - name: Install CocoaPods dependencies
+  #       working-directory: Flutter/apps/tmk_translation_demo/ios
+  #       run: pod install
 
-          # Format 2: git:token
-          echo "Format 2: https://git:TOKEN@github.com/timekettle/ios-certificates.git"
-          timeout 5 git ls-remote "https://git:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git" HEAD 2>&1 | head -5 || echo "Format 2 failed"
 
-          # Format 3: 用户名:token
-          echo "Format 3: https://oauth2:TOKEN@github.com/timekettle/ios-certificates.git"
-          timeout 5 git ls-remote "https://oauth2:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git" HEAD 2>&1 | head -5 || echo "Format 3 failed"
+  #     - name: Configure Git credentials for Fastlane
+  #       working-directory: .
+  #       run: |
+  #         git config --global credential.helper store
+  #         # 使用 git:token 格式，这是 GitHub 官方推荐的 PAT 认证方式
+  #         echo "https://git:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com" > ~/.git-credentials
+  #         chmod 600 ~/.git-credentials
 
-      - name: Configure Git credentials for Fastlane
-        working-directory: .
-        run: |
-          git config --global credential.helper store
-          # 使用 git:token 格式，这是 GitHub 官方推荐的 PAT 认证方式
-          echo "https://git:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com" > ~/.git-credentials
-          chmod 600 ~/.git-credentials
+  #     - name: Build IPA with Fastlane
+  #       id: build_ipa
+  #       working-directory: Flutter/apps/tmk_translation_demo/ios
+  #       env:
+  #         MATCH_GIT_URL: https://git:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git
+  #         MATCH_PASSWORD: ${{ secrets.FASTLANE_MATCH_PASSWORD }}
+  #         APP_VERSION: ${{ steps.version.outputs.version }}
+  #         BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
+  #         ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+  #         ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+  #         ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+  #       run: |
+  #         bundle exec fastlane ios release
+  #         echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
+  #         echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
 
-      - name: Build IPA with Fastlane
-        id: build_ipa
-        working-directory: Flutter/apps/tmk_translation_demo/ios
-        env:
-          MATCH_GIT_URL: https://git:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/timekettle/ios-certificates.git
-          MATCH_PASSWORD: ${{ secrets.FASTLANE_MATCH_PASSWORD }}
-          APP_VERSION: ${{ steps.version.outputs.version }}
-          BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
-        run: |
-          bundle exec fastlane ios release
-          echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
-          echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
+  #     # ============ 上传蒲公英 ============
+  #     - name: Set up Python
+  #       if: github.event_name == 'release'
+  #       uses: actions/setup-python@v4
+  #       with:
+  #         python-version: 3.9
 
-      # ============ 上传蒲公英 ============
-      - name: Set up Python
-        if: github.event_name == 'release'
-        uses: actions/setup-python@v4
-        with:
-          python-version: 3.9
+  #     - name: Install Python Dependencies
+  #       if: github.event_name == 'release'
+  #       working-directory: .
+  #       run: |
+  #         python -m pip install --upgrade pip
+  #         pip install requests==2.32.5
 
-      - name: Install Python Dependencies
-        if: github.event_name == 'release'
-        working-directory: .
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests==2.32.5
+  #     - name: Upload to Pgyer
+  #       if: github.event_name == 'release'
+  #       working-directory: .
+  #       env:
+  #         PGYER_API_KEY: ${{ secrets.PGYER_API_KEY }}
+  #         IM_WEBHOOK: ${{ secrets.IM_WEBHOOK }}
+  #         IM_SECRET: ${{ secrets.IM_SECRET }}
+  #       run: |
+  #         python scripts/upload_to_pgyer.py \
+  #           --path "${IPA_PATH}" \
+  #           --key "${PGYER_API_KEY}" \
+  #           --password "" \
+  #           --im-webhook "${IM_WEBHOOK}" \
+  #           --im-secret "${IM_SECRET}"
 
-      - name: Upload to Pgyer
-        if: github.event_name == 'release'
-        working-directory: .
-        env:
-          PGYER_API_KEY: ${{ secrets.PGYER_API_KEY }}
-          IM_WEBHOOK: ${{ secrets.IM_WEBHOOK }}
-          IM_SECRET: ${{ secrets.IM_SECRET }}
-        run: |
-          python scripts/upload_to_pgyer.py \
-            --path "${IPA_PATH}" \
-            --key "${PGYER_API_KEY}" \
-            --password "" \
-            --im-webhook "${IM_WEBHOOK}" \
-            --im-secret "${IM_SECRET}"
+  #     # ============ 上传 GitHub Release ============
+  #     - name: Upload to GitHub Release
+  #       if: github.event_name == 'release'
+  #       working-directory: .
+  #       env:
+  #         GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+  #       run: |
+  #         gh release upload "${{ steps.version.outputs.tag }}" "${IPA_PATH}" --clobber
 
-      # ============ 上传 GitHub Release ============
-      - name: Upload to GitHub Release
-        if: github.event_name == 'release'
-        working-directory: .
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        run: |
-          gh release upload "${{ steps.version.outputs.tag }}" "${IPA_PATH}" --clobber
-
-      # ============ 上传 Artifact（用于测试）============
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: flutter-demo-ios-ipa
-          path: ${{ env.IPA_PATH }}
-          retention-days: 14
+  #     # ============ 上传 Artifact（用于测试）============
+  #     - name: Upload Artifact
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: flutter-demo-ios-ipa
+  #         path: ${{ env.IPA_PATH }}
+  #         retention-days: 14
