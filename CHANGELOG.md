@@ -1,5 +1,50 @@
 # Changelog
 
+## [1.3.0](https://github.com/timekettle/tmk-translation-sdk-samples/compare/v1.2.2...v1.3.0) (2026-07-10)
+
+
+### Features
+
+* add Feishu notification for Flutter Android build ([1b69424](https://github.com/timekettle/tmk-translation-sdk-samples/commit/1b694240bf147a9111b866b31be27ded62814662))
+* **flutter:** upgrade SDK to 1.2.0-beta17 and simplify language mapping ([ee3fd37](https://github.com/timekettle/tmk-translation-sdk-samples/commit/ee3fd373e543c1e9f4883602dd8bd9462a47b4a4))
+* **flutter:** upgrade SDK to 1.2.0-beta17 and simplify language mapping ([014e5ef](https://github.com/timekettle/tmk-translation-sdk-samples/commit/014e5ef2cc9411bd8aab9b8a2bf3c0cda8484f78))
+* implement iOS Fastlane build pipeline ([8cf3fae](https://github.com/timekettle/tmk-translation-sdk-samples/commit/8cf3fae29196766a73c33b6d8f3aaaa85008345c))
+* upgrade Flutter SDK to 1.2.0-rc3 ([e54e863](https://github.com/timekettle/tmk-translation-sdk-samples/commit/e54e863b9a39264b2d178c2bf972806ed7def688))
+* upgrade Flutter SDK to 1.2.0-rc3 ([75a3809](https://github.com/timekettle/tmk-translation-sdk-samples/commit/75a3809fee35046a2b182b424fa73057d4b19a13))
+
+
+### Bug Fixes
+
+* add password configuration to Matchfile for certificate decryption ([0022c09](https://github.com/timekettle/tmk-translation-sdk-samples/commit/0022c09e1f142ba80cdeaae92268946db299b771))
+* add setNetworkEnvironment(TEST) to SDK initialization ([4b60135](https://github.com/timekettle/tmk-translation-sdk-samples/commit/4b601350d8701885b49654ac1300b7c15ecfc87e))
+* add setNetworkEnvironment(TEST) to SDK initialization ([165cf9b](https://github.com/timekettle/tmk-translation-sdk-samples/commit/165cf9b828ffe45b60deeea0a1f80873c78ee352))
+* Android API 29 compatibility for URLEncoder ([3b73a47](https://github.com/timekettle/tmk-translation-sdk-samples/commit/3b73a474680ebbd96bd60cab6d76e99ade27abea))
+* Android API 29 compatibility for URLEncoder ([c72de56](https://github.com/timekettle/tmk-translation-sdk-samples/commit/c72de560731ca0d65df10c3b7809d7eece0c4159))
+* correct iOS SDK API usage and remove workflow path filter ([11a4836](https://github.com/timekettle/tmk-translation-sdk-samples/commit/11a483651eea3dfd2043dcc246047a1f4e6ad4ab))
+* **flutter:** disable R8 minification in release to fix SDK auth failure ([1c41ddd](https://github.com/timekettle/tmk-translation-sdk-samples/commit/1c41ddde56d3f98de3c04ed954d71888b6da4761))
+* **flutter:** support URL encoding on older Android versions ([581025a](https://github.com/timekettle/tmk-translation-sdk-samples/commit/581025a4c79f551128a4be69ea0af63abcf52a00))
+* inject credentials via local.properties in CI workflow ([79ddf66](https://github.com/timekettle/tmk-translation-sdk-samples/commit/79ddf66235186f986902ab18e8db7766b7329470))
+* inject TMK_SAMPLE_APP_ID/SECRET into CI builds ([2cec7e3](https://github.com/timekettle/tmk-translation-sdk-samples/commit/2cec7e3d4e63b3b9797abb4eba61156d347351fe))
+* inject TMK_SAMPLE_APP_ID/SECRET into CI builds ([686493f](https://github.com/timekettle/tmk-translation-sdk-samples/commit/686493ff4b91981b21d4084d3d20e8d8b2254471))
+* rebase platform-flutter and via local.properties in CI workflow ([0d9a430](https://github.com/timekettle/tmk-translation-sdk-samples/commit/0d9a430dffce25695f523288cb13135519fdace3))
+* remove duplicate 'title' key in Swift dictionary ([6d055ed](https://github.com/timekettle/tmk-translation-sdk-samples/commit/6d055ed842dd0905c6804adbd7dbf84a7da7d553))
+* remove duplicate TmkTranslationSDK dependency in Podfile ([18317d7](https://github.com/timekettle/tmk-translation-sdk-samples/commit/18317d736c04a4ff510c210abcdde09105230bb4))
+* remove Podfile.lock to allow SDK version upgrade ([acdf6d4](https://github.com/timekettle/tmk-translation-sdk-samples/commit/acdf6d4a4a1e50c18890d0b1e3c065578ba52725))
+* remove private TmkTranslationSDK CocoaPods source ([e6ae144](https://github.com/timekettle/tmk-translation-sdk-samples/commit/e6ae1444abc1b6468257f7bc6c712e8a2ff09ebf))
+* replace deprecated allowBluetoothHFP with allowBluetooth ([5c70eb2](https://github.com/timekettle/tmk-translation-sdk-samples/commit/5c70eb2377d31082f4ad039f395a7f25f798af7c))
+* resolve Flutter build failures (SDK version + iOS SSH auth) ([f9a9114](https://github.com/timekettle/tmk-translation-sdk-samples/commit/f9a911489bdd69f7eb854aea104d84984102c78c))
+* resolve Flutter build failures (SDK version + iOS SSH auth) ([c17f5f7](https://github.com/timekettle/tmk-translation-sdk-samples/commit/c17f5f722b5eb8fa09996230774203440a189142))
+* resolve Flutter compilation errors for both platforms ([fc05d32](https://github.com/timekettle/tmk-translation-sdk-samples/commit/fc05d32482b2ddf041ee383cd7cbff0d4ed7abef))
+* resolve Flutter compilation errors for both platforms ([aed1829](https://github.com/timekettle/tmk-translation-sdk-samples/commit/aed1829e7a93fab29e45cd5c7991c65069fafd53))
+* resolve Git authentication for Match by using credential helper ([7acba85](https://github.com/timekettle/tmk-translation-sdk-samples/commit/7acba859ba993ccdc2fe844c56883b9c08a23808))
+* resolve iOS Swift compilation errors and improve local dev ([04e26ab](https://github.com/timekettle/tmk-translation-sdk-samples/commit/04e26ab7cd2fa7e94ee85908fd4a1a921a35a508))
+* resolve Swift and Kotlin compilation errors ([74d6a76](https://github.com/timekettle/tmk-translation-sdk-samples/commit/74d6a76f4058761dd87f8b6060fc4e70d86ab6a5))
+* update Matchfile to use token-in-URL authentication method ([cbdadbf](https://github.com/timekettle/tmk-translation-sdk-samples/commit/cbdadbf0101ae4ad0d273a289910beaa37c9400f))
+* use absolute working-directory paths for iOS build steps ([ade679b](https://github.com/timekettle/tmk-translation-sdk-samples/commit/ade679b8c1cd28cb7b28613f706204371ab52974))
+* use correct GitHub token secret for Match authentication ([5c0d165](https://github.com/timekettle/tmk-translation-sdk-samples/commit/5c0d1657fadbfa0b4232a2fc0e1c94f854da3c6e))
+* use git_basic_authorization in Matchfile to match Fastfile format ([abfc3dd](https://github.com/timekettle/tmk-translation-sdk-samples/commit/abfc3dde36dd603bcf50c67f9d14440a509b92ae))
+* 添加通知飞书脚本 ([7e998f4](https://github.com/timekettle/tmk-translation-sdk-samples/commit/7e998f42b82423dc2e36f035a685413bde430238))
+
 ## [1.2.2](https://github.com/timekettle/tmk-translation-sdk-samples/compare/v1.2.1...v1.2.2) (2026-07-06)
 
 
