@@ -140,11 +140,18 @@ if [[ -z "$STATUS" ]]; then
 fi
 
 if [[ -z "$MENTIONS_ON_SUCCESS" ]]; then
-  MENTIONS_ON_SUCCESS="${FEISHU_SUCCESS_NOTIFY_USERS:-${FEISHU_SUCCESS_NOTIFY_IOS_USERS:-}}"
+  MENTIONS_ON_SUCCESS="${FEISHU_SUCCESS_NOTIFY_USERS:-${FEISHU_SUCCESS_NOTIFY_ANDROID_USERS:-${FEISHU_SUCCESS_NOTIFY_IOS_USERS:-}}}"
 fi
 if [[ -z "$MENTIONS_ON_FAILURE" ]]; then
-  MENTIONS_ON_FAILURE="${FEISHU_FAILED_NOTIFY_USERS:-${FEISHU_FAILED_NOTIFY_IOS_USERS:-}}"
+  MENTIONS_ON_FAILURE="${FEISHU_FAILED_NOTIFY_USERS:-${FEISHU_FAILED_NOTIFY_ANDROID_USERS:-${FEISHU_FAILED_NOTIFY_IOS_USERS:-}}}"
 fi
+
+# Debug: print mentions resolution
+echo "[notify_workflow_feishu] FEISHU_SUCCESS_NOTIFY_USERS=$([[ -n "${FEISHU_SUCCESS_NOTIFY_USERS:-}" ]] && echo true || echo false)"
+echo "[notify_workflow_feishu] FEISHU_SUCCESS_NOTIFY_ANDROID_USERS=$([[ -n "${FEISHU_SUCCESS_NOTIFY_ANDROID_USERS:-}" ]] && echo true || echo false)"
+echo "[notify_workflow_feishu] FEISHU_SUCCESS_NOTIFY_IOS_USERS=$([[ -n "${FEISHU_SUCCESS_NOTIFY_IOS_USERS:-}" ]] && echo true || echo false)"
+echo "[notify_workflow_feishu] MENTIONS_ON_SUCCESS=${MENTIONS_ON_SUCCESS:-<empty>}"
+echo "[notify_workflow_feishu] MENTIONS_ON_FAILURE=${MENTIONS_ON_FAILURE:-<empty>}"
 
 TARGET_MENTIONS="$MENTIONS_ON_SUCCESS"
 if [[ "$STATUS" != "success" ]]; then
