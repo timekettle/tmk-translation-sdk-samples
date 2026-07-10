@@ -239,20 +239,6 @@ def main() -> int:
         at_user_ids = list(dict.fromkeys(at_user_ids))
         at_all = parse_bool(args.at_all) or mention_all
 
-        # Debug: print resolved user IDs
-        if github_users_raw:
-            print(f"[notify_feishu] GitHub users: {github_users_raw}", file=sys.stderr)
-            for user_id in resolved_ids:
-                display_id = user_id[:5] + "..." if len(user_id) > 5 else user_id
-                print(f"[notify_feishu] Resolved Feishu ID (first 5): {display_id}", file=sys.stderr)
-        if at_user_ids:
-            print(f"[notify_feishu] Final @user IDs count: {len(at_user_ids)}", file=sys.stderr)
-            for uid in at_user_ids:
-                display_id = uid[:5] + "..." if len(uid) > 5 else uid
-                print(f"[notify_feishu]   - {display_id}", file=sys.stderr)
-        if at_all:
-            print(f"[notify_feishu] @all enabled", file=sys.stderr)
-
         payload = build_payload(args.title, args.status, lines, at_user_ids, at_all)
         payload = apply_signature(payload, secret)
 
