@@ -8,7 +8,7 @@
 PRODUCT_NAME = tmk_translation_demo
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = co.timekettle.translation.sample
+PRODUCT_BUNDLE_IDENTIFIER = co.timekettle.saas.sample
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 com.example. All rights reserved.

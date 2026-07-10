@@ -1,4 +1,4 @@
-package co.timekettle.translation.sample
+package co.timekettle.saas.sample
 
 import android.Manifest
 import android.content.pm.PackageManager

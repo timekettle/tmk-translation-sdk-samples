@@ -1,27 +1,9 @@
-import java.util.Properties
-
 plugins {
     id("com.android.application")
     id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
-
-// 读取 local.properties 中的本地配置
-val localProperties = Properties()
-val localPropertiesFile = rootProject.file("local.properties")
-if (localPropertiesFile.exists()) {
-    localPropertiesFile.inputStream().use { localProperties.load(it) }
-}
-
-val sampleAppId = providers.environmentVariable("TMK_SAMPLE_APP_ID")
-    .orElse(providers.gradleProperty("TMK_SAMPLE_APP_ID"))
-    .orElse(localProperties.getProperty("TMK_SAMPLE_APP_ID") ?: "")
-    .get()
-val sampleAppSecret = providers.environmentVariable("TMK_SAMPLE_APP_SECRET")
-    .orElse(providers.gradleProperty("TMK_SAMPLE_APP_SECRET"))
-    .orElse(localProperties.getProperty("TMK_SAMPLE_APP_SECRET") ?: "")
-    .get()
 
 android {
     namespace = "co.timekettle.saas.sample"
@@ -34,22 +16,21 @@ android {
     }
 
     defaultConfig {
+        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "co.timekettle.saas.sample"
+        // You can update the following values to match your application needs.
+        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = 28
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        manifestPlaceholders["tmkSampleAppId"] = sampleAppId
-        manifestPlaceholders["tmkSampleAppSecret"] = sampleAppSecret
-        buildConfigField("String", "TMK_SAMPLE_APP_ID", "\"$sampleAppId\"")
-        buildConfigField("String", "TMK_SAMPLE_APP_SECRET", "\"$sampleAppSecret\"")
     }
 
     buildTypes {
         release {
+            // TODO: Add your own signing config for the release build.
+            // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
-            isMinifyEnabled = false
-            isShrinkResources = false
         }
     }
 
@@ -86,10 +67,6 @@ android {
         tasks.named("assemble$variantTaskName").configure {
             finalizedBy(syncNamedFlutterApk)
         }
-    }
-
-    buildFeatures {
-        buildConfig = true
     }
 }
 
