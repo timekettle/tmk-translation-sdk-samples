@@ -126,7 +126,7 @@ def build_payload(
         "warning": "警告",
     }.get(status.lower(), status)
 
-    content = "\n".join(f"- {line}" for line in lines if line.strip())
+    content = "\n".join(line for line in lines if line.strip())
     content_blocks = [[{"tag": "text", "text": content or "无附加信息"}]]
 
     mention_block = [{"tag": "at", "user_id": uid} for uid in at_user_ids]
@@ -140,7 +140,7 @@ def build_payload(
         "content": {
             "post": {
                 "zh_cn": {
-                    "title": f"{title} - {status_text}",
+                    "title": title,
                     "content": content_blocks,
                 }
             }
