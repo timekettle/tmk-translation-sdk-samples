@@ -50,10 +50,15 @@ platform :ios do
 
   # Fastlane 从 ios/ 目录运行，Flutter 工程根目录在上一级。
   # 这里只生成 Flutter/Xcode 配置，实际归档仍由 build_app 完成。
+  # APP_VERSION/BUILD_NUMBER 来自 CI 的 tag 解析结果，必须显式传入，
+  # 否则 Xcode 会回退到 pubspec.yaml 里的默认版本号，导致 IPA 文件名和 tag 不一致。
   def prepare_flutter_build
     Dir.chdir("..") do
       sh("flutter pub get")
-      sh("flutter build ios --release --config-only")
+      args = ["flutter", "build", "ios", "--release", "--config-only"]
+      args += ["--build-name=#{ENV['APP_VERSION']}"] if ENV["APP_VERSION"] && !ENV["APP_VERSION"].empty?
+      args += ["--build-number=#{ENV['BUILD_NUMBER']}"] if ENV["BUILD_NUMBER"] && !ENV["BUILD_NUMBER"].empty?
+      sh(args.shelljoin)
     end
   end
 
