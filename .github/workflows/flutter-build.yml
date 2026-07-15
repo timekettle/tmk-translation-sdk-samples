@@ -55,6 +55,10 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
+      - name: Configure git auth for private SDK dependency
+        working-directory: .
+        run: git config --global --add url."https://x-access-token:${{ secrets.RELEASE_TOKEN }}@github.com/timekettle/tmk-translation-sdk.git".insteadOf "https://github.com/timekettle/tmk-translation-sdk.git"
+
       - name: Install dependencies
         run: flutter pub get
 
@@ -115,6 +119,10 @@ jobs:
       - name: Configure git to use HTTPS instead of SSH
         working-directory: .
         run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      - name: Configure git auth for private SDK dependency
+        working-directory: .
+        run: git config --global --add url."https://x-access-token:${{ secrets.RELEASE_TOKEN }}@github.com/timekettle/tmk-translation-sdk.git".insteadOf "https://github.com/timekettle/tmk-translation-sdk.git"
 
       - name: Extract version from tag
         id: version
