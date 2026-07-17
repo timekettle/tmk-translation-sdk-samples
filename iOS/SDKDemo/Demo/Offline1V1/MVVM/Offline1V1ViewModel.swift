@@ -12,6 +12,55 @@ import AVFoundation
 
 typealias OfflineOneToOneLanguageOption = (code: String, name: String)
 
+/// 离线能力档位选项（照抄 `OneToOneScenarioOption`，复用在线 `TmkRoomScenario`）。
+/// - recognize：只识别；toText：识别+翻译；toSpeech：完整链路（默认）。
+enum OfflineScenarioOption: CaseIterable, Equatable {
+    case toSpeech
+    case recognize
+    case toText
+
+    static let defaultOption: OfflineScenarioOption = .toSpeech
+
+    var title: String {
+        switch self {
+        case .toSpeech:
+            return "语音到语音"
+        case .recognize:
+            return "单识别"
+        case .toText:
+            return "语音到文本"
+        }
+    }
+
+    var roomScenario: TmkRoomScenario {
+        switch self {
+        case .toSpeech:
+            return .toSpeech
+        case .recognize:
+            return .recognize
+        case .toText:
+            return .toText
+        }
+    }
+
+    /// 该档位所需的离线模型能力（供模型下载/就绪按能力粒度传参）。
+    var needsMT: Bool { self != .recognize }
+    var needsTTS: Bool { self == .toSpeech }
+}
+
+/// 离线切语言/升档时,若目标语言对/目标档位所需模型未就绪,向 Controller 抛出的"待下载确认"提示。
+/// 两套离线 Demo(收听/一对一)共用。Controller 订阅到即弹确认框,确认后按此信息按档位下差量包。
+struct OfflinePendingDownloadPrompt: Equatable {
+    let sourceLang: String
+    let targetLang: String
+    /// 目标档位:确认下载时按此档位的 needsMT/needsTTS 只下所需包。
+    let scenarioOption: OfflineScenarioOption
+    /// 是否为升档触发(true=升档,false=切语言);仅用于文案区分。
+    let isUpgrade: Bool
+    let title: String
+    let message: String
+}
+
 /// 下载按钮状态枚举。
 enum OfflineModelButtonState: Equatable {
     case notDownloaded      // "下载模型"
@@ -52,10 +101,18 @@ final class Offline1V1ViewModel: NSObject {
     @Published private(set) var modelPackageInfos: [TmkOfflineModelPackageInfo] = []
     @Published private(set) var supportedLanguages: [OfflineOneToOneLanguageOption] = []
     let runtimePrompt = PassthroughSubject<DemoConversationPrompt, Never>()
+    /// 切语言/升档预检未就绪时的"待下载确认"提示;Controller 订阅到即弹确认框。
+    let pendingDownloadPrompt = PassthroughSubject<OfflinePendingDownloadPrompt, Never>()
 
     private var channel: TmkTranslationChannel?
     private var voiceIO: TmkVoiceProcessingIO?
     private var hasStoppedListening = false
+    /// 当前待下载信息(引导下载场景):点"下载"时按此下差量包,点"取消"时清空。
+    private var pendingDownloadInfo: OfflinePendingDownloadPrompt?
+    /// 标记本次下载是否由"切语言/升档引导"触发:true 则下载完成只提示手动重试,不自动继续。
+    private var isGuidedDownload = false
+    /// 留存本次引导下载的来源:true=升档,false=切语言。因 pendingDownloadInfo 在下载完成前会被清,需单独保存以选正确的重试文案。
+    private var guidedDownloadIsUpgrade = false
 
     private var rows: [OneToOneRowViewData] = []
     private var bubbleIndexMap: [String: Int] = [:]
@@ -70,6 +127,10 @@ final class Offline1V1ViewModel: NSObject {
     private var selectedLeftSpeakerGender: TmkSpeakerGender? = .male
     private var selectedRightSpeakerGender: TmkSpeakerGender? = .female
     @Published private(set) var channelAudioMode: TmkChannelAudioMode = .standard
+    /// 翻译下发模式：离线 Demo 默认 partial（展示中间态翻译）。
+    @Published private(set) var selectedTranslateMode: TmkTranslateDeliveryMode = .partial
+    /// 能力档位：默认 toSpeech（完整链路）。
+    @Published private(set) var selectedScenarioOption: OfflineScenarioOption = .defaultOption
     private var selectedChannelModeConfiguration: OneToOneChannelModeConfiguration = OneToOneStandardChannelModeConfiguration()
     private let maxDisplayedRows = 200
     private var downloadStatusHeader = ""
@@ -137,12 +198,16 @@ final class Offline1V1ViewModel: NSObject {
         let packageInfos = TmkTranslationSDK.shared.getOfflineModelPackageInfos(
             srcLang: selectedRightLang,
             dstLang: selectedLeftLang,
-            scenario: .oneToOne
+            scenario: .oneToOne,
+            needMt: selectedScenarioOption.needsMT,
+            needTts: selectedScenarioOption.needsTTS
         )
         let ready = TmkTranslationSDK.shared.isOfflineModelReady(
             srcLang: selectedRightLang,
             dstLang: selectedLeftLang,
-            scenario: .oneToOne
+            scenario: .oneToOne,
+            needMt: selectedScenarioOption.needsMT,
+            needTts: selectedScenarioOption.needsTTS
         )
         DispatchQueue.main.async {
             self.modelPackageInfos = packageInfos
@@ -187,6 +252,9 @@ final class Offline1V1ViewModel: NSObject {
     /// 取消模型下载。
     func cancelDownload() {
         TmkTranslationSDK.shared.cancelOfflineModelDownload()
+        // 取消下载:两个引导标志成对复位,避免残留污染下次普通下载。
+        isGuidedDownload = false
+        guidedDownloadIsUpgrade = false
         downloadButtonState = .notDownloaded
         downloadStatusText = "下载已取消"
         showCancelButton = false
@@ -200,7 +268,9 @@ final class Offline1V1ViewModel: NSObject {
         guard TmkTranslationSDK.shared.isOfflineModelReady(
             srcLang: selectedRightLang,
             dstLang: selectedLeftLang,
-            scenario: .oneToOne
+            scenario: .oneToOne,
+            needMt: selectedScenarioOption.needsMT,
+            needTts: selectedScenarioOption.needsTTS
         ) else {
             updateStatus("当前模型资源不完整，需要先下载离线资源")
             checkModelReadyAndUpdateButton(autoStartIfReady: false)
@@ -218,8 +288,6 @@ final class Offline1V1ViewModel: NSObject {
                                                                framesPerBuffer: 1024))
         }
         guard let voiceIO else { return }
-        // VAD 检测依赖 SDK 源仓库内部组件，samples 工程不引入该组件，
-        // 这里保留 resolveVADState 钩子但返回默认 .silence，输入回调照常运行。
         voiceIO.resolveVADState = { _, _ in .silence }
         hasStoppedListening = false
         configureInterruptionHandling(for: voiceIO)
@@ -330,9 +398,132 @@ final class Offline1V1ViewModel: NSObject {
             updateStatus("源语言和目标语言不能相同")
             return
         }
-        selectedSourceLang = code
-        updateStateOnMain { $0.sourceLanguage = code }
-        resetAndRecreateChannel()
+        applyLanguages(source: code, target: selectedTargetLang)
+    }
+
+    func applyTargetLanguage(_ code: String) {
+        guard code != selectedSourceLang else {
+            updateStatus("源语言和目标语言不能相同")
+            return
+        }
+        applyLanguages(source: selectedSourceLang, target: code)
+    }
+
+    /// 应用新的源/目标语言。
+    ///
+    /// 优先走 SDK 运行时切换语言接口 `channel.updateLanguages`（销毁重建三段离线模型，
+    /// 不重建整个通道、不重新鉴权）；仅在通道尚未创建时才回退到「保存选择 + 重建通道」。
+    ///
+    /// 离线切换语言不可取消、无超时，仅在真正开始 native 重建前做检查（语言支持 / 模型就绪 /
+    /// 通道须已 running）失败即回错；一旦开始重建即承诺走到成功（含秒级模型重载耗时）。
+    func applyLanguages(source: String, target: String) {
+        // 通道尚未创建：保存选择，等通道创建后按新语言生效。
+        guard let channel else {
+            selectedSourceLang = source
+            selectedTargetLang = target
+            updateStateOnMain {
+                $0.sourceLanguage = source
+                $0.targetLanguage = target
+            }
+            updateStatus("语言已保存，将在离线通道创建后生效")
+            return
+        }
+
+        // 切语言预检：目标语言对在当前档位下模型未就绪时，不下发，弹确认框引导下载。
+        // iOS 本就"成功回调才落地 selectedSourceLang/selectedTargetLang"，此处不下发即保持旧值。
+        guard TmkTranslationSDK.shared.isOfflineModelReady(
+            srcLang: source,
+            dstLang: target,
+            scenario: .oneToOne,
+            needMt: selectedScenarioOption.needsMT,
+            needTts: selectedScenarioOption.needsTTS
+        ) else {
+            requestGuidedDownload(source: source,
+                                  target: target,
+                                  option: selectedScenarioOption,
+                                  isUpgrade: false)
+            return
+        }
+
+        updateStatus("正在切换离线语言 \(source) ↔ \(target)（重载模型，请稍候）...")
+        _ = channel.updateLanguages(sourceLang: source, targetLang: target) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                // 切换成功后才落地本地选择，保证 UI 与底层一致。
+                self.selectedSourceLang = source
+                self.selectedTargetLang = target
+                self.updateStateOnMain {
+                    $0.sourceLanguage = source
+                    $0.targetLanguage = target
+                }
+                self.updateStatus("离线语言已切换为 \(source) ↔ \(target)")
+            case .failure(let error):
+                self.updateStatus("离线语言切换失败：\(error.message)")
+            }
+        }
+    }
+
+    /// 运行时切换翻译模式（partial/stable）。未创建通道时仅记录，下次创建生效。
+    func updateTranslateMode(_ mode: TmkTranslateDeliveryMode) {
+        selectedTranslateMode = mode
+        guard let channel else {
+            updateStatus("翻译模式已保存(\(mode == .partial ? "partial" : "stable"))，将在离线通道创建后生效")
+            return
+        }
+        updateStatus("正在切换翻译模式为 \(mode == .partial ? "partial" : "stable")...")
+        channel.updateTranslateMode(mode) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.updateStatus("翻译模式已切换为 \(mode == .partial ? "partial" : "stable")")
+            case .failure(let error):
+                self.updateStatus("翻译模式切换失败：\(error.message)")
+            }
+        }
+    }
+
+    /// 切换能力档位（recognize / speech_to_text / speech_to_speech）。
+    /// 未建通道时仅保存，建通道后运行时调 `channel.updateScenario`。
+    ///
+    /// 升档（needsMT/needsTTS 相对当前档位从无到有）时若目标档位所需模型未就绪，
+    /// 不下发、弹确认框引导下载，`selectedScenarioOption` 保持旧值（成功回调才落地）。
+    func updateScenario(_ option: OfflineScenarioOption) {
+        // 通道尚未创建：仅保存，等通道创建后按新档位生效。
+        guard let channel else {
+            selectedScenarioOption = option
+            updateStatus("能力档位已保存(\(option.title))，将在离线通道创建后生效")
+            return
+        }
+        // 升档预检：档位从无到有引入 MT/TTS 能力且目标档位模型未就绪时，不下发，弹确认框引导下载。
+        let isUpgrade = (option.needsMT && !selectedScenarioOption.needsMT)
+            || (option.needsTTS && !selectedScenarioOption.needsTTS)
+        if isUpgrade,
+           TmkTranslationSDK.shared.isOfflineModelReady(
+               srcLang: selectedRightLang,
+               dstLang: selectedLeftLang,
+               scenario: .oneToOne,
+               needMt: option.needsMT,
+               needTts: option.needsTTS
+           ) == false {
+            requestGuidedDownload(source: selectedRightLang,
+                                  target: selectedLeftLang,
+                                  option: option,
+                                  isUpgrade: true)
+            return
+        }
+        updateStatus("正在切换能力档位为 \(option.title)...")
+        channel.updateScenario(option.roomScenario) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                // 切换成功后才落地档位，保证 UI 与底层一致。
+                self.selectedScenarioOption = option
+                self.updateStatus("能力档位已切换为 \(option.title)")
+            case .failure(let error):
+                self.updateStatus("能力档位切换失败：\(error.message)")
+            }
+        }
     }
 
     func updateSpeaker(channel speakerChannel: TmkSpeakerChannel, gender: TmkSpeakerGender) {
@@ -385,6 +576,59 @@ final class Offline1V1ViewModel: NSObject {
 
     func restartAfterRuntimePrompt() {
         resetAndRecreateChannel(reason: "正在重新初始化离线一对一通道...")
+    }
+
+    /// 切语言/升档预检未就绪时调用：记录待下载信息并向 Controller 抛"待下载确认"提示。
+    func requestGuidedDownload(source: String,
+                               target: String,
+                               option: OfflineScenarioOption,
+                               isUpgrade: Bool) {
+        let sourceName = displayLanguageName(source)
+        let targetName = displayLanguageName(target)
+        let action = isUpgrade ? "切换到「\(option.title)」" : "切换语言"
+        let prompt = OfflinePendingDownloadPrompt(
+            sourceLang: source,
+            targetLang: target,
+            scenarioOption: option,
+            isUpgrade: isUpgrade,
+            title: "模型未就绪",
+            message: "\(action)需要的离线模型（\(sourceName) ↔ \(targetName)，档位「\(option.title)」）尚未下载。\n是否现在下载?下载完成后请手动重试。"
+        )
+        pendingDownloadInfo = prompt
+        updateStatus("目标模型未就绪，请下载后重试")
+        DispatchQueue.main.async {
+            self.pendingDownloadPrompt.send(prompt)
+        }
+    }
+
+    /// 用户确认下载：按待下载信息的目标语言对 + 目标档位 needsMT/needsTTS 下差量包（不改 UI 语言/档位）。
+    func confirmPendingDownload() {
+        guard let info = pendingDownloadInfo else { return }
+        guard offlineTranslationSupported else {
+            applyOfflineUnsupportedState()
+            return
+        }
+        // 标记本次为引导下载：完成后只提示手动重试，不自动继续切换。
+        isGuidedDownload = true
+        // 留存来源(升档/切语言),下载完成时据此选正确的重试文案。
+        guidedDownloadIsUpgrade = info.isUpgrade
+        downloadButtonState = .downloading
+        downloadStatusText = "准备下载..."
+        showCancelButton = true
+        TmkTranslationSDK.shared.downloadOfflineModels(
+            srcLang: info.sourceLang,
+            dstLang: info.targetLang,
+            scenario: .oneToOne,
+            needMt: info.scenarioOption.needsMT,
+            needTts: info.scenarioOption.needsTTS,
+            listener: self
+        )
+    }
+
+    /// 用户取消下载：清待下载状态并提示未切换。
+    func cancelPendingDownload() {
+        pendingDownloadInfo = nil
+        updateStatus("已取消，当前语言未切换")
     }
 }
 
@@ -472,6 +716,10 @@ private extension Offline1V1ViewModel {
             applyOfflineUnsupportedState()
             return
         }
+        // 普通"下载当前语言模型"按钮触发:非引导下载,完成后保持原自动继续行为。
+        // 两个引导标志成对复位,防止上次引导下载的残留把本次普通下载误判为引导。
+        isGuidedDownload = false
+        guidedDownloadIsUpgrade = false
         downloadButtonState = .downloading
         downloadStatusText = "准备下载..."
         showCancelButton = true
@@ -479,6 +727,8 @@ private extension Offline1V1ViewModel {
             srcLang: selectedRightLang,
             dstLang: selectedLeftLang,
             scenario: .oneToOne,
+            needMt: selectedScenarioOption.needsMT,
+            needTts: selectedScenarioOption.needsTTS,
             listener: self
         )
     }
@@ -491,7 +741,9 @@ private extension Offline1V1ViewModel {
         guard TmkTranslationSDK.shared.isOfflineModelReady(
             srcLang: selectedRightLang,
             dstLang: selectedLeftLang,
-            scenario: .oneToOne
+            scenario: .oneToOne,
+            needMt: selectedScenarioOption.needsMT,
+            needTts: selectedScenarioOption.needsTTS
         ) else {
             downloadButtonState = .notDownloaded
             checkModelReadyAndUpdateButton(autoStartIfReady: false, autoDownloadIfNeeded: false)
@@ -512,6 +764,8 @@ private extension Offline1V1ViewModel {
             .setPCMChannels(channelModeConfiguration.pcmChannels)
             .setChannelAudioMode(channelAudioMode)
             .setModelRootDirectory(modelRootDirectory)
+            .setTranslateMode(selectedTranslateMode)
+            .setCapabilityTier(selectedScenarioOption.roomScenario)
         let speakers = configuredSpeakers()
         if speakers.isEmpty == false {
            _ = builder.setSpeakers(speakers)
@@ -650,6 +904,11 @@ private extension Offline1V1ViewModel {
 
     func updateStatus(_ text: String) {
         updateStateOnMain { $0.statusText = text }
+    }
+
+    /// 语言码 → 展示名（用于待下载提示文案），未命中回退语言码本身。
+    func displayLanguageName(_ code: String) -> String {
+        supportedLanguages.first(where: { $0.code == code })?.name ?? code
     }
 
     func updateCaptureAudioInfo(sampleRate: Int, channels: Int) {
@@ -796,6 +1055,7 @@ private extension Offline1V1ViewModel {
                 row.targetLangCode = snapshot.targetLangCode
                 row.sourceText = snapshot.sourceText
                 row.translatedText = snapshot.translatedText
+                row.isBubbleEnded = snapshot.isBubbleEnded
                 self.rows[rowIndex] = row
                 self.rowMutation.send(.update(row: row, index: rowIndex, heightMayChange: true))
                 self.publishRows()
@@ -807,7 +1067,8 @@ private extension Offline1V1ViewModel {
                                           sourceLangCode: snapshot.sourceLangCode,
                                           targetLangCode: snapshot.targetLangCode,
                                           sourceText: snapshot.sourceText,
-                                          translatedText: snapshot.translatedText)
+                                          translatedText: snapshot.translatedText,
+                                          isBubbleEnded: snapshot.isBubbleEnded)
             self.rows.append(row)
             let newIndex = self.rows.count - 1
             self.bubbleIndexMap[key] = newIndex
@@ -891,6 +1152,9 @@ extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadLi
         // 下载错误时恢复按钮状态。
         DispatchQueue.main.async {
             if self.downloadButtonState == .downloading {
+                // 下载失败:两个引导标志成对复位。
+                self.isGuidedDownload = false
+                self.guidedDownloadIsUpgrade = false
                 self.downloadButtonState = .notDownloaded
                 self.updateDownloadPackageListStatusText(header: "下载出错：\(error.message)")
                 self.showCancelButton = false
@@ -899,6 +1163,15 @@ extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadLi
     }
 
     func onEvent(name: String, args: Any?) {
+        if name == "offline_bubble_end",
+           let result = args as? TmkResult<String> {
+            let snapshots = bubbleAssembler.markBubbleEnded(bubbleId: result.bubbleId)
+            NSLog("%@", DemoTmkResultLogFormatter.makeBubbleEndLine(scene: "Offline1V1",
+                                                                     result: result,
+                                                                     affectedSnapshots: snapshots))
+            snapshots.forEach(applyBubbleSnapshot)
+            return
+        }
         _ = args
     }
 
@@ -912,6 +1185,9 @@ extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadLi
         _ = args
         if name == "offline_model_cancelled" {
             DispatchQueue.main.async {
+                // 下载取消:两个引导标志成对复位。
+                self.isGuidedDownload = false
+                self.guidedDownloadIsUpgrade = false
                 self.downloadButtonState = .notDownloaded
                 self.updateDownloadPackageListStatusText(header: "下载已取消")
                 self.showCancelButton = false
@@ -946,6 +1222,17 @@ extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadLi
         }
     }
 
+    func onOfflineModelTotalProgress(downloadedBytesAll: Int64, totalBytesAll: Int64) {
+        DispatchQueue.main.async {
+            guard totalBytesAll > 0 else { return }
+            let percent = Self.formatPercent(downloaded: downloadedBytesAll, total: totalBytesAll)
+            let dlStr = Self.formatBytes(downloadedBytesAll)
+            let totalStr = Self.formatBytes(totalBytesAll)
+            // "总进度："前缀被 Controller.displayButtonTitle 识别，用于按钮标题展示总体进度。
+            self.updateDownloadPackageListStatusText(header: "总进度：\(percent)（\(dlStr) / \(totalStr)）")
+        }
+    }
+
     func onOfflineModelUnzipProgress(fileName: String, progress: Double) {
         DispatchQueue.main.async {
             let pct = Int(progress * 100)
@@ -957,8 +1244,21 @@ extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadLi
         DispatchQueue.main.async {
             self.downloadButtonState = .ready
             self.showCancelButton = false
-            self.updateDownloadPackageListStatusText(header: "下载完成，正在校验模型完整性...")
-            self.checkModelReadyAndUpdateButton(autoStartIfReady: true)
+            if self.isGuidedDownload {
+                // 引导下载（切语言/升档触发）：完成后不自动继续，提示用户手动重试。
+                // 按来源选文案:升档→重试切换能力,切语言→重试切换语言。
+                let retryTip = self.guidedDownloadIsUpgrade ? "下载完成，请重试切换能力" : "下载完成，请重试切换语言"
+                self.isGuidedDownload = false
+                self.guidedDownloadIsUpgrade = false
+                self.pendingDownloadInfo = nil
+                self.updateDownloadPackageListStatusText(header: retryTip)
+                self.checkModelReadyAndUpdateButton(autoStartIfReady: false)
+                self.updateStatus(retryTip)
+            } else {
+                // 普通"下载当前语言模型"按钮触发：保持原自动继续行为。
+                self.updateDownloadPackageListStatusText(header: "下载完成，正在校验模型完整性...")
+                self.checkModelReadyAndUpdateButton(autoStartIfReady: true)
+            }
         }
     }
 

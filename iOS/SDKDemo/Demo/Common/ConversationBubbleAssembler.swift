@@ -23,6 +23,10 @@ struct DemoConversationEvent {
     let sourceLangCode: String
     let targetLangCode: String
     let chunkId: String?
+    /// ASR 句子的 offset(纳秒)；仅 ASR final 句子携带,MT/TTS 为 nil。
+    let offset: Int64?
+    /// ASR 句子的 duration(纳秒)；仅 ASR final 句子携带,MT/TTS 为 nil。
+    let duration: Int64?
 
     init(bubbleId: String,
          sessionId: Int,
@@ -32,7 +36,9 @@ struct DemoConversationEvent {
          text: String?,
          sourceLangCode: String,
          targetLangCode: String,
-         chunkId: String? = nil) {
+         chunkId: String? = nil,
+         offset: Int64? = nil,
+         duration: Int64? = nil) {
         self.bubbleId = bubbleId
         self.sessionId = sessionId
         self.lane = lane
@@ -42,6 +48,8 @@ struct DemoConversationEvent {
         self.sourceLangCode = sourceLangCode
         self.targetLangCode = targetLangCode
         self.chunkId = chunkId
+        self.offset = offset
+        self.duration = duration
     }
 }
 
@@ -75,6 +83,10 @@ struct DemoConversationBubbleSnapshot {
     let translatedSegments: [DemoConversationDisplaySegment]
     /// 是否已收到服务端 bubble_end 信号，仅用于展示结束态，不阻止后续内容更新。
     let isBubbleEnded: Bool
+    /// 气泡内第一条 ASR final 句子的 offset(纳秒);无则为 nil。
+    let bOffset: Int64?
+    /// 气泡时长(纳秒) = 最后一条 ASR final 句子的 (offset+duration) − bOffset;无则为 nil。
+    let bDuration: Int64?
 }
 
 enum DemoConversationEventAdapter {
@@ -89,7 +101,9 @@ enum DemoConversationEventAdapter {
                                      text: text,
                                      sourceLangCode: result.srcCode,
                                      targetLangCode: result.dstCode,
-                                     chunkId: chunkId(from: result))
+                                     chunkId: chunkId(from: result),
+                                     offset: int64Value(result.extraData["offset"]),
+                                     duration: int64Value(result.extraData["duration"]))
     }
 
     static func makeTranslatedEvent(from result: TmkResult<String>, isFinal: Bool) -> DemoConversationEvent? {
@@ -137,6 +151,14 @@ enum DemoConversationEventAdapter {
         if let chunkId = result.extraData["chunkId"] as? String, chunkId.isEmpty == false { return chunkId }
         if let chunkId = result.extraData["chunk_id"] as? Int { return String(chunkId) }
         if let chunkId = result.extraData["chunkId"] as? Int { return String(chunkId) }
+        return nil
+    }
+
+    /// 从 extraData 中提取 Int64 数值，兼容 Int64 / Int / NSNumber 三种装箱形态。
+    private static func int64Value(_ value: Any?) -> Int64? {
+        if let value = value as? Int64 { return value }
+        if let value = value as? Int { return Int64(value) }
+        if let value = value as? NSNumber { return value.int64Value }
         return nil
     }
 
@@ -192,6 +214,10 @@ final class DemoConversationBubbleAssembler {
         var sourceRawChunkByEffective: [Int: Set<String>] = [:]
         var translatedRawChunkByEffective: [Int: Set<String>] = [:]
         var latestSessionId: Int = 0
+        /// 气泡内第一条 ASR final 句子的 offset(纳秒)。
+        var bOffset: Int64? = nil
+        /// 气泡内最后一条 ASR final 句子的 (offset+duration)(纳秒)。
+        var bLastEnd: Int64? = nil
     }
 
     private var aggregates: [String: BubbleAggregate] = [:]
@@ -255,6 +281,13 @@ final class DemoConversationBubbleAssembler {
             break
         }
 
+        // 聚合 b_offset/b_duration：仅统计 ASR 且 final 的句子。
+        // b_offset = 第一条 final 句子的 offset;b_duration = 最后一条 final 句子的 (offset+duration) − b_offset。
+        if event.stage == .asr, event.isFinal, let off = event.offset {
+            if aggregate.bOffset == nil { aggregate.bOffset = off }
+            if let dur = event.duration { aggregate.bLastEnd = off + dur }
+        }
+
         aggregates[key] = aggregate
         if let currentSnapshot = makeSnapshot(bubbleId: event.bubbleId,
                                               lane: event.lane,
@@ -311,6 +344,9 @@ final class DemoConversationBubbleAssembler {
                                                  rawIds: aggregate.translatedRawIdsByEffective,
                                                  rawChunks: aggregate.translatedRawChunkByEffective,
                                                  isActiveBubble: isActiveBubble)
+        let bDuration = (aggregate.bOffset != nil && aggregate.bLastEnd != nil)
+            ? aggregate.bLastEnd! - aggregate.bOffset!
+            : nil
         return DemoConversationBubbleSnapshot(bubbleId: bubbleId,
                                               sessionId: aggregate.latestSessionId,
                                               lane: lane,
@@ -320,7 +356,9 @@ final class DemoConversationBubbleAssembler {
                                               translatedText: translatedText,
                                               sourceSegments: sourceSegments,
                                               translatedSegments: translatedSegments,
-                                              isBubbleEnded: endedBubbleIds.contains(bubbleId))
+                                              isBubbleEnded: endedBubbleIds.contains(bubbleId),
+                                              bOffset: aggregate.bOffset,
+                                              bDuration: bDuration)
     }
 
     private func update(segmentText: String?,
@@ -611,7 +649,8 @@ enum DemoConversationSegmentRenderer {
                                targetLangCode: String,
                                translatedSegments: [DemoConversationDisplaySegment],
                                translatedFallbackText: String,
-                               font: UIFont) -> NSAttributedString {
+                               font: UIFont,
+                               timeRangeText: String? = nil) -> NSAttributedString {
         let result = NSMutableAttributedString()
         result.append(NSAttributedString(string: metaText,
                                          attributes: [.font: font, .foregroundColor: UIColor.secondaryLabel]))
@@ -623,6 +662,14 @@ enum DemoConversationSegmentRenderer {
                                          attributes: [.font: font, .foregroundColor: UIColor.label]))
         appendLine(to: result, label: "目标语言(\(targetLangCode))：",
                    segments: translatedSegments, fallbackText: translatedFallbackText, font: font)
+        // bubbleEnd 后单独一行醒目展示气泡时间段(纳秒),与源/译文和 meta 明显区分。
+        if let timeRangeText, timeRangeText.isEmpty == false {
+            result.append(NSAttributedString(string: "\n",
+                                             attributes: [.font: font, .foregroundColor: UIColor.label]))
+            let emphasisFont = UIFont.systemFont(ofSize: font.pointSize, weight: .semibold)
+            result.append(NSAttributedString(string: timeRangeText,
+                                             attributes: [.font: emphasisFont, .foregroundColor: UIColor.systemOrange]))
+        }
         return result
     }
 
@@ -650,5 +697,24 @@ enum DemoConversationSegmentRenderer {
             result.append(NSAttributedString(string: segment.text,
                                              attributes: [.font: font, .foregroundColor: color]))
         }
+    }
+}
+
+/// 生成气泡时间段的单行展示文本,供在线收听 / 一对一两个 cell 共用。
+///
+/// 仅当气泡收到 bubbleEnd 且已聚合出 offset 时展示 `⏱ offset=…s duration=…s`;
+/// 时间由纳秒换算为秒,保留 3 位小数(到毫秒)。否则返回 nil(不占行)。
+/// 离线场景无服务端 offset,bOffset 恒为 nil → 永不显示(需求:离线不管)。
+enum DemoBubbleTimeRangeFormatter {
+    static func text(isBubbleEnded: Bool, bOffset: Int64?, bDuration: Int64?) -> String? {
+        guard isBubbleEnded, let bOffset else { return nil }
+        let offsetSec = secondsText(fromNanos: bOffset)
+        let durationSec = secondsText(fromNanos: bDuration ?? 0)
+        return "⏱ offset=\(offsetSec)s duration=\(durationSec)s"
+    }
+
+    /// 纳秒 → 秒,保留 3 位小数(到毫秒)。
+    private static func secondsText(fromNanos nanos: Int64) -> String {
+        String(format: "%.3f", Double(nanos) / 1_000_000_000.0)
     }
 }

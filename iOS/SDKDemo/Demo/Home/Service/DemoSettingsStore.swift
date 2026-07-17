@@ -11,6 +11,8 @@ struct DemoSettingsStore {
         static let diagnosisEnabled = "demo.settings.diagnosisEnabled"
         static let consoleLogEnabled = "demo.settings.consoleLogEnabled"
         static let networkEnvironment = "demo.settings.networkEnvironment"
+        static let customNetworkBaseURLEnabled = "demo.settings.customNetworkBaseURLEnabled"
+        static let customNetworkBaseURL = "demo.settings.customNetworkBaseURL"
         static let mockEngineEnabled = "demo.settings.mockEngineEnabled"
         static let schemaVersion = "demo.settings.schemaVersion"
     }
@@ -28,10 +30,14 @@ struct DemoSettingsStore {
         let schemaVersion = userDefaults.integer(forKey: Key.schemaVersion)
         let rawEnvironment = userDefaults.string(forKey: Key.networkEnvironment) ?? DemoSettingsConfig.default.networkEnvironment.rawValue
         let environment = TmkTranslationNetworkEnvironment(rawValue: rawEnvironment) ?? .test
+        let storedCustomBaseURL = DemoSettingsConfig.normalizeCustomNetworkBaseURL(userDefaults.string(forKey: Key.customNetworkBaseURL))
+            ?? DemoSettingsConfig.rayneoNetworkBaseURL
         let storedConfig = DemoSettingsConfig(
             diagnosisEnabled: userDefaults.bool(forKey: Key.diagnosisEnabled),
             consoleLogEnabled: userDefaults.bool(forKey: Key.consoleLogEnabled),
             networkEnvironment: environment,
+            customNetworkBaseURLEnabled: userDefaults.bool(forKey: Key.customNetworkBaseURLEnabled),
+            customNetworkBaseURL: storedCustomBaseURL,
             mockEngineEnabled: userDefaults.bool(forKey: Key.mockEngineEnabled),
             schemaVersion: schemaVersion
         )
@@ -43,6 +49,8 @@ struct DemoSettingsStore {
             diagnosisEnabled: DemoSettingsConfig.default.diagnosisEnabled,
             consoleLogEnabled: DemoSettingsConfig.default.consoleLogEnabled,
             networkEnvironment: storedConfig.networkEnvironment,
+            customNetworkBaseURLEnabled: schemaVersion >= 5 ? storedConfig.customNetworkBaseURLEnabled : false,
+            customNetworkBaseURL: storedConfig.customNetworkBaseURL,
             mockEngineEnabled: storedConfig.mockEngineEnabled,
             schemaVersion: DemoSettingsConfig.default.schemaVersion
         )
@@ -54,6 +62,8 @@ struct DemoSettingsStore {
         userDefaults.set(config.diagnosisEnabled, forKey: Key.diagnosisEnabled)
         userDefaults.set(config.consoleLogEnabled, forKey: Key.consoleLogEnabled)
         userDefaults.set(config.networkEnvironment.rawValue, forKey: Key.networkEnvironment)
+        userDefaults.set(config.customNetworkBaseURLEnabled, forKey: Key.customNetworkBaseURLEnabled)
+        userDefaults.set(config.normalizedCustomNetworkBaseURL ?? DemoSettingsConfig.rayneoNetworkBaseURL, forKey: Key.customNetworkBaseURL)
         userDefaults.set(config.mockEngineEnabled, forKey: Key.mockEngineEnabled)
         userDefaults.set(config.schemaVersion, forKey: Key.schemaVersion)
     }

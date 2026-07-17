@@ -14,6 +14,10 @@ struct NowListeningRowViewData: Equatable {
     var translatedSegments: [DemoConversationDisplaySegment] = []
     /// 是否已收到服务端 bubble_end 信号，仅影响展示态，不阻止内容更新。
     var isBubbleEnded: Bool = false
+    /// 气泡首条 ASR final 句子的 offset(纳秒);bubbleEnd 后展示。
+    var bOffset: Int64? = nil
+    /// 气泡时长(纳秒);bubbleEnd 后展示。
+    var bDuration: Int64? = nil
 }
 
 enum NowListeningScenarioOption: CaseIterable, Equatable {

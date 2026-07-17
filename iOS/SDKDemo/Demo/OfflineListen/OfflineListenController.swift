@@ -176,8 +176,46 @@ private extension OfflineListenController {
             },
             UIAction(title: "音色") { [weak self] _ in
                 self?.showSpeakerMenu()
+            },
+            UIAction(title: "翻译模式") { [weak self] _ in
+                self?.showTranslateModeSheet()
+            },
+            UIAction(title: "房间能力") { [weak self] _ in
+                self?.showScenarioSheet()
             }
         ])
+    }
+
+    /// 能力档位(recognize/toText/toSpeech)选择:仿"房间能力"ActionSheet,选中项加"✓ "。
+    func showScenarioSheet() {
+        let current = viewModel.selectedScenarioOption
+        let alert = UIAlertController(title: "房间能力", message: nil, preferredStyle: .actionSheet)
+        OfflineScenarioOption.allCases.forEach { option in
+            let mark = current == option ? "✓ " : ""
+            alert.addAction(UIAlertAction(title: "\(mark)\(option.title)", style: .default) { [weak self] _ in
+                self?.viewModel.updateScenario(option)
+            })
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
+        present(alert, animated: true)
+    }
+
+    /// 翻译模式(partial/stable)选择:UIAlertController(actionSheet),选中项 title 前加"✓ "标记,不显示"当前:xxx"。
+    func showTranslateModeSheet() {
+        let current = viewModel.selectedTranslateMode
+        let alert = UIAlertController(title: "翻译模式", message: nil, preferredStyle: .actionSheet)
+        let partialMark = current == .partial ? "✓ " : ""
+        let stableMark = current == .stable ? "✓ " : ""
+        alert.addAction(UIAlertAction(title: "\(partialMark)中间态 partial", style: .default) { [weak self] _ in
+            self?.viewModel.updateTranslateMode(.partial)
+        })
+        alert.addAction(UIAlertAction(title: "\(stableMark)稳定 stable", style: .default) { [weak self] _ in
+            self?.viewModel.updateTranslateMode(.stable)
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
+        present(alert, animated: true)
     }
 
     /// 从 ViewModel 当前语言列表刷新语言选项。
@@ -237,6 +275,8 @@ private extension OfflineListenController {
 
         viewModel.$downloadStatusText
             .receive(on: DispatchQueue.main)
+            // 下载进度文案高频更新，节流到 200ms 降低刷新频率。
+            .throttle(for: .milliseconds(200), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] text in
                 self?.modelPackageListView.updateSummary(text)
                 self?.applyDownloadButtonStatusText(text)
@@ -252,6 +292,8 @@ private extension OfflineListenController {
 
         viewModel.$modelPackageInfos
             .receive(on: DispatchQueue.main)
+            // 下载进度回调高频触发 packages 更新，节流到 200ms 降低刷新频率。
+            .throttle(for: .milliseconds(200), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] packages in
                 guard let self else { return }
                 self.modelPackageListView.render(packages: packages)
@@ -264,6 +306,13 @@ private extension OfflineListenController {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] prompt in
                 self?.presentRuntimePrompt(prompt)
+            }
+            .store(in: &cancellables)
+
+        viewModel.pendingDownloadPrompt
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] prompt in
+                self?.presentPendingDownloadPrompt(prompt)
             }
             .store(in: &cancellables)
     }
@@ -422,6 +471,21 @@ private extension OfflineListenController {
         present(alert, animated: true)
     }
 
+    /// 切语言/升档预检未就绪时的下载确认框：两按钮（下载 / 取消），风格对齐 presentRuntimePrompt。
+    func presentPendingDownloadPrompt(_ prompt: OfflinePendingDownloadPrompt) {
+        guard presentedViewController == nil else { return }
+        let alert = UIAlertController(title: prompt.title,
+                                      message: prompt.message,
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
+            self?.viewModel.cancelPendingDownload()
+        })
+        alert.addAction(UIAlertAction(title: "下载", style: .default) { [weak self] _ in
+            self?.viewModel.confirmPendingDownload()
+        })
+        present(alert, animated: true)
+    }
+
     func showLanguagePicker() {
         guard pickerMaskView.superview == nil else { return }
         guard supportedLanguageOptions.count >= 2 else { return }
@@ -495,11 +559,13 @@ private extension OfflineListenController {
         sourceLabel.snp.makeConstraints { make in
             make.left.equalToSuperview()
             make.top.equalTo(cancelButton.snp.bottom).offset(6)
+            make.height.equalTo(20)
             make.width.equalToSuperview().multipliedBy(0.5)
         }
         targetLabel.snp.makeConstraints { make in
             make.right.equalToSuperview()
             make.top.equalTo(sourceLabel)
+            make.height.equalTo(sourceLabel)
             make.width.equalTo(sourceLabel)
         }
         topLine.snp.makeConstraints { make in

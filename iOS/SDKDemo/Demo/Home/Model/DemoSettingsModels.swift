@@ -48,7 +48,9 @@ struct DemoSettingsViewState: Equatable {
     var versionText = "TmkTranslationSDK v\(TmkTranslationSDK.sdkVersion)"
 
     var isConfirmEnabled: Bool {
-        draftConfig != persistedConfig && isApplying == false
+        draftConfig != persistedConfig
+            && draftConfig.isCustomNetworkBaseURLValid
+            && isApplying == false
     }
 }
 
@@ -56,16 +58,54 @@ struct DemoSettingsConfig: Equatable {
     var diagnosisEnabled: Bool
     var consoleLogEnabled: Bool
     var networkEnvironment: TmkTranslationNetworkEnvironment
+    var customNetworkBaseURLEnabled: Bool
+    var customNetworkBaseURL: String
     var mockEngineEnabled: Bool
     var schemaVersion: Int
+
+    static let rayneoNetworkBaseURL = "https://api-rayneo.timekettle.co"
+
+    var normalizedCustomNetworkBaseURL: String? {
+        Self.normalizeCustomNetworkBaseURL(customNetworkBaseURL)
+    }
+
+    var isCustomNetworkBaseURLValid: Bool {
+        customNetworkBaseURLEnabled == false || normalizedCustomNetworkBaseURL != nil
+    }
 
     static var `default`: DemoSettingsConfig {
         DemoSettingsConfig(
             diagnosisEnabled: false,
             consoleLogEnabled: true,
             networkEnvironment: .test,
+            customNetworkBaseURLEnabled: false,
+            customNetworkBaseURL: rayneoNetworkBaseURL,
             mockEngineEnabled: false,
-            schemaVersion: 4
+            schemaVersion: 5
         )
+    }
+
+    static func normalizeCustomNetworkBaseURL(_ rawValue: String?) -> String? {
+        let trimmed = rawValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? ""
+        guard trimmed.isEmpty == false,
+              var components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host,
+              host.isEmpty == false,
+              components.query == nil,
+              components.fragment == nil else {
+            return nil
+        }
+        let path = components.percentEncodedPath
+        guard path.isEmpty || path == "/" else {
+            return nil
+        }
+        components.percentEncodedPath = ""
+        components.query = nil
+        components.fragment = nil
+        return components.string
     }
 }

@@ -130,8 +130,6 @@ final class OneToOneViewModel: NSObject {
                                                                framesPerBuffer: 1024))
         }
         guard let voiceIO else { return }
-        // VAD 检测依赖 SDK 源仓库内部组件，samples 工程不引入该组件，
-        // 这里保留 resolveVADState 钩子但返回默认 .silence，输入回调照常运行。
         voiceIO.resolveVADState = { _, _ in .silence }
 
         configureInterruptionHandling(for: voiceIO)
@@ -443,21 +441,26 @@ enum DemoTmkResultLogFormatter {
 
 private extension OneToOneViewModel {
     func startOnlineListening() {
+        let startupStartedAt = Date()
+        let authStartedAt = Date()
         TmkTranslationSDK.shared.verifyAuth { [weak self] result in
             guard let self else { return }
+            let authDurationMs = self.durationMs(since: authStartedAt)
             switch result {
             case .success:
                 self.isAuthVerified = true
+                Self.logger.info("启动翻译耗时 鉴权耗时 authDurationMs=\(authDurationMs, privacy: .public) result=success")
                 self.updateStatus("鉴权成功，准备创建房间...")
-                self.createRoomAndChannel()
+                self.createRoomAndChannel(startupStartedAt: startupStartedAt)
             case .failure(let error):
                 self.isAuthVerified = false
+                Self.logger.info("启动翻译耗时 鉴权耗时 authDurationMs=\(authDurationMs, privacy: .public) totalDurationMs=\(self.durationMs(since: startupStartedAt), privacy: .public) result=failure")
                 self.updateStatus(DemoSDKConfigurationFactory.authFailureMessage(error))
             }
         }
     }
 
-    func createRoomAndChannel() {
+    func createRoomAndChannel(startupStartedAt: Date) {
         let roomConfig = TmkTranslationRoomConfig(
             sourceLang: selectedRightLang,
             targetLang: selectedLeftLang,
@@ -467,18 +470,22 @@ private extension OneToOneViewModel {
             translateEngine: selectedTranslateEngine,
             dialogConversationAudioMode: selectedDialogConversationAudioMode
         )
+        let roomStartedAt = Date()
         TmkTranslationSDK.shared.createTmkTranslationRoom(config: roomConfig) { [weak self] result in
             guard let self else { return }
+            let roomDurationMs = self.durationMs(since: roomStartedAt)
             switch result {
             case .success(let room):
-                self.createTranslationChannel(room: room)
+                Self.logger.info("启动翻译耗时 创建房间耗时 roomDurationMs=\(roomDurationMs, privacy: .public) result=success")
+                self.createTranslationChannel(room: room, startupStartedAt: startupStartedAt)
             case .failure(let error):
+                Self.logger.info("启动翻译耗时 创建房间耗时 roomDurationMs=\(roomDurationMs, privacy: .public) totalDurationMs=\(self.durationMs(since: startupStartedAt), privacy: .public) result=failure")
                 self.updateStatus("房间创建失败：\(error.localizedDescription)")
             }
         }
     }
 
-    func createTranslationChannel(room: TmkTranslationRoom) {
+    func createTranslationChannel(room: TmkTranslationRoom, startupStartedAt: Date) {
         self.room = room
         refreshTargetPlaybackUIDs(from: room)
         let config = TmkTranslationChannelConfig.Builder()
@@ -500,15 +507,20 @@ private extension OneToOneViewModel {
             $0.targetLanguage = self.selectedTargetLang
         }
 
+        let channelStartedAt = Date()
         TmkTranslationSDK.shared.createTranslationChannel(config) { [weak self] result in
             guard let self else { return }
+            let channelDurationMs = self.durationMs(since: channelStartedAt)
+            let totalDurationMs = self.durationMs(since: startupStartedAt)
             switch result {
             case .success(let channel):
                 self.channel = channel
                 channel.setTranslationListener(self)
                 self.updateStateOnMain { $0.canStartListening = true }
+                Self.logger.info("启动翻译耗时 加入通道耗时 channelDurationMs=\(channelDurationMs, privacy: .public) totalDurationMs=\(totalDurationMs, privacy: .public) result=success")
                 self.updateStatus("在线通道已就绪，点击“开始收听”开始采集")
             case .failure(let error):
+                Self.logger.info("启动翻译耗时 加入通道耗时 channelDurationMs=\(channelDurationMs, privacy: .public) totalDurationMs=\(totalDurationMs, privacy: .public) result=failure")
                 self.updateStatus("通道启动失败：\(error.localizedDescription)")
             }
         }
@@ -634,6 +646,10 @@ private extension OneToOneViewModel {
         updateStateOnMain { $0.statusText = text }
     }
 
+    func durationMs(since startAt: Date) -> Int {
+        Int(Date().timeIntervalSince(startAt) * 1000)
+    }
+
     func updateStateOnMain(_ action: @escaping (inout OneToOneViewState) -> Void) {
         DispatchQueue.main.async {
             var newState = self.state
@@ -696,6 +712,8 @@ private extension OneToOneViewModel {
                 row.sourceSegments = self.highlightedSource(snapshot.sourceSegments)
                 row.translatedSegments = self.highlightedTranslated(snapshot.translatedSegments)
                 row.isBubbleEnded = snapshot.isBubbleEnded
+                row.bOffset = snapshot.bOffset
+                row.bDuration = snapshot.bDuration
                 self.rows[rowIndex] = row
                 self.rowMutation.send(.update(row: row, index: rowIndex, heightMayChange: true))
             } else {
@@ -708,7 +726,9 @@ private extension OneToOneViewModel {
                                               translatedText: snapshot.translatedText,
                                               sourceSegments: self.highlightedSource(snapshot.sourceSegments),
                                               translatedSegments: self.highlightedTranslated(snapshot.translatedSegments),
-                                              isBubbleEnded: snapshot.isBubbleEnded)
+                                              isBubbleEnded: snapshot.isBubbleEnded,
+                                              bOffset: snapshot.bOffset,
+                                              bDuration: snapshot.bDuration)
                 self.rows.append(row)
                 let rowIndex = self.rows.count - 1
                 self.rowIndexMap[key] = rowIndex
@@ -886,7 +906,9 @@ private extension OneToOneViewModel {
                                      text: event.text,
                                      sourceLangCode: languagePair.source,
                                      targetLangCode: languagePair.target,
-                                     chunkId: event.chunkId)
+                                     chunkId: event.chunkId,
+                                     offset: event.offset,
+                                     duration: event.duration)
     }
 
     func refreshTargetPlaybackUIDs(from room: TmkTranslationRoom) {
