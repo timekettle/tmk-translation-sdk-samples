@@ -81,7 +81,8 @@ private fun rememberLanguageOptions(online: Boolean): LanguageOptionsUiState {
         if (attempt == 0 && LanguageOptionsCache.get(online) != null) return@LaunchedEffect
         state = LanguageOptionsState.Loading
         try {
-            val map = fetchLocaleList(online).toDisplayMap()
+            val remoteMap = fetchLocaleList(online).toDisplayMap()
+            val map = if (online) mergeOnlineLanguageDefaults(remoteMap) else remoteMap
             // 空列表与失败同等处理:上层据此禁用「开始翻译」。
             state = if (map.isNotEmpty()) {
                 LanguageOptionsCache.put(online, map)
@@ -104,6 +105,14 @@ private fun TmkLocaleListResponse.toDisplayMap(): Map<String, String> =
     localeOptions
         .filter { it.code.isNotEmpty() }
         .associate { it.code to it.displayName.ifBlank { it.code } }
+
+internal fun mergeOnlineLanguageDefaults(remote: Map<String, String>): Map<String, String> {
+    if (remote.isEmpty()) return remote
+    return LinkedHashMap<String, String>().apply {
+        putAll(TranslationLanguages.online)
+        putAll(remote)
+    }
+}
 
 /** 桥接 SDK 的 Callback 接口为 suspend 调用,随协程取消而取消请求。 */
 private suspend fun fetchLocaleList(online: Boolean): TmkLocaleListResponse =

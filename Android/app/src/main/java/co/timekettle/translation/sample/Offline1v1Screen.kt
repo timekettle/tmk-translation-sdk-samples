@@ -1,5 +1,7 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.sdk.common.models.SpeakerGender
+import android.widget.Toast
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,6 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -57,9 +60,37 @@ data class Offline1v1Screen(
         val leftSpeakerGender by viewModel.leftSpeakerGender.collectAsState()
         val rightSpeakerGender by viewModel.rightSpeakerGender.collectAsState()
         val offlineAudioChannelMode by viewModel.offlineAudioChannelMode.collectAsState()
+        val playbackMode by viewModel.playbackMode.collectAsState()
+        val isLocaleUpdating by viewModel.isLocaleUpdating.collectAsState()
+        val localeSwitchError by viewModel.localeSwitchError.collectAsState()
+        val translateMode by viewModel.translateMode.collectAsState()
+        val scenarioOption by viewModel.scenarioOption.collectAsState()
+        val isScenarioUpdating by viewModel.isScenarioUpdating.collectAsState()
+        val pendingDownloadPrompt by viewModel.pendingDownloadPrompt.collectAsState()
+        val retryHintAfterDownload by viewModel.retryHintAfterDownload.collectAsState()
+        val totalDownloadProgress by viewModel.totalDownloadProgress.collectAsState()
+        val context = LocalContext.current
+        // 语言切换失败:轻量 Toast 提示,不打断当前通道。
+        LaunchedEffect(localeSwitchError) {
+            localeSwitchError?.let {
+                Toast.makeText(context, it, Toast.LENGTH_LONG).show()
+                viewModel.consumeLocaleSwitchError()
+            }
+        }
+        // Bug2:模型下载完成后提示用户手动重试切换(不自动重试)。
+        LaunchedEffect(retryHintAfterDownload) {
+            retryHintAfterDownload?.let {
+                Toast.makeText(context, it, Toast.LENGTH_LONG).show()
+                viewModel.consumeRetryHintAfterDownload()
+            }
+        }
         var settingsExpanded by remember { mutableStateOf(false) }
         var showSpeakerDialog by remember { mutableStateOf(false) }
-        var showTtsOutputDialog by remember { mutableStateOf(false) }
+        var showChannelModeDialog by remember { mutableStateOf(false) }
+        var showPlaybackModeDialog by remember { mutableStateOf(false) }
+        var showLocaleDialog by remember { mutableStateOf(false) }
+        var showTranslateModeDialog by remember { mutableStateOf(false) }
+        var showScenarioDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
         val offlineLanguageOptions = (rememberOfflineLanguageOptions().state
             as? LanguageOptionsState.Ready)?.options ?: emptyMap()
@@ -132,6 +163,14 @@ data class Offline1v1Screen(
                         onDismissRequest = { settingsExpanded = false },
                     ) {
                         DropdownMenuItem(
+                            text = { Text(if (isLocaleUpdating) "语言设置(切换中...)" else "语言设置") },
+                            enabled = !isLocaleUpdating,
+                            onClick = {
+                                settingsExpanded = false
+                                showLocaleDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
                             text = { Text("音色设置") },
                             onClick = {
                                 settingsExpanded = false
@@ -139,10 +178,32 @@ data class Offline1v1Screen(
                             },
                         )
                         DropdownMenuItem(
-                            text = { Text("TTS输出方式: ${offlineAudioChannelMode.displayName()}") },
+                            text = { Text("通道模式: ${offlineAudioChannelMode.displayName()}") },
                             onClick = {
                                 settingsExpanded = false
-                                showTtsOutputDialog = true
+                                showChannelModeDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("播放音源: ${playbackMode.title}") },
+                            onClick = {
+                                settingsExpanded = false
+                                showPlaybackModeDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("翻译模式: ${TranslateModeOption.from(translateMode).title}") },
+                            onClick = {
+                                settingsExpanded = false
+                                showTranslateModeDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (isScenarioUpdating) "能力: ${scenarioOption.title}(切换中...)" else "能力: ${scenarioOption.title}") },
+                            enabled = !isScenarioUpdating,
+                            onClick = {
+                                settingsExpanded = false
+                                showScenarioDialog = true
                             },
                         )
                     }
@@ -157,6 +218,7 @@ data class Offline1v1Screen(
                 downloadProgress == "下载失败" -> "模型下载失败"
                 downloadProgress == "下载已取消" -> "模型下载已取消"
                 downloadProgress == "下载完成" && !isChannelReady && !isStarting && !isStarted -> "模型下载完成"
+                isLocaleUpdating -> "正在切换语言..."
                 !isModelReady -> "模型未下载"
                 isStarted -> "正在收听中..."
                 isChannelReady -> "离线一对一通道已就绪，可以开始收听"
@@ -186,9 +248,10 @@ data class Offline1v1Screen(
                         "连接：$connectionState",
                         "通道：one_to_one/offline",
                         "模型：${if (isModelReady) "已就绪" else "未下载"}",
+                        "模式：${offlineAudioChannelMode.displayName()}",
+                        "播放：${playbackMode.title}",
                         "采样：配置16000Hz/2ch",
                         "输入：左声道固定PCM / 右声道麦克风",
-                        "TTS输出：${offlineAudioChannelMode.displayName()}",
                     ),
                 )
             }
@@ -236,6 +299,8 @@ data class Offline1v1Screen(
             OfflineModelPackageList(
                 packages = offlineModelPackages,
                 modifier = Modifier.padding(bottom = 6.dp),
+                // Bug3:下载中用 SDK 按字节总进度;非下载态传 null 回退等权平均。
+                totalProgress = if (isDownloading) totalDownloadProgress else null,
             )
 
             TranslationStartStopButtons(
@@ -255,9 +320,27 @@ data class Offline1v1Screen(
                 metaText = { row ->
                     "sessionId: ${row.sessionId}  bubbleId: ${row.bubbleId}\n" +
                         "通道: one_to_one/offline\n" +
-                        "采样: 配置16000Hz/2ch  TTS输出:${offlineAudioChannelMode.displayName()}"
+                        "采样: 配置16000Hz/2ch  模式:${offlineAudioChannelMode.displayName()}  播放:${playbackMode.title}"
                 },
                 scrollOnLatestUpdate = true,
+            )
+        }
+
+        if (showLocaleDialog) {
+            OnlineLocaleSwitchDialog(
+                title = "切换离线 1v1 语言",
+                sourceLabel = "源语言（右声道）",
+                targetLabel = "目标语言（左声道）",
+                initialSourceLang = sourceLang,
+                initialTargetLang = targetLang,
+                languageOptions = offlineLanguageOptions,
+                onDismiss = { showLocaleDialog = false },
+                onConfirm = { source, target ->
+                    showLocaleDialog = false
+                    // 离线一对一双向:UI 仍选 source/target 一对,SDK 内部处理左右双向。
+                    // 通道就绪则触发离线三段模型销毁重建,未就绪则暂存等建通道后生效。
+                    viewModel.updateLanguages(source, target)
+                },
             )
         }
 
@@ -273,20 +356,62 @@ data class Offline1v1Screen(
             )
         }
 
-        if (showTtsOutputDialog) {
-            Offline1v1TtsOutputModeDialog(
+        if (showChannelModeDialog) {
+            Offline1v1ChannelModeDialog(
                 initialMode = offlineAudioChannelMode,
-                onDismiss = { showTtsOutputDialog = false },
+                onDismiss = { showChannelModeDialog = false },
                 onConfirm = { mode ->
-                    showTtsOutputDialog = false
+                    showChannelModeDialog = false
+                    // 切换通道模式(标准/低延迟):离线不可热切,已创建通道时会重建离线通道使新模式生效。
                     viewModel.setOfflineAudioChannelMode(mode)
                 },
+            )
+        }
+
+        if (showPlaybackModeDialog) {
+            OneToOnePlaybackModeDialog(
+                initialMode = playbackMode,
+                onDismiss = { showPlaybackModeDialog = false },
+                onConfirm = { mode ->
+                    showPlaybackModeDialog = false
+                    // 切换本机播放身份:只播本机那一路 TTS,丢弃对侧(对齐 iOS)。热切换,清空播放缓冲。
+                    viewModel.setPlaybackMode(mode)
+                },
+            )
+        }
+        if (showTranslateModeDialog) {
+            TranslateModeDialog(
+                initialMode = translateMode,
+                onDismiss = { showTranslateModeDialog = false },
+                onConfirm = { mode ->
+                    showTranslateModeDialog = false
+                    viewModel.setTranslateMode(mode)
+                },
+            )
+        }
+        if (showScenarioDialog) {
+            OfflineScenarioDialog(
+                title = "选择能力档位",
+                initialOption = scenarioOption,
+                onDismiss = { showScenarioDialog = false },
+                onConfirm = { option ->
+                    showScenarioDialog = false
+                    viewModel.updateScenario(option)
+                },
+            )
+        }
+        // Bug2:模型未就绪确认弹窗(切语言/升档触发)。下载→VM 下载,取消→VM 清弹窗并提示未切换。
+        pendingDownloadPrompt?.let { info ->
+            OfflineModelDownloadPromptDialog(
+                info = info,
+                onConfirm = { viewModel.confirmPendingDownload() },
+                onDismiss = { viewModel.cancelPendingDownload() },
             )
         }
     }
 }
 
 private fun TmkOfflineAudioChannelMode.displayName(): String = when (this) {
-    TmkOfflineAudioChannelMode.MONO -> "Mono"
-    TmkOfflineAudioChannelMode.STEREO -> "Stereo"
+    TmkOfflineAudioChannelMode.MONO -> "低延迟模式"
+    TmkOfflineAudioChannelMode.STEREO -> "标准模式"
 }

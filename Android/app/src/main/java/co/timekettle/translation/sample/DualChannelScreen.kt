@@ -1,5 +1,6 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.sdk.common.models.SpeakerGender
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -7,8 +8,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
-import androidx.hilt.navigation.compose.hiltViewModel
 import cafe.adriel.voyager.core.screen.Screen
+import cafe.adriel.voyager.hilt.getViewModel
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 
@@ -20,7 +21,7 @@ data class DualChannelScreen(
     @Composable
     override fun Content() {
         val navigator = LocalNavigator.currentOrThrow
-        val viewModel: Online1v1ViewModel = hiltViewModel()
+        val viewModel: Online1v1ViewModel = getViewModel()
         val initErrorMessage by viewModel.initErrorMessage.collectAsState()
         val isStarted by viewModel.isStarted.collectAsState()
         val isChannelReady by viewModel.isChannelReady.collectAsState()
@@ -42,11 +43,15 @@ data class DualChannelScreen(
         val rightSpeakerGender by viewModel.rightSpeakerGender.collectAsState()
         val onlineTranslateEngine by viewModel.onlineTranslateEngine.collectAsState()
         val roomScenarioOption by viewModel.roomScenarioOption.collectAsState()
+        val audioMode by viewModel.audioMode.collectAsState()
+        val playbackMode by viewModel.playbackMode.collectAsState()
         var settingsExpanded by remember { mutableStateOf(false) }
         var showLocaleDialog by remember { mutableStateOf(false) }
         var showSpeakerDialog by remember { mutableStateOf(false) }
         var showTranslateEngineDialog by remember { mutableStateOf(false) }
         var showRoomScenarioDialog by remember { mutableStateOf(false) }
+        var showChannelAudioModeDialog by remember { mutableStateOf(false) }
+        var showPlaybackModeDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
         val onlineLanguageOptions = (rememberOnlineLanguageOptions().state
             as? LanguageOptionsState.Ready)?.options ?: emptyMap()
@@ -55,7 +60,7 @@ data class DualChannelScreen(
             viewModel.setLanguagesIfNeeded(sourceLang, targetLang)
             viewModel.initSDK()
         }
-        BackHandler(enabled = true) { viewModel.stopTranslation(); navigator.pop() }
+        BackHandler(enabled = true) { navigator.pop() }
         DisposableEffect(Unit) { onDispose { viewModel.stopTranslation() } }
 
         if (initErrorMessage != null) {
@@ -140,6 +145,20 @@ data class DualChannelScreen(
                                 showRoomScenarioDialog = true
                             },
                         )
+                        DropdownMenuItem(
+                            text = { Text("通道模式") },
+                            onClick = {
+                                settingsExpanded = false
+                                showChannelAudioModeDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("播放音源") },
+                            onClick = {
+                                settingsExpanded = false
+                                showPlaybackModeDialog = true
+                            },
+                        )
                     }
                 }
             }
@@ -168,6 +187,8 @@ data class DualChannelScreen(
                         "房间：$currentRoomNo",
                         "能力：${roomScenarioOption.title}",
                         "通道：one_to_one/online",
+                        "模式：${co.timekettle.translation.sample.OnlineChannelAudioModeOption.from(audioMode).title}",
+                        "播放：${playbackMode.title}",
                         "采样：配置16000Hz/2ch  采集$captureInfo  回放$playbackInfo",
                         "输入：左声道固定PCM / 右声道麦克风",
                     ),
@@ -247,6 +268,30 @@ data class DualChannelScreen(
                 onConfirm = {
                     showRoomScenarioDialog = false
                     viewModel.updateRoomScenario(it)
+                },
+            )
+        }
+
+        if (showChannelAudioModeDialog) {
+            OnlineChannelAudioModeDialog(
+                initialMode = audioMode,
+                onDismiss = { showChannelAudioModeDialog = false },
+                onConfirm = {
+                    showChannelAudioModeDialog = false
+                    // 切换通道模式:收听中也可切,切换后自动重建翻译引擎(房间+通道)使新模式生效。
+                    viewModel.setAudioMode(it)
+                },
+            )
+        }
+
+        if (showPlaybackModeDialog) {
+            OneToOnePlaybackModeDialog(
+                initialMode = playbackMode,
+                onDismiss = { showPlaybackModeDialog = false },
+                onConfirm = {
+                    showPlaybackModeDialog = false
+                    // 切换本机播放身份:只播本机那一路 TTS,丢弃对侧(对齐 iOS)。热切换,清空播放缓冲。
+                    viewModel.setPlaybackMode(it)
                 },
             )
         }

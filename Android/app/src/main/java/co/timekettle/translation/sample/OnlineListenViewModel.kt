@@ -1,4 +1,5 @@
 package co.timekettle.translation.sample
+
 import co.timekettle.translation.TmkTranslationChannel
 import co.timekettle.translation.TmkTranslationSDK
 
@@ -9,6 +10,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
@@ -22,16 +24,16 @@ import co.timekettle.translation.core.AbstractChannelEngine
 import co.timekettle.translation.enums.Scenario
 import co.timekettle.translation.enums.TmkOnlineTranslateEngine
 import co.timekettle.translation.enums.TranslationMode
-import co.timekettle.translation.lingcast.common.enums.TransModeType
+import co.timekettle.sdk.common.enums.TransModeType
 import co.timekettle.translation.listener.ActionCallback
 import co.timekettle.translation.listener.AuthCallback
 import co.timekettle.translation.listener.CreateChannelCallback
 import co.timekettle.translation.listener.CreateRoomCallback
 import co.timekettle.translation.listener.TmkTranslationListener
 import co.timekettle.translation.model.Result
-import co.timekettle.translation.model.SpeakerChannel
-import co.timekettle.translation.model.SpeakerGender
-import co.timekettle.translation.model.TmkSpeaker
+import co.timekettle.sdk.common.models.SpeakerChannel
+import co.timekettle.sdk.common.models.SpeakerGender
+import co.timekettle.sdk.common.models.TmkSpeaker
 import co.timekettle.translation.model.TmkTranslationChannelState
 import co.timekettle.translation.model.TmkTranslationChannelStateReason
 import co.timekettle.translation.model.TmkTranslationChannelStateSnapshot
@@ -59,6 +61,15 @@ class OnlineListenViewModel @Inject constructor(
     }
 
     private data class TtsFrame(val data: ByteArray, val channelCount: Int)
+    private data class StartupTiming(
+        val startedAtMs: Long = SystemClock.elapsedRealtime(),
+        val authStartedAtMs: Long = startedAtMs,
+        var roomStartedAtMs: Long = 0L,
+        var channelStartedAtMs: Long = 0L,
+    ) {
+        fun durationSince(startedAtMs: Long): Long = SystemClock.elapsedRealtime() - startedAtMs
+        fun totalDurationMs(): Long = durationSince(startedAtMs)
+    }
 
     private var channel: TmkTranslationChannel? = null
     private var room: TmkTranslationRoom? = null
@@ -76,14 +87,22 @@ class OnlineListenViewModel @Inject constructor(
     @Volatile private var isTtsPlayerRunning = false
     private var vadDetector: VadDetector? = null
     private val bubbleAssembler = DemoConversationBubbleAssembler()
-    /** 当前应高亮的 session_id（源文蓝色），由 online_tts_state.is_end 控制。 */
-    private val blueSessions = mutableSetOf<String>()
-    /** 当前应高亮的 chunk_id（译文蓝色），由 online_tts_state.is_end 控制。 */
-    private val blueChunks = mutableSetOf<String>()
+    /**
+     * 当前每个 channel 应高亮的 session_id（源文蓝色），由 online_tts_state.is_end 控制。
+     * 同一 channel 永远只有一段文本在高亮，用 Map<channel, sessionId> 保证唯一性。
+     * is_end=false 时替换该 channel 的高亮，is_end=true 时清除。
+     */
+    private val blueSessionByChannel = mutableMapOf<String, String>()
+    /**
+     * 当前每个 channel 应高亮的 chunk_id（译文蓝色），由 online_tts_state.is_end 控制。
+     * 同一 channel 永远只有一段文本在高亮，用 Map<channel, chunkId> 保证唯一性。
+     */
+    private val blueChunkByChannel = mutableMapOf<String, String>()
     private val networkEventPolicy = DemoOnlineNetworkEventPolicy()
 
+    @Volatile private var pendingMetadata: ByteArray? = null
     @Volatile private var isRecording = false
-    @Volatile private var released = false
+    private val lifecycleGate = DemoConversationLifecycleGate()
     private val pageSessionId = AtomicInteger(0)
     private val isPreparingChannel = java.util.concurrent.atomic.AtomicBoolean(false)
     private var recordingThread: Thread? = null
@@ -145,29 +164,44 @@ class OnlineListenViewModel @Inject constructor(
     private fun log(msg: String) = Log.d(TAG, msg)
 
     private fun publishBubbles() {
+        val blueSessions = blueSessionByChannel.values.toSet()
+        val blueChunks = blueChunkByChannel.values.toSet()
         _bubbles.value = bubbleAssembler.snapshotWithSegments().map { snapshot ->
             DemoConversationHighlighter.applyHighlight(snapshot, blueSessions, blueChunks)
         }
     }
 
     /**
-     * 收到 online_tts_state：按 is_end 着色（false→蓝，true→默认）。
+     * 收到 online_tts_state：按 channel 维度唯一高亮（同一 channel 永远只有一段文本高亮）。
+     * - is_end=false：替换该 channel 的高亮 session_id / chunk_id（清掉旧的，写入新的）。
+     * - is_end=true：清除该 channel 的高亮。
      * 源文按 session_id 命中、译文按 chunk_id 命中，随后重渲染所有气泡。
      */
     private fun applyTtsHighlight(args: Any?) {
         val result = args as? Result<*> ?: return
         val isEnd = (result.extraData?.get("is_end") as? Boolean) ?: result.isLast
+        val channel = result.extraData?.get("channel")?.toString()?.takeIf { it.isNotBlank() } ?: "left"
         val sessionId = result.sessionId.takeIf { it.isNotBlank() }
         val chunkId = result.extraData?.get("chunk_id")?.toString()?.takeIf { it.isNotBlank() }
         if (isEnd) {
-            sessionId?.let { blueSessions.remove(it) }
-            chunkId?.let { blueChunks.remove(it) }
+            blueSessionByChannel.remove(channel)
+            blueChunkByChannel.remove(channel)
         } else {
-            sessionId?.let { blueSessions.add(it) }
-            chunkId?.let { blueChunks.add(it) }
+            // 同一 channel 唯一高亮：替换而非追加，旧的自动被覆盖。
+            sessionId?.let { blueSessionByChannel[channel] = it }
+                ?: blueSessionByChannel.remove(channel)
+            chunkId?.let { blueChunkByChannel[channel] = it }
+                ?: blueChunkByChannel.remove(channel)
         }
         publishBubbles()
     }
+
+    private fun buildMetadataBytes(): ByteArray {
+        val sdf = java.text.SimpleDateFormat("HHmmss", java.util.Locale.getDefault())
+        val time = sdf.format(java.util.Date())
+        return byteArrayOf("1".toByte(), time.substring(0, 2).toByte(), time.substring(2, 4).toByte(), time.substring(4, 6).toByte())
+    }
+
 
     fun setLanguagesIfNeeded(sourceLang: String, targetLang: String) {
         if (hasLockedLanguages) return
@@ -176,7 +210,8 @@ class OnlineListenViewModel @Inject constructor(
 
     private fun nextPageSession(): Int = pageSessionId.incrementAndGet()
 
-    private fun isActiveSession(sessionId: Int): Boolean = !released && pageSessionId.get() == sessionId
+    private fun isActiveSession(sessionId: Int): Boolean =
+        !lifecycleGate.isReleased() && pageSessionId.get() == sessionId
 
     private fun isSdkChannelReady(): Boolean {
         return when (_channelState.value.state) {
@@ -248,6 +283,9 @@ class OnlineListenViewModel @Inject constructor(
     }
 
     fun initSDK() {
+        // 退出竞态守卫:页面已退出(released)时不得再初始化/建房,避免退出瞬间并发触发导致重复建房。
+        // 合法重建(recreateChannel*)已先置 released=false,不受影响。
+        if (lifecycleGate.isReleased()) return
         try {
             if (!_isInitialized.value) {
                 TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig(application))
@@ -269,6 +307,8 @@ class OnlineListenViewModel @Inject constructor(
     }
 
     fun startTranslation() {
+        // 退出竞态守卫:退出后 channel 已置空,并发的 startTranslation 会误走 initSDK 重建分支导致重复建房。
+        if (lifecycleGate.isReleased()) return
         if (!_isInitialized.value || channel == null || !isSdkChannelReady()) {
             if (channel != null && canRetrySdkChannel()) {
                 _statusText.value = "通道可恢复，正在重新连接..."
@@ -288,28 +328,32 @@ class OnlineListenViewModel @Inject constructor(
     }
 
     private fun prepareChannelIfNeeded(sessionId: Int = pageSessionId.get()) {
-        if (channel != null || !isPreparingChannel.compareAndSet(false, true)) return
-        released = false
+        if (!DemoConversationPreparationPolicy.canPrepare(lifecycleGate.isReleased(), channel != null)) return
+        if (!isPreparingChannel.compareAndSet(false, true)) return
+        val startupTiming = StartupTiming()
         _statusText.value = "正在鉴权..."
         log("开始鉴权...")
         TmkTranslationSDK.verifyAuth(object : AuthCallback {
             override fun onSuccess() {
                 if (!isActiveSession(sessionId)) { isPreparingChannel.set(false); return }
                 _statusText.value = "鉴权成功，准备创建房间..."
-                log("鉴权成功"); doStart(sessionId)
+                log("启动翻译耗时 鉴权耗时 authDurationMs=${startupTiming.durationSince(startupTiming.authStartedAtMs)} result=success")
+                log("鉴权成功"); doStart(sessionId, startupTiming)
             }
             override fun onError(errorId: Int, e: Exception) {
                 isPreparingChannel.set(false)
                 if (!isActiveSession(sessionId)) return
+                log("启动翻译耗时 鉴权耗时 authDurationMs=${startupTiming.durationSince(startupTiming.authStartedAtMs)} totalDurationMs=${startupTiming.totalDurationMs()} result=failure")
                 log("鉴权失败: [$errorId] ${e.message}")
                 _statusText.value = "鉴权失败: ${e.message}"
             }
         })
     }
 
-    private fun doStart(sessionId: Int) {
+    private fun doStart(sessionId: Int, startupTiming: StartupTiming) {
         _statusText.value = "正在创建房间..."
         roomCancelable?.cancel()
+        startupTiming.roomStartedAtMs = SystemClock.elapsedRealtime()
         roomCancelable = TmkTranslationSDK.createTmkTranslationRoom(buildRoomConfig(), object : CreateRoomCallback {
             override fun onSuccess(room: TmkTranslationRoom) {
                 roomCancelable = null
@@ -321,9 +365,11 @@ class OnlineListenViewModel @Inject constructor(
                 this@OnlineListenViewModel.room = room
                 _currentRoomNo.value = room.roomId
                 _statusText.value = "房间已创建，正在创建通道..."
+                log("启动翻译耗时 创建房间耗时 roomDurationMs=${startupTiming.durationSince(startupTiming.roomStartedAtMs)} result=success")
                 log("创建房间成功: ${room.roomId}")
                 val cfg = buildOnlineChannelConfig(room)
                 channelCancelable?.cancel()
+                startupTiming.channelStartedAtMs = SystemClock.elapsedRealtime()
                 channelCancelable = TmkTranslationSDK.createTranslationChannel(application, cfg, listener, object : CreateChannelCallback {
                     override fun onSuccess(ch: TmkTranslationChannel) {
                         channelCancelable = null
@@ -335,6 +381,7 @@ class OnlineListenViewModel @Inject constructor(
                         channel = ch
                         refreshChannelReadyFromState()
                         isPreparingChannel.set(false)
+                        log("启动翻译耗时 加入通道耗时 channelDurationMs=${startupTiming.durationSince(startupTiming.channelStartedAtMs)} totalDurationMs=${startupTiming.totalDurationMs()} result=success")
                         log("Channel 已就绪")
                         // 通道就绪:若建房窗口内改过语言,补发对齐服务端(见 bug 7024923916)。
                         reconcilePendingLocaleIfNeeded(sessionId)
@@ -343,6 +390,7 @@ class OnlineListenViewModel @Inject constructor(
                         channelCancelable = null
                         isPreparingChannel.set(false)
                         if (!isActiveSession(sessionId)) return
+                        log("启动翻译耗时 加入通道耗时 channelDurationMs=${startupTiming.durationSince(startupTiming.channelStartedAtMs)} totalDurationMs=${startupTiming.totalDurationMs()} result=failure")
                         log("创建 Channel 失败: [$errorId] ${e.message}")
                         _statusText.value = "通道启动失败: ${e.message}"
                     }
@@ -352,6 +400,7 @@ class OnlineListenViewModel @Inject constructor(
                 roomCancelable = null
                 isPreparingChannel.set(false)
                 if (!isActiveSession(sessionId)) return
+                log("启动翻译耗时 创建房间耗时 roomDurationMs=${startupTiming.durationSince(startupTiming.roomStartedAtMs)} totalDurationMs=${startupTiming.totalDurationMs()} result=failure")
                 log("创建房间失败: [$errorId] ${e.message}")
                 _statusText.value = "房间创建失败: ${e.message}"
             }
@@ -630,6 +679,7 @@ class OnlineListenViewModel @Inject constructor(
                 applyTtsHighlight(args)
                 return
             }
+
         }
 
         override fun onStateChanged(fromEngine: AbstractChannelEngine?, snapshot: TmkTranslationChannelStateSnapshot) {
@@ -651,7 +701,7 @@ class OnlineListenViewModel @Inject constructor(
         stopTranslation("正在重新创建通道...")
         clearConversation()
         _statusText.value = "正在重新创建通道..."
-        released = false
+        lifecycleGate.reopen()
         initSDK()
     }
 
@@ -662,8 +712,8 @@ class OnlineListenViewModel @Inject constructor(
 
     private fun clearConversation() {
         bubbleAssembler.clear()
-        blueSessions.clear()
-        blueChunks.clear()
+        blueSessionByChannel.clear()
+        blueChunkByChannel.clear()
         _bubbles.value = emptyList()
     }
 
@@ -682,7 +732,11 @@ class OnlineListenViewModel @Inject constructor(
         _captureChannels.value = 1
         vadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
             setCallback(object : VadDetector.Callback {
-                override fun onVadStart() { log("VAD → 开始说话") }
+                override fun onVadStart() {
+                    val m = buildMetadataBytes()
+                    pendingMetadata = m
+                    log("VAD → 开始说话")
+                }
                 override fun onVadEnd() { log("VAD → 停止说话") }
             }); init()
         }
@@ -692,7 +746,8 @@ class OnlineListenViewModel @Inject constructor(
                 val read = audioRecord?.read(buf, 0, buf.size) ?: -1
                 if (read > 0) {
                     val data = buf.copyOf(read); vadDetector?.pushAudioBytes(data)
-                    channel?.pushStreamAudioData(data, 1, null)
+                    val extra = pendingMetadata; if (extra != null) pendingMetadata = null
+                    channel?.pushStreamAudioData(data, 1, extra)
                 }
             }
         }, "$TAG-Recorder").apply { start() }
@@ -860,7 +915,7 @@ class OnlineListenViewModel @Inject constructor(
     }
 
     fun stopTranslation(finalStatus: String = "已停止收听") {
-        released = true
+        if (!lifecycleGate.tryRelease()) return
         nextPageSession()
         isPreparingChannel.set(false)
         roomCancelable?.cancel()

@@ -25,6 +25,10 @@ data class DemoConversationEvent(
     val sourceLangCode: String,
     val targetLangCode: String,
     val chunkId: String? = null,
+    /** ASR 结果携带的起始偏移(纳秒);MT 不携带,恒为 null。 */
+    val offset: Long? = null,
+    /** ASR 结果携带的时长(纳秒);MT 不携带,恒为 null。 */
+    val duration: Long? = null,
 )
 
 /**
@@ -56,6 +60,10 @@ data class DemoConversationBubbleSnapshot(
     val sourceSegments: List<DemoConversationDisplaySegment>,
     /** 目标语言按 session 切分的展示片段；离线场景可忽略。 */
     val translatedSegments: List<DemoConversationDisplaySegment>,
+    /** 气泡内第一条 final ASR 的 offset(纳秒)，无则 null。 */
+    val bOffset: Long? = null,
+    /** 气泡内 (最后一条 final ASR 的 offset+duration) − bOffset(纳秒)，无则 null。 */
+    val bDuration: Long? = null,
 )
 
 /** 按 online_tts_state 维护的高亮集合，对快照分段计算 isHighlighted。 */
@@ -104,6 +112,8 @@ object DemoConversationEventAdapter {
             sourceLangCode = result?.srcCode?.takeIf { it.isNotEmpty() } ?: fallbackSourceLangCode,
             targetLangCode = result?.dstCode?.takeIf { it.isNotEmpty() } ?: fallbackTargetLangCode,
             chunkId = chunkId(result),
+            offset = longExtra(result?.extraData, "offset"),
+            duration = longExtra(result?.extraData, "duration"),
         )
     }
 
@@ -168,6 +178,11 @@ object DemoConversationEventAdapter {
         }
     }
 
+    /** 从 extraData 读 Long(值可能是 Long 或其他 Number),无则 null。用于 ASR 的 offset/duration。 */
+    private fun longExtra(extraData: Map<String, Any?>?, key: String): Long? {
+        return (extraData?.get(key) as? Number)?.toLong()
+    }
+
     private fun normalized(text: String?): String = text.orEmpty().trim()
 
     private fun isDisplayable(text: String, isFinal: Boolean): Boolean {
@@ -200,6 +215,10 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
         val sourceRawChunkByEffective: MutableMap<String, MutableSet<String>> = mutableMapOf(),
         val translatedRawChunkByEffective: MutableMap<String, MutableSet<String>> = mutableMapOf(),
         var latestSessionId: String = "",
+        /** 第一条 final ASR 的 offset(纳秒),一旦设置不再覆盖。 */
+        var bOffset: Long? = null,
+        /** 最后一条 final ASR 的 (offset+duration)(纳秒),每条 final 更新为最新。 */
+        var bLastEnd: Long? = null,
     )
 
     private val lock = Any()
@@ -229,13 +248,19 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
         // 切换语言后,正在进行的旧气泡应保留其原始源/目标语言(译文文本仍是旧语言),
         // 新气泡才使用新语言。覆盖会导致旧气泡标签错误地跟随全局语言(见 1v1 语言切换 bug)。
 
+        // offset/duration 聚合:仅 ASR 且 isFinal 的句子参与。bOffset 取第一条 final(不覆盖),
+        // bLastEnd 每条 final 更新为最新的 offset+duration。partial(非 final)不影响。
+        if (event.stage == DemoConversationStage.ASR && event.isFinal && event.offset != null) {
+            if (aggregate.bOffset == null) aggregate.bOffset = event.offset
+            if (event.duration != null) aggregate.bLastEnd = event.offset!! + event.duration!!
+        }
+
         when (event.stage) {
             DemoConversationStage.ASR -> update(
                 segmentText = event.text,
                 isFinal = event.isFinal,
                 sessionId = event.sessionId,
                 chunkId = event.chunkId,
-                appendNonIncrementalSegment = false,
                 sessionOrder = aggregate.sourceSessionOrder,
                 segments = aggregate.sourceBySession,
                 sessionAliases = aggregate.sourceSessionAlias,
@@ -248,7 +273,6 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
                 isFinal = event.isFinal,
                 sessionId = event.sessionId,
                 chunkId = event.chunkId,
-                appendNonIncrementalSegment = true,
                 sessionOrder = aggregate.translatedSessionOrder,
                 segments = aggregate.translatedBySession,
                 sessionAliases = aggregate.translatedSessionAlias,
@@ -286,7 +310,6 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
         isFinal: Boolean,
         sessionId: String,
         chunkId: String?,
-        appendNonIncrementalSegment: Boolean,
         sessionOrder: MutableList<String>,
         segments: MutableMap<String, SessionSegment>,
         sessionAliases: MutableMap<String, String>,
@@ -307,10 +330,21 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
         }
 
         val old = segments[effectiveSessionId]
-        val shouldAppendAsNewSegment = old != null &&
+        // 仅当已固定(old.isFinal)且新文本非增量时才另起新段(对齐 iOS)。
+        // 同一 chunkId 的中间态(old.isFinal=false)收到 final 时不另起新段,而是走下方合并:
+        // 用新文本替换上次的中间态,避免 partial 与 final 同时保留导致文本重复、"..." 落在中间。
+        //
+        // 豁免：新消息是 final 且旧消息也是 final 时，这是服务端对同一 session/chunk 发出的
+        // 第二次修正版 completed(如 ASR/MT 二次识别或重算结果)。此时应直接覆盖旧 final 而非另起
+        // 新段，否则同一句话会重复展示两次(bug 7049772181)。
+        // 注意：chunkId 非空时，effectiveSessionId 由 chunkAliases 分配且唯一，同一 chunkId
+        // 的多次 final 仍归同一 effectiveSessionId → 正常覆盖，不会多段。
+        val isServerCorrectionFinal = isFinal && old != null && old.isFinal
+        val shouldAppendAsNewSegment = !isServerCorrectionFinal &&
+            old != null &&
+            old.isFinal &&
             text.isNotEmpty() &&
-            !isIncrementalTransition(old.text, text) &&
-            (old.isFinal || (appendNonIncrementalSegment && isFinal))
+            !isIncrementalTransition(old.text, text)
         if (shouldAppendAsNewSegment) {
             val newSessionId = nextSyntheticSessionId(segments)
             sessionOrder.add(newSessionId)
@@ -353,6 +387,12 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
             if (sourceText.isEmpty() && translatedText.isEmpty()) {
                 null
             } else {
+                val bOffset = aggregate.bOffset
+                val bDuration = if (bOffset != null && aggregate.bLastEnd != null) {
+                    aggregate.bLastEnd!! - bOffset
+                } else {
+                    null
+                }
                 BubbleRowData(
                     sessionId = aggregate.latestSessionId,
                     bubbleId = bubbleId,
@@ -363,6 +403,8 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
                     sourceText = sourceText,
                     translatedText = translatedText,
                     isBubbleEnded = endedBubbleIds.contains(bubbleId),
+                    bOffset = bOffset,
+                    bDuration = bDuration,
                 )
             }
         }
@@ -378,6 +420,12 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
             if (sourceText.isEmpty() && translatedText.isEmpty()) {
                 null
             } else {
+                val bOffset = aggregate.bOffset
+                val bDuration = if (bOffset != null && aggregate.bLastEnd != null) {
+                    aggregate.bLastEnd!! - bOffset
+                } else {
+                    null
+                }
                 val row = BubbleRowData(
                     sessionId = aggregate.latestSessionId,
                     bubbleId = bubbleId,
@@ -388,6 +436,8 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
                     sourceText = sourceText,
                     translatedText = translatedText,
                     isBubbleEnded = endedBubbleIds.contains(bubbleId),
+                    bOffset = bOffset,
+                    bDuration = bDuration,
                 )
                 DemoConversationBubbleSnapshot(
                     row = row,
@@ -405,6 +455,8 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
                         aggregate.translatedRawChunkByEffective,
                         isActiveBubble,
                     ),
+                    bOffset = bOffset,
+                    bDuration = bDuration,
                 )
             }
         }

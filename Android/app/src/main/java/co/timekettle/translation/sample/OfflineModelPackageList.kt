@@ -31,11 +31,15 @@ import co.timekettle.translation.offlinemodel.TmkOfflineModelPackageState
 fun OfflineModelPackageList(
     packages: List<TmkOfflineModelPackageInfo>,
     modifier: Modifier = Modifier,
+    // Bug3:SDK 下发的按字节总进度(0..1)。为 null 时回退到各包等权平均(非下载态/旧调用方兼容)。
+    totalProgress: Float? = null,
 ) {
     if (packages.isEmpty()) return
     var expanded by remember { mutableStateOf(false) }
     val finishedCount = packages.count { it.state == TmkOfflineModelPackageState.READY }
-    val totalProgress = packages.map { it.progressValue() }.average().takeIf { !it.isNaN() } ?: 0.0
+    // 优先用 SDK 按字节总进度(并发准确);无则回退各包 progressValue 等权平均。
+    val displayProgress = (totalProgress?.toDouble())
+        ?: (packages.map { it.progressValue() }.average().takeIf { !it.isNaN() } ?: 0.0)
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -47,7 +51,7 @@ fun OfflineModelPackageList(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "总进度：${"%.1f".format(totalProgress * 100)}%（$finishedCount/${packages.size}）",
+                    text = "总进度：${"%.1f".format(displayProgress * 100)}%（$finishedCount/${packages.size}）",
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.weight(1f),
@@ -57,7 +61,7 @@ fun OfflineModelPackageList(
                 }
             }
             LinearProgressIndicator(
-                progress = { totalProgress.toFloat().coerceIn(0f, 1f) },
+                progress = { displayProgress.toFloat().coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth(),
             )
             if (expanded) {

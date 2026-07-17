@@ -12,6 +12,8 @@ object SampleSdkConfig {
 
     fun globalConfig(
         networkEnvironment: TmkTranslationNetworkEnvironment = TmkTranslationNetworkEnvironment.TEST,
+        customNetworkBaseURLEnabled: Boolean = false,
+        customNetworkBaseURL: String? = null,
     ): TmkTransGlobalConfig {
         check(BuildConfig.TMK_SAMPLE_APP_ID.isNotBlank()) {
             "Missing $ENV_APP_ID. Export it in your shell or configure it in $USER_GRADLE_PROPERTIES_PATH."
@@ -20,16 +22,23 @@ object SampleSdkConfig {
             "Missing $ENV_APP_SECRET. Export it in your shell or configure it in $USER_GRADLE_PROPERTIES_PATH."
         }
 
-        return TmkTransGlobalConfig.Builder()
+        val builder = TmkTransGlobalConfig.Builder()
             .setAuth(BuildConfig.TMK_SAMPLE_APP_ID, BuildConfig.TMK_SAMPLE_APP_SECRET)
             .setOnlineAuthContext(tenantId = "timekettle")
             .setNetworkEnvironment(networkEnvironment)
-//            .setNetworkBaseURL("https://api-rayneo.timekettle.co")
-            .build()
+        val normalizedBaseURL = DemoSettingsStore.normalizeCustomNetworkBaseURL(customNetworkBaseURL)
+        if (customNetworkBaseURLEnabled && normalizedBaseURL != null) {
+            builder.setNetworkBaseURL(normalizedBaseURL)
+        }
+        return builder.build()
     }
 
     fun globalConfig(context: Context): TmkTransGlobalConfig {
-        return globalConfig(DemoSettingsStore.loadNetworkEnvironment(context))
+        return globalConfig(
+            networkEnvironment = DemoSettingsStore.loadNetworkEnvironment(context),
+            customNetworkBaseURLEnabled = DemoSettingsStore.loadCustomNetworkBaseURLEnabled(context),
+            customNetworkBaseURL = DemoSettingsStore.loadCustomNetworkBaseURL(context),
+        )
     }
 
     fun hasCredentials(): Boolean {

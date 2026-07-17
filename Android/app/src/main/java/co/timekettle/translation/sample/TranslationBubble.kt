@@ -28,6 +28,23 @@ private val MetaColor = Color(0xFF999999)
 private val HighlightColor = Color(0xFF007AFF) // 对齐 iOS .systemBlue：TTS 播放命中的片段
 private val BubbleEndLeftBorder = Color(0xFF34C759)
 private val BubbleEndRightBorder = Color(0xFF007AFF)
+private val TimeRangeColor = Color(0xFFE8730C) // 橙色:气泡时间段单行,醒目区别于 meta/源/译文
+
+/**
+ * 气泡时间段单行文本:仅在收到 bubbleEnd 且已聚合出 offset 时展示。
+ * 时间由纳秒换算为秒,保留 3 位小数(到毫秒),形如 `⏱ offset=16.692s duration=1.600s`。
+ * 否则返回 null(不占行)。离线场景无服务端 offset,bOffset 恒为 null → 永不显示(需求:离线不管)。
+ */
+private fun bubbleTimeRangeText(isBubbleEnded: Boolean, bOffset: Long?, bDuration: Long?): String? {
+    if (!isBubbleEnded || bOffset == null) return null
+    val offsetSec = nanosToSecondsText(bOffset)
+    val durationSec = nanosToSecondsText(bDuration ?: 0L)
+    return "⏱ offset=${offsetSec}s duration=${durationSec}s"
+}
+
+/** 纳秒 → 秒,保留 3 位小数(到毫秒)。 */
+private fun nanosToSecondsText(nanos: Long): String =
+    String.format(java.util.Locale.US, "%.3f", nanos / 1_000_000_000.0)
 
 /** 气泡列表 UI */
 @Composable
@@ -119,6 +136,15 @@ private fun BubbleCell(snapshot: DemoConversationBubbleSnapshot, metaText: Strin
                     ),
                     fontSize = 14.sp, lineHeight = 18.sp,
                 )
+                // bubbleEnd 后单独一行醒目展示气泡时间段(纳秒),与源/译文和 meta 明显区分。
+                val timeRangeText = bubbleTimeRangeText(row.isBubbleEnded, row.bOffset, row.bDuration)
+                if (timeRangeText != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        timeRangeText,
+                        fontSize = 13.sp, lineHeight = 17.sp, color = TimeRangeColor,
+                    )
+                }
             }
         }
     }

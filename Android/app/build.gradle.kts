@@ -74,6 +74,7 @@ dependencies {
     implementation(libs.hilt.navigation.compose)
 
     implementation(libs.voyager.navigator)
+    implementation(libs.voyager.hilt)
     implementation(libs.voyager.transitions)
 
     testImplementation(libs.junit)
