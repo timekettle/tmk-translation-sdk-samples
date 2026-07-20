@@ -28,6 +28,9 @@ dependencyResolutionManagement {
         mavenCentral()
         maven(url = "https://maven.aliyun.com/repository/public")
         maven(url = "https://mvnrepo.jiagouyun.com/repository/maven-releases")
+        // GitHub Packages 作为兜底仓库（低于 mavenCentral），
+        // 仅用于解析尚未发布到 Maven Central 的预发布版本（rc/beta 等）。
+        // 正式版优先从 mavenCentral 获取，避免 GitHub Packages 的不完整包覆盖正式版。
         maven {
             name = "GitHubPackagesTmkTranslationSdk"
             url = uri("https://maven.pkg.github.com/$githubPackagesOwner/$githubPackagesRepo")
