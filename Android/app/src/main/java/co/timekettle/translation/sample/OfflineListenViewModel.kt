@@ -1,6 +1,5 @@
 package co.timekettle.translation.sample
 
-import co.timekettle.translation.TmkTranslationException
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
@@ -13,6 +12,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import co.timekettle.translation.Cancelable
 import co.timekettle.translation.TmkTranslationChannel
+import co.timekettle.translation.TmkTranslationException
 import co.timekettle.translation.TmkTranslationSDK
 import co.timekettle.offlinesdk.vad.VadDetector
 import co.timekettle.translation.config.TmkTransChannelConfig
@@ -25,8 +25,6 @@ import co.timekettle.translation.listener.AuthCallback
 import co.timekettle.translation.listener.CreateChannelCallback
 import co.timekettle.translation.listener.CreateRoomCallback
 import co.timekettle.translation.listener.TmkTranslationListener
-import co.timekettle.translation.model.BubbleRowData
-import co.timekettle.translation.model.OfflineBubbleManager
 import co.timekettle.translation.model.Result
 import co.timekettle.translation.model.SpeakerChannel
 import co.timekettle.translation.model.SpeakerGender
@@ -65,6 +63,8 @@ class OfflineListenViewModel @Inject constructor(
     @Volatile private var released = false
     @Volatile private var userCancelledDownload = false
 
+    // 推流元数据（携带声道标识，供 SDK 音频路由使用）
+    @Volatile private var pendingMetadata: ByteArray? = null
 
     private val _isModelReady = MutableStateFlow(false)
     val isModelReady: StateFlow<Boolean> = _isModelReady.asStateFlow()
@@ -108,9 +108,9 @@ class OfflineListenViewModel @Inject constructor(
     private val _logMessages = MutableStateFlow<List<String>>(emptyList())
     val logMessages: StateFlow<List<String>> = _logMessages.asStateFlow()
 
-    private val bubbleManager = OfflineBubbleManager()
-    private val _bubbles = MutableStateFlow<List<BubbleRowData>>(emptyList())
-    val bubbles: StateFlow<List<BubbleRowData>> = _bubbles.asStateFlow()
+    private val bubbleAssembler = DemoConversationBubbleAssembler()
+    private val _bubbles = MutableStateFlow<List<DemoConversationBubbleSnapshot>>(emptyList())
+    val bubbles: StateFlow<List<DemoConversationBubbleSnapshot>> = _bubbles.asStateFlow()
 
     private val _sourceLang = MutableStateFlow("zh-CN")
     val sourceLang: StateFlow<String> = _sourceLang.asStateFlow()
@@ -153,7 +153,7 @@ class OfflineListenViewModel @Inject constructor(
         _logMessages.value = listOf(msg) + _logMessages.value.take(99)
     }
 
-    private fun publishBubbles() { _bubbles.value = bubbleManager.snapshot() }
+    private fun publishBubbles() { _bubbles.value = bubbleAssembler.snapshotWithSegments() }
 
     private fun showConversationErrorPrompt(prompt: OnlineConversationErrorPrompt?) {
         if (prompt == null || _conversationErrorPrompt.value?.id == prompt.id) return
@@ -201,6 +201,17 @@ class OfflineListenViewModel @Inject constructor(
         }
     }
 
+    private fun buildMetadataBytes(channel: Int): ByteArray {
+        val now = java.util.Calendar.getInstance()
+        val hour = now.get(java.util.Calendar.HOUR_OF_DAY)
+        val minute = now.get(java.util.Calendar.MINUTE)
+        val second = now.get(java.util.Calendar.SECOND)
+        return byteArrayOf(channel.toByte(), hour.toByte(), minute.toByte(), second.toByte())
+    }
+
+    private fun resetMetadata() {
+        pendingMetadata = null
+    }
 
     fun downloadModels() {
         if (_isDownloading.value) return
@@ -314,7 +325,7 @@ class OfflineListenViewModel @Inject constructor(
     private fun ensureSdkInitialized(): Boolean {
         return try {
             if (!_isInitialized.value) {
-                TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig())
+                TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig(application))
                 _isInitialized.value = true
                 _initErrorMessage.value = null
                 addLog("SDK 初始化完成")
@@ -392,8 +403,7 @@ class OfflineListenViewModel @Inject constructor(
     }
 
     private fun applyOfflineUnsupportedState() {
-        channel?.stop()
-        channel?.destroy()
+        TmkTranslationSDK.releaseChannel()
         channel = null
         _isChannelReady.value = false
         _isStarting.value = false
@@ -430,7 +440,9 @@ class OfflineListenViewModel @Inject constructor(
             applyOfflineUnsupportedState()
             return
         }
-        refreshModelReady()
+        if (OfflineDemoModelReadinessPolicy.shouldRefreshBeforePreparingChannel(_isModelReady.value)) {
+            refreshModelReady()
+        }
         if (!_isModelReady.value) {
             addLog("当前模型资源不完整，需要先下载离线资源")
             return
@@ -456,6 +468,7 @@ class OfflineListenViewModel @Inject constructor(
                         val channelConfig = TmkTransChannelConfig.Builder()
                             .setRoom(room)
                             .setMode(TranslationMode.OFFLINE)
+                            .setScenario(Scenario.LISTEN)
                             .setTransModeType(TransModeType.LISTEN)
                             .setSourceLang(_sourceLang.value)
                             .setTargetLang(_targetLang.value)
@@ -465,7 +478,7 @@ class OfflineListenViewModel @Inject constructor(
                             .setModelRootDirectory(modelRootDir)
                             .build()
 
-                        addLog("src=${_sourceLang.value} tgt=${_targetLang.value} model_root_dir: $modelRootDir")
+                        addLog("src=${_sourceLang.value} tgt=${_targetLang.value} modelRootDirectory: $modelRootDir")
 
                         TmkTranslationSDK.createTranslationChannel(
                             application,
@@ -474,7 +487,7 @@ class OfflineListenViewModel @Inject constructor(
                             object : CreateChannelCallback {
                                 override fun onSuccess(ch: TmkTranslationChannel) {
                                     if (released) {
-                                        ch.stop(); ch.destroy()
+                                        TmkTranslationSDK.releaseChannel()
                                         _isStarting.value = false
                                         return
                                     }
@@ -545,11 +558,10 @@ class OfflineListenViewModel @Inject constructor(
             _isDownloading.value = false
             _downloadProgress.value = ""
         }
-        stopListening()
         speakerCancelable?.cancel()
         speakerCancelable = null
-        channel?.stop()
-        channel?.destroy()
+        stopListening()
+        TmkTranslationSDK.releaseChannel()
         channel = null
         _isChannelReady.value = false
         _isStarting.value = false
@@ -598,23 +610,21 @@ class OfflineListenViewModel @Inject constructor(
 
     private val translationListener = object : TmkTranslationListener {
         override fun onRecognized(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
-            val sid = r?.sessionId ?: ""; val text = r?.data ?: ""
-            val bid = bubbleManager.extractBubbleId(r)
+            Log.d(TAG, DemoTmkResultLogFormatter.makeLine("OfflineListen", "ASR", r, isFinal))
+            val text = r?.data ?: ""
             val src = r?.srcCode?.takeIf { it.isNotEmpty() } ?: _sourceLang.value
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
-            Log.d(TAG, "onRecognized: sid=$sid bid=$bid isFinal=$isFinal text=\"$text\"")
-            bubbleManager.upsertSource(sid, bid, src, dst, text, isFinal)
+            DemoConversationEventAdapter.makeRecognizedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
             addLog("ASR [final=$isFinal]: $text")
         }
 
         override fun onTranslate(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
-            val sid = r?.sessionId ?: ""; val text = r?.data ?: ""
-            val bid = bubbleManager.extractBubbleId(r)
+            Log.d(TAG, DemoTmkResultLogFormatter.makeLine("OfflineListen", "MT", r, isFinal))
+            val text = r?.data ?: ""
             val src = r?.srcCode?.takeIf { it.isNotEmpty() } ?: _sourceLang.value
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
-            Log.d(TAG, "onTranslate: sid=$sid bid=$bid isFinal=$isFinal text=\"$text\"")
-            bubbleManager.upsertTranslation(sid, bid, src, dst, text, isFinal)
+            DemoConversationEventAdapter.makeTranslatedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
             addLog("MT [final=$isFinal]: $text")
         }
@@ -661,8 +671,15 @@ class OfflineListenViewModel @Inject constructor(
 
         vadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
             setCallback(object : VadDetector.Callback {
-                override fun onVadStart() { addLog("VAD → 开始说话") }
-                override fun onVadEnd() { addLog("VAD → 停止说话") }
+                override fun onVadStart() {
+                    resetMetadata()
+                    // 生成推流元数据,SDK 依据其首字节区分声道,属正常音频路由所需。
+                    pendingMetadata = buildMetadataBytes(channel = 1)
+                    addLog("VAD → 开始说话")
+                }
+                override fun onVadEnd() {
+                    addLog("VAD → 停止说话")
+                }
             })
             init()
         }
@@ -674,7 +691,9 @@ class OfflineListenViewModel @Inject constructor(
                 if (read > 0) {
                     val data = buffer.copyOf(read)
                     vadDetector?.pushAudioBytes(data)
-                    channel?.pushStreamAudioData(data, 1, null)
+                    val metadata = pendingMetadata
+                    pendingMetadata = null
+                    channel?.pushStreamAudioData(data, 1, metadata)
                 }
             }
         }.start()

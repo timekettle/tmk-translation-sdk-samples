@@ -1,6 +1,7 @@
 package co.timekettle.translation.sample
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -12,6 +13,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import co.timekettle.translation.model.BubbleRowData
@@ -20,20 +25,21 @@ private val BubbleBg = Color(0xFFF0F0F0)
 private val SourceColor = Color(0xFF333333)
 private val TranslatedColor = Color(0xFF1B7A3D)
 private val MetaColor = Color(0xFF999999)
+private val HighlightColor = Color(0xFF007AFF) // 对齐 iOS .systemBlue：TTS 播放命中的片段
+private val BubbleEndLeftBorder = Color(0xFF34C759)
+private val BubbleEndRightBorder = Color(0xFF007AFF)
 
 /** 气泡列表 UI */
 @Composable
 fun BubbleList(
-    rows: List<BubbleRowData>,
+    rows: List<DemoConversationBubbleSnapshot>,
     modifier: Modifier = Modifier,
     metaText: ((BubbleRowData) -> String)? = null,
     scrollOnLatestUpdate: Boolean = false,
 ) {
     val listState = rememberLazyListState()
     val latestScrollKey: Any? = if (scrollOnLatestUpdate) {
-        rows.lastOrNull()?.let {
-            "${it.sessionId}:${it.bubbleId}:${it.channel}:${it.sourceText.hashCode()}:${it.translatedText.hashCode()}"
-        }
+        rows.lastOrNull()
     } else {
         rows.size
     }
@@ -42,14 +48,15 @@ fun BubbleList(
     }
     LazyColumn(state = listState, modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
-        items(rows.size, key = { index -> "${rows[index].sessionId}:${rows[index].bubbleId}" }) { index ->
-            BubbleCell(rows[index], metaText?.invoke(rows[index]))
+        items(rows.size, key = { index -> "${rows[index].row.sessionId}:${rows[index].row.bubbleId}" }) { index ->
+            BubbleCell(rows[index], metaText?.invoke(rows[index].row))
         }
     }
 }
 
 @Composable
-private fun BubbleCell(row: BubbleRowData, metaText: String?) {
+private fun BubbleCell(snapshot: DemoConversationBubbleSnapshot, metaText: String?) {
+    val row = snapshot.row
     val isRight = row.channel.equals("right", ignoreCase = true)
     val alignment = if (isRight) Alignment.End else Alignment.Start
     val bubbleBg = if (isRight) {
@@ -57,6 +64,8 @@ private fun BubbleCell(row: BubbleRowData, metaText: String?) {
     } else {
         BubbleBg
     }
+    val bubbleShape = RoundedCornerShape(14.dp)
+    val endedBorderColor = if (isRight) BubbleEndRightBorder else BubbleEndLeftBorder
     val channelLabel = if (metaText != null) {
         null
     } else {
@@ -77,7 +86,11 @@ private fun BubbleCell(row: BubbleRowData, metaText: String?) {
         Box(
             modifier = Modifier
                 .fillMaxWidth(0.85f)
-                .clip(RoundedCornerShape(14.dp))
+                .then(
+                    if (row.isBubbleEnded) Modifier.border(1.dp, endedBorderColor, bubbleShape)
+                    else Modifier
+                )
+                .clip(bubbleShape)
                 .background(bubbleBg)
                 .padding(12.dp)
         ) {
@@ -87,12 +100,51 @@ private fun BubbleCell(row: BubbleRowData, metaText: String?) {
                     fontSize = 10.sp, color = MetaColor, lineHeight = 13.sp,
                 )
                 Spacer(Modifier.height(6.dp))
-                val src = row.sourceText.ifEmpty { "..." }
-                Text("源语言(${row.sourceLangCode})：$src", fontSize = 14.sp, color = SourceColor, lineHeight = 18.sp)
+                Text(
+                    buildSegmentedLine(
+                        label = "源语言(${row.sourceLangCode})：",
+                        segments = snapshot.sourceSegments,
+                        fallbackText = row.sourceText,
+                        baseColor = SourceColor,
+                    ),
+                    fontSize = 14.sp, lineHeight = 18.sp,
+                )
                 Spacer(Modifier.height(4.dp))
-                val tgt = row.translatedText.ifEmpty { "..." }
-                Text("目标语言(${row.targetLangCode})：$tgt", fontSize = 14.sp, color = TranslatedColor, lineHeight = 18.sp)
+                Text(
+                    buildSegmentedLine(
+                        label = "目标语言(${row.targetLangCode})：",
+                        segments = snapshot.translatedSegments,
+                        fallbackText = row.translatedText,
+                        baseColor = TranslatedColor,
+                    ),
+                    fontSize = 14.sp, lineHeight = 18.sp,
+                )
             }
         }
+    }
+}
+
+/**
+ * 把 label + 分段文本拼成富文本：命中 TTS 高亮的片段显示为蓝色，其余为 baseColor。
+ * 无分段（离线等场景）时回退到整段纯文本，保持既有展示。
+ */
+private fun buildSegmentedLine(
+    label: String,
+    segments: List<DemoConversationDisplaySegment>,
+    fallbackText: String,
+    baseColor: Color,
+): AnnotatedString = buildAnnotatedString {
+    withStyle(SpanStyle(color = baseColor)) { append(label) }
+    val nonEmpty = segments.filter { it.text.isNotEmpty() }
+    if (nonEmpty.isEmpty()) {
+        withStyle(SpanStyle(color = baseColor)) { append(fallbackText.ifEmpty { "..." }) }
+        return@buildAnnotatedString
+    }
+    nonEmpty.forEachIndexed { index, segment ->
+        if (index > 0) {
+            withStyle(SpanStyle(color = baseColor)) { append(" ") }
+        }
+        val color = if (segment.isHighlighted) HighlightColor else baseColor
+        withStyle(SpanStyle(color = color)) { append(segment.text) }
     }
 }

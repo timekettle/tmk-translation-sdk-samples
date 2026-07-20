@@ -25,6 +25,8 @@ data class DualChannelScreen(
         val isStarted by viewModel.isStarted.collectAsState()
         val isChannelReady by viewModel.isChannelReady.collectAsState()
         val isLocaleUpdating by viewModel.isLocaleUpdating.collectAsState()
+        val isTranslateEngineUpdating by viewModel.isTranslateEngineUpdating.collectAsState()
+        val isScenarioUpdating by viewModel.isScenarioUpdating.collectAsState()
         val isStarting by viewModel.isStarting.collectAsState()
         val bubbles by viewModel.bubbles.collectAsState()
         val statusText by viewModel.statusText.collectAsState()
@@ -38,11 +40,16 @@ data class DualChannelScreen(
         val lockedTargetLang by viewModel.targetLang.collectAsState()
         val leftSpeakerGender by viewModel.leftSpeakerGender.collectAsState()
         val rightSpeakerGender by viewModel.rightSpeakerGender.collectAsState()
+        val onlineTranslateEngine by viewModel.onlineTranslateEngine.collectAsState()
+        val roomScenarioOption by viewModel.roomScenarioOption.collectAsState()
         var settingsExpanded by remember { mutableStateOf(false) }
         var showLocaleDialog by remember { mutableStateOf(false) }
         var showSpeakerDialog by remember { mutableStateOf(false) }
+        var showTranslateEngineDialog by remember { mutableStateOf(false) }
+        var showRoomScenarioDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
-        val onlineLanguageOptions = rememberOnlineLanguageOptions()
+        val onlineLanguageOptions = (rememberOnlineLanguageOptions().state
+            as? LanguageOptionsState.Ready)?.options ?: emptyMap()
 
         LaunchedEffect(viewModel, sourceLang, targetLang) {
             viewModel.setLanguagesIfNeeded(sourceLang, targetLang)
@@ -117,6 +124,22 @@ data class DualChannelScreen(
                                 showSpeakerDialog = true
                             },
                         )
+                        DropdownMenuItem(
+                            text = { Text(if (isTranslateEngineUpdating) "翻译引擎切换中..." else "翻译引擎设置") },
+                            enabled = !isTranslateEngineUpdating,
+                            onClick = {
+                                settingsExpanded = false
+                                showTranslateEngineDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (isScenarioUpdating) "房间能力切换中..." else "房间能力设置") },
+                            enabled = !isScenarioUpdating,
+                            onClick = {
+                                settingsExpanded = false
+                                showRoomScenarioDialog = true
+                            },
+                        )
                     }
                 }
             }
@@ -135,6 +158,7 @@ data class DualChannelScreen(
                 targetLang = lockedTargetLang,
                 showDetailInfo = showDetailInfo,
                 onToggleDetail = { showDetailInfo = !showDetailInfo },
+                displayNames = onlineLanguageOptions,
             )
 
             if (showDetailInfo) {
@@ -142,6 +166,7 @@ data class DualChannelScreen(
                     rows = listOf(
                         "连接：$connectionState",
                         "房间：$currentRoomNo",
+                        "能力：${roomScenarioOption.title}",
                         "通道：one_to_one/online",
                         "采样：配置16000Hz/2ch  采集$captureInfo  回放$playbackInfo",
                         "输入：左声道固定PCM / 右声道麦克风",
@@ -168,6 +193,7 @@ data class DualChannelScreen(
                     val playback = if (playbackChannels > 0) "${playbackChannels}ch" else "-"
                     "sessionId: ${row.sessionId}  bubbleId: ${row.bubbleId}\n" +
                         "房间: $currentRoomNo  通道: one_to_one/online\n" +
+                        "能力: ${roomScenarioOption.title}\n" +
                         "采样: 配置16000Hz/2ch  采集$capture  回放$playback"
                 },
                 scrollOnLatestUpdate = true,
@@ -198,6 +224,29 @@ data class DualChannelScreen(
                 onConfirm = { left, right ->
                     showSpeakerDialog = false
                     viewModel.updateSpeakers(left, right)
+                },
+            )
+        }
+
+        if (showTranslateEngineDialog) {
+            OnlineTranslateEngineDialog(
+                initialEngine = onlineTranslateEngine,
+                onDismiss = { showTranslateEngineDialog = false },
+                onConfirm = {
+                    showTranslateEngineDialog = false
+                    viewModel.updateTranslateEngine(it)
+                },
+            )
+        }
+
+        if (showRoomScenarioDialog) {
+            OnlineRoomScenarioDialog(
+                title = "设置在线一对一房间能力",
+                initialOption = roomScenarioOption,
+                onDismiss = { showRoomScenarioDialog = false },
+                onConfirm = {
+                    showRoomScenarioDialog = false
+                    viewModel.updateRoomScenario(it)
                 },
             )
         }
