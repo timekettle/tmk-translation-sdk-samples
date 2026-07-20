@@ -1,7 +1,3 @@
-source 'https://cdn.cocoapods.org/'
-# 正式版 podspec 发布在公开 spec 仓库的 main 分支(默认分支)。
-source 'https://github.com/timekettle/TmkTranslationSDK-iOS.git'
-
 platform :ios, '15.0'
 
 target 'SDKDemo' do
