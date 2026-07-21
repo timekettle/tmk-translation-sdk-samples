@@ -2,38 +2,36 @@ PODS:
   - AgoraAudio_Special_iOS (4.5.2.183.1)
   - AgoraRtm/RtmKit (2.2.6)
   - Flutter (1.0.0)
-  - tmk_translation_flutter (0.0.1):
+  - tmk_translation_flutter (1.2.0):
     - Flutter
-    - TmkTranslationSDK (= 1.2.0-beta17)
-  - TmkTranslationSDK (1.2.0-beta17):
+    - TmkTranslationSDK (= 1.2.0)
+  - TmkTranslationSDK (1.2.0):
     - AgoraAudio_Special_iOS (~> 4.5.2.4)
     - AgoraRtm/RtmKit (= 2.2.6)
 
 DEPENDENCIES:
   - Flutter (from `Flutter`)
   - tmk_translation_flutter (from `.symlinks/plugins/tmk_translation_flutter/ios`)
-  - TmkTranslationSDK (from `https://raw.githubusercontent.com/timekettle/TmkTranslationSDK-iOS/beta/Specs/TmkTranslationSDK/1.2.0-beta17/TmkTranslationSDK.podspec`)
 
 SPEC REPOS:
   trunk:
     - AgoraAudio_Special_iOS
     - AgoraRtm
+    - TmkTranslationSDK
 
 EXTERNAL SOURCES:
   Flutter:
     :path: Flutter
   tmk_translation_flutter:
     :path: ".symlinks/plugins/tmk_translation_flutter/ios"
-  TmkTranslationSDK:
-    :podspec: https://raw.githubusercontent.com/timekettle/TmkTranslationSDK-iOS/beta/Specs/TmkTranslationSDK/1.2.0-beta17/TmkTranslationSDK.podspec
 
 SPEC CHECKSUMS:
   AgoraAudio_Special_iOS: b397eea1b6a58cdc3a6b529dbfb02930fd3222c2
   AgoraRtm: bd7a04a21f8063f7105540da0243e6b0a93c116e
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
-  tmk_translation_flutter: f69e1d046d6bccc8587d5e8516ba26b104be8898
-  TmkTranslationSDK: 96d868a51eb5c156d79d47f7eb8098329d1b8ad1
+  tmk_translation_flutter: 905d1dccb004b9be4011fb76b15ae1126366ccc7
+  TmkTranslationSDK: a94c3109cc876ece4eccbfc2b2f4a5f6fa4d13b6
 
-PODFILE CHECKSUM: f518303bd528d518ee43b5f7ec807dca6658150f
+PODFILE CHECKSUM: dc7911125ffdd810139cdef34e313bee52efbdca
 
-COCOAPODS: 1.17.0
+COCOAPODS: 1.16.2
