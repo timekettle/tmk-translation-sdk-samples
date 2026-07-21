@@ -47,6 +47,9 @@ fun TranslationLanguageLine(
     onToggleDetail: () -> Unit,
     modifier: Modifier = Modifier,
     bidirectional: Boolean = true,
+    // 动态语言列表(SDK 下发的 code → displayName);命中时优先展示 displayName,
+    // 未命中再回退到内置表/原始 code,避免如 en-GB 这类列表外语言直接显示 code。
+    displayNames: Map<String, String> = emptyMap(),
 ) {
     Row(
         modifier = modifier.fillMaxWidth().padding(bottom = 4.dp),
@@ -57,15 +60,19 @@ fun TranslationLanguageLine(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             LanguageTextBox("语言：")
-            LanguageTextBox(TranslationLanguages.displayName(sourceLang))
+            LanguageTextBox(resolveLanguageDisplayName(sourceLang, displayNames))
             LanguageArrowControl(bidirectional = bidirectional)
-            LanguageTextBox(TranslationLanguages.displayName(targetLang))
+            LanguageTextBox(resolveLanguageDisplayName(targetLang, displayNames))
         }
         TextButton(onClick = onToggleDetail) {
             Text(if (showDetailInfo) "收起" else "更多")
         }
     }
 }
+
+/** 解析语言展示名:优先用 SDK 动态列表的 displayName,缺失时回退到内置表(再回退原始 code)。 */
+private fun resolveLanguageDisplayName(code: String, displayNames: Map<String, String>): String =
+    displayNames[code]?.takeIf { it.isNotBlank() } ?: TranslationLanguages.displayName(code)
 
 @Composable
 private fun LanguageTextBox(text: String) {

@@ -45,7 +45,7 @@ struct DemoSettingsViewState: Equatable {
     var offlineEngineStatus: DemoSettingsEngineStatus = .checking
     var authInfo: DemoSettingsAuthInfo = .placeholder
     var isApplying = false
-    var versionText = "TmkTranslationSDK v1.0.0"
+    var versionText = "TmkTranslationSDK v\(TmkTranslationSDK.sdkVersion)"
 
     var isConfirmEnabled: Bool {
         draftConfig != persistedConfig && isApplying == false
@@ -65,7 +65,7 @@ struct DemoSettingsConfig: Equatable {
             consoleLogEnabled: true,
             networkEnvironment: .test,
             mockEngineEnabled: false,
-            schemaVersion: 2
+            schemaVersion: 4
         )
     }
 }

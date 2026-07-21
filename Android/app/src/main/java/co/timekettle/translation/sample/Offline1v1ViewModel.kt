@@ -1,6 +1,5 @@
 package co.timekettle.translation.sample
 
-import co.timekettle.translation.TmkTranslationException
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
@@ -13,6 +12,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import co.timekettle.translation.Cancelable
 import co.timekettle.translation.TmkTranslationChannel
+import co.timekettle.translation.TmkTranslationException
 import co.timekettle.translation.TmkTranslationSDK
 import co.timekettle.offlinesdk.vad.VadDetector
 import co.timekettle.translation.config.TmkTransChannelConfig
@@ -25,8 +25,6 @@ import co.timekettle.translation.listener.AuthCallback
 import co.timekettle.translation.listener.CreateChannelCallback
 import co.timekettle.translation.listener.CreateRoomCallback
 import co.timekettle.translation.listener.TmkTranslationListener
-import co.timekettle.translation.model.BubbleRowData
-import co.timekettle.translation.model.OfflineBubbleManager
 import co.timekettle.translation.model.Result
 import co.timekettle.translation.model.SpeakerChannel
 import co.timekettle.translation.model.SpeakerGender
@@ -42,7 +40,6 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.io.InputStream
 import javax.inject.Inject
 
 @HiltViewModel
@@ -62,14 +59,14 @@ class Offline1v1ViewModel @Inject constructor(
     private var speakerCancelable: Cancelable? = null
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
-    private var assetPcmStream: InputStream? = null
-    private var leftVadDetector: VadDetector? = null
     private var rightVadDetector: VadDetector? = null
     @Volatile private var isRecording = false
     @Volatile private var isPlaying = false
     @Volatile private var released = false
     @Volatile private var userCancelledDownload = false
 
+    // 右声道推流元数据（携带声道标识，供 SDK 音频路由使用）
+    @Volatile private var pendingRightMetadata: ByteArray? = null
 
     // 左右声道 TTS RingBuffer
     private val leftTtsBuffer = RingBuffer(BYTES_PER_20MS * 50)  // ~1秒缓冲
@@ -116,9 +113,9 @@ class Offline1v1ViewModel @Inject constructor(
     private val _logMessages = MutableStateFlow<List<String>>(emptyList())
     val logMessages: StateFlow<List<String>> = _logMessages.asStateFlow()
 
-    private val bubbleManager = OfflineBubbleManager()
-    private val _bubbles = MutableStateFlow<List<BubbleRowData>>(emptyList())
-    val bubbles: StateFlow<List<BubbleRowData>> = _bubbles.asStateFlow()
+    private val bubbleAssembler = DemoConversationBubbleAssembler()
+    private val _bubbles = MutableStateFlow<List<DemoConversationBubbleSnapshot>>(emptyList())
+    val bubbles: StateFlow<List<DemoConversationBubbleSnapshot>> = _bubbles.asStateFlow()
 
     private val _sourceLang = MutableStateFlow("zh-CN")
     val sourceLang: StateFlow<String> = _sourceLang.asStateFlow()
@@ -165,7 +162,7 @@ class Offline1v1ViewModel @Inject constructor(
         _logMessages.value = listOf(msg) + _logMessages.value.take(99)
     }
 
-    private fun publishBubbles() { _bubbles.value = bubbleManager.snapshot() }
+    private fun publishBubbles() { _bubbles.value = bubbleAssembler.snapshotWithSegments() }
 
     private fun showConversationErrorPrompt(prompt: OnlineConversationErrorPrompt?) {
         if (prompt == null || _conversationErrorPrompt.value?.id == prompt.id) return
@@ -213,6 +210,13 @@ class Offline1v1ViewModel @Inject constructor(
         }
     }
 
+    private fun buildMetadataBytes(channel: Int): ByteArray {
+        val now = java.util.Calendar.getInstance()
+        val hour = now.get(java.util.Calendar.HOUR_OF_DAY)
+        val minute = now.get(java.util.Calendar.MINUTE)
+        val second = now.get(java.util.Calendar.SECOND)
+        return byteArrayOf(channel.toByte(), hour.toByte(), minute.toByte(), second.toByte())
+    }
 
     fun downloadModels() {
         if (_isDownloading.value) return
@@ -326,7 +330,7 @@ class Offline1v1ViewModel @Inject constructor(
     private fun ensureSdkInitialized(): Boolean {
         return try {
             if (!_isInitialized.value) {
-                TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig())
+                TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig(application))
                 _isInitialized.value = true
                 _initErrorMessage.value = null
                 addLog("SDK 初始化完成")
@@ -404,8 +408,7 @@ class Offline1v1ViewModel @Inject constructor(
     }
 
     private fun applyOfflineUnsupportedState() {
-        channel?.stop()
-        channel?.destroy()
+        TmkTranslationSDK.releaseChannel()
         channel = null
         _isChannelReady.value = false
         _isStarting.value = false
@@ -446,7 +449,9 @@ class Offline1v1ViewModel @Inject constructor(
             applyOfflineUnsupportedState()
             return
         }
-        refreshModelReady()
+        if (OfflineDemoModelReadinessPolicy.shouldRefreshBeforePreparingChannel(_isModelReady.value)) {
+            refreshModelReady()
+        }
         if (!_isModelReady.value) {
             addLog("当前模型资源不完整，需要先下载离线资源")
             return
@@ -470,10 +475,9 @@ class Offline1v1ViewModel @Inject constructor(
                     .setRoom(room)
                     .setMode(TranslationMode.OFFLINE)
                     .setScenario(Scenario.ONE_TO_ONE)
-                    // 一对一 Demo 固定：左声道=目标语言固定 PCM，右声道=源语言麦克风。
-                    // 离线引擎按 config.sourceLang 作为左声道源语言，因此这里与在线 1v1 保持同样映射。
-                    .setSourceLang(_targetLang.value)
-                    .setTargetLang(_sourceLang.value)
+                    // SDK 接口仍使用 source/target；Demo 一对一语义固定映射为 source=right、target=left。
+                    .setSourceLang(_sourceLang.value)
+                    .setTargetLang(_targetLang.value)
                     .setSpeakers(currentSpeakers())
                     .setSampleRate(SAMPLE_RATE)
                     .setChannelNum(2)
@@ -481,7 +485,7 @@ class Offline1v1ViewModel @Inject constructor(
                     .setModelRootDirectory(modelRootDir)
                     .build()
 
-                addLog("left=${_targetLang.value} right=${_sourceLang.value} model_root_dir: $modelRootDir")
+                addLog("left=${_targetLang.value} right=${_sourceLang.value} modelRootDirectory: $modelRootDir")
 
                 TmkTranslationSDK.createTranslationChannel(
                     application,
@@ -490,7 +494,7 @@ class Offline1v1ViewModel @Inject constructor(
                     object : CreateChannelCallback {
                         override fun onSuccess(ch: TmkTranslationChannel) {
                             if (released) {
-                                ch.stop(); ch.destroy()
+                                TmkTranslationSDK.releaseChannel()
                                 _isStarting.value = false
                                 return
                             }
@@ -537,11 +541,10 @@ class Offline1v1ViewModel @Inject constructor(
             _isDownloading.value = false
             _downloadProgress.value = ""
         }
-        stopListening()
         speakerCancelable?.cancel()
         speakerCancelable = null
-        channel?.stop()
-        channel?.destroy()
+        stopListening()
+        TmkTranslationSDK.releaseChannel()
         channel = null
         _isChannelReady.value = false
         _isStarting.value = false
@@ -655,24 +658,24 @@ class Offline1v1ViewModel @Inject constructor(
 
     private val translationListener = object : TmkTranslationListener {
         override fun onRecognized(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
-            val sid = r?.sessionId ?: ""; val text = r?.data ?: ""
+            Log.d(TAG, DemoTmkResultLogFormatter.makeLine("Offline1V1", "ASR", r, isFinal))
+            val text = r?.data ?: ""
             val ch = normalizeChannel(r?.extraData?.get("channel"))
-            val bid = bubbleManager.extractBubbleId(r)
             val src = r?.srcCode?.takeIf { it.isNotEmpty() } ?: _sourceLang.value
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
-            bubbleManager.upsertSource(sid, bid, src, dst, text, isFinal, channel = ch)
+            DemoConversationEventAdapter.makeRecognizedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
             if (!isFinal) return
             addLog("ASR [ch=$ch final=$isFinal]: $text")
         }
 
         override fun onTranslate(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
-            val sid = r?.sessionId ?: ""; val text = r?.data ?: ""
+            Log.d(TAG, DemoTmkResultLogFormatter.makeLine("Offline1V1", "MT", r, isFinal))
+            val text = r?.data ?: ""
             val ch = normalizeChannel(r?.extraData?.get("channel"))
-            val bid = bubbleManager.extractBubbleId(r)
             val src = r?.srcCode?.takeIf { it.isNotEmpty() } ?: _sourceLang.value
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
-            bubbleManager.upsertTranslation(sid, bid, src, dst, text, isFinal, channel = ch)
+            DemoConversationEventAdapter.makeTranslatedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
             if (!isFinal) return
             addLog("MT [ch=$ch final=$isFinal]: $text")
@@ -811,19 +814,18 @@ class Offline1v1ViewModel @Inject constructor(
         )
         isRecording = true
         audioRecord?.startRecording()
-        assetPcmStream = application.assets.open("en_simple.pcm")
         addLog("双声道推流已开始 (左:资产PCM, 右:麦克风)")
 
-        leftVadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
-            setCallback(object : VadDetector.Callback {
-                override fun onVadStart() { addLog("VAD L → 开始说话") }
-                override fun onVadEnd() { addLog("VAD L → 停止说话") }
-            }); init()
-        }
         rightVadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
             setCallback(object : VadDetector.Callback {
-                override fun onVadStart() { addLog("VAD R → 开始说话") }
-                override fun onVadEnd() { addLog("VAD R → 停止说话") }
+                override fun onVadStart() {
+                    // 生成右声道推流元数据，SDK 依据其首字节区分声道，属正常音频路由所需。
+                    pendingRightMetadata = buildMetadataBytes(channel = 2)
+                    addLog("VAD R → 开始说话")
+                }
+                override fun onVadEnd() {
+                    addLog("VAD R → 停止说话")
+                }
             }); init()
         }
 
@@ -833,6 +835,7 @@ class Offline1v1ViewModel @Inject constructor(
             val micBuf = ByteArray(bytesPerChannel)
             val pcmBuf = ByteArray(bytesPerChannel)
             val stereoBuf = ByteArray(bytesPerChannel * 2)
+            val leftLoopBuffer = DemoLocalAudioLoopBuffer(readDemoPcmAsset("en_simple.pcm"))
 
             while (isRecording) {
                 // 右声道麦克风数据
@@ -842,23 +845,17 @@ class Offline1v1ViewModel @Inject constructor(
                     if (read > 0) micOffset += read
                 }
 
-                // 左声道固定资产 PCM。
-                var pcmOffset = 0
-                while (pcmOffset < bytesPerChannel && isRecording) {
-                    val r = assetPcmStream?.read(pcmBuf, pcmOffset, bytesPerChannel - pcmOffset) ?: -1
-                    if (r == -1) {
-                        assetPcmStream?.close()
-                        assetPcmStream = application.assets.open("en_simple.pcm")
-                    } else if (r > 0) {
-                        pcmOffset += r
-                    }
-                }
+                // 对齐 iOS Demo：左声道资产 PCM 播完后先推 3 秒静音，再从头循环。
+                val startsNewLeftCycle = leftLoopBuffer.fillNextLoopChunk(pcmBuf)
 
                 val leftBuf = pcmBuf
                 val rightBuf = micBuf
 
-                // VAD 检测
-                leftVadDetector?.pushAudioBytes(leftBuf)
+                val leftCycleMetadata = if (startsNewLeftCycle) {
+                    buildLeftFileCycleMetadata()
+                } else {
+                    null
+                }
                 rightVadDetector?.pushAudioBytes(rightBuf)
 
                 // 交织成立体声
@@ -872,25 +869,41 @@ class Offline1v1ViewModel @Inject constructor(
                     si += 4
                 }
 
-                channel?.pushStreamAudioData(stereoBuf, 2, null)
+                val metadata = leftCycleMetadata ?: pendingRightMetadata
+                if (leftCycleMetadata == null && pendingRightMetadata != null) {
+                    pendingRightMetadata = null
+                }
+                channel?.pushStreamAudioData(stereoBuf, 2, metadata)
             }
         }.start()
         return true
     }
 
+    private fun readDemoPcmAsset(fileName: String): ByteArray? {
+        return try {
+            application.assets.open(fileName).use { it.readBytes() }
+        } catch (e: Exception) {
+            addLog("读取资产PCM失败: ${e.message}")
+            null
+        }
+    }
+
+    private fun buildLeftFileCycleMetadata(): ByteArray {
+        // 左路资产 PCM 每轮重新开始时携带声道元数据，供 SDK 音频路由识别。
+        val metadata = buildMetadataBytes(channel = 1)
+        addLog("左路PCM新一轮开始")
+        return metadata
+    }
+
     private fun stopRecording() {
         isRecording = false
-        leftVadDetector?.release(); leftVadDetector = null
         rightVadDetector?.release(); rightVadDetector = null
+        pendingRightMetadata = null
         try {
             audioRecord?.stop()
             audioRecord?.release()
         } catch (_: Exception) {}
         audioRecord = null
-        try {
-            assetPcmStream?.close()
-        } catch (_: Exception) {}
-        assetPcmStream = null
     }
 
     override fun onCleared() {

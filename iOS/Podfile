@@ -1,6 +1,3 @@
-source 'https://cdn.cocoapods.org/'
-source 'https://github.com/timekettle/TmkTranslationSDK-iOS.git'
-
 platform :ios, '15.0'
 
 target 'SDKDemo' do
@@ -8,7 +5,7 @@ target 'SDKDemo' do
   use_frameworks!
 
   # Pods for SDKDemo
-  pod 'TmkTranslationSDK', '1.1.2'
+  pod 'TmkTranslationSDK', '1.2.0'
   pod 'SnapKit'
 
   target 'SDKDemoTests' do

@@ -48,10 +48,17 @@ final class NowListeningBubbleCell: UITableViewCell {
                    playbackChannels: Int) {
         let capture = captureChannels > 0 ? "\(captureSampleRate)Hz/\(captureChannels)ch" : "-"
         let playback = playbackChannels > 0 ? "\(playbackChannels)ch" : "-"
-        let sourceDisplay = row.sourceText.isEmpty ? "..." : row.sourceText
-        let targetDisplay = row.translatedText.isEmpty ? "..." : row.translatedText
         let metaText = "sessionId: \(row.sessionId)  bubbleId: \(row.bubbleId)\n房间: \(roomNo)  通道: \(scenario)/\(mode)\n采样: 配置\(configuredSampleRate)Hz/\(configuredChannels)ch  采集\(capture)  回放\(playback)"
-        contentLabel.text = "\(metaText)\n\n源语言(\(row.sourceLangCode))：\(sourceDisplay)\n目标语言(\(row.targetLangCode))：\(targetDisplay)"
+        contentLabel.attributedText = DemoConversationSegmentRenderer.makeBubbleText(
+            metaText: metaText,
+            sourceLangCode: row.sourceLangCode,
+            sourceSegments: row.sourceSegments,
+            sourceFallbackText: row.sourceText,
+            targetLangCode: row.targetLangCode,
+            translatedSegments: row.translatedSegments,
+            translatedFallbackText: row.translatedText,
+            font: contentLabel.font
+        )
 
         bubbleView.snp.remakeConstraints { make in
             make.top.bottom.equalToSuperview().inset(6)
@@ -59,6 +66,8 @@ final class NowListeningBubbleCell: UITableViewCell {
             make.left.equalToSuperview().inset(12)
         }
         bubbleView.backgroundColor = UIColor.systemGray5
+        bubbleView.layer.borderWidth = row.isBubbleEnded ? 1 : 0
+        bubbleView.layer.borderColor = row.isBubbleEnded ? UIColor.systemGreen.cgColor : nil
         contentLabel.textAlignment = .left
     }
 }

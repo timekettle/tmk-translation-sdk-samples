@@ -91,7 +91,6 @@ final class DemoSettingsViewModel {
     }
 
     private static func makeVersionText() -> String {
-        let bundleVersion = Bundle(for: TmkTranslationSDK.self).object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        return "TmkTranslationSDK v\(bundleVersion ?? "1.0.0")"
+        return "TmkTranslationSDK v\(TmkTranslationSDK.sdkVersion)"
     }
 }

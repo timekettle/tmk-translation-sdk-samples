@@ -83,7 +83,7 @@ private extension OneToOneController {
         statusLabel.numberOfLines = 1
         statusLabel.font = .systemFont(ofSize: 13)
         statusLabel.textColor = .label
-        infoLabel.numberOfLines = 1
+        infoLabel.numberOfLines = 2
         infoLabel.font = .systemFont(ofSize: 12)
         infoLabel.textColor = .secondaryLabel
         captureLabel.text = "翻译音频采集"
@@ -192,7 +192,7 @@ private extension OneToOneController {
         let playback = state.playbackChannels > 0 ? "\(state.playbackChannels)ch" : "-"
         let sourceName = localizedLanguageName(for: state.sourceLanguage)
         let targetName = localizedLanguageName(for: state.targetLanguage)
-        infoLabel.text = "房间:\(state.currentRoomNo)  语言:\(sourceName)→\(targetName)  采集:\(capture)  回放:\(playback)  播放:\(state.playbackMode.title)"
+        infoLabel.text = "房间:\(state.currentRoomNo)  能力:\(state.scenarioOption.title)  语言:\(sourceName)→\(targetName)  采集:\(capture)  回放:\(playback)  播放:\(state.playbackMode.title)"
         captureSwitch.isOn = state.isCaptureEnabled
         startListeningButton.isEnabled = state.canStartListening
         stopListeningButton.isEnabled = state.canStopListening
@@ -214,9 +214,12 @@ private extension OneToOneController {
         cell.configure(metaText: meta,
                        sourceLangCode: row.sourceLangCode,
                        sourceText: row.sourceText,
+                       sourceSegments: row.sourceSegments,
                        targetLangCode: row.targetLangCode,
                        translatedText: row.translatedText,
-                       isRightBubble: row.lane == .right)
+                       translatedSegments: row.translatedSegments,
+                       isRightBubble: row.lane == .right,
+                       isBubbleEnded: row.isBubbleEnded)
     }
 
     func refreshVisibleCells() {
@@ -284,10 +287,83 @@ private extension OneToOneController {
         let playbackAction = UIAction(title: "播放音源") { [weak self] _ in
             self?.showPlaybackModePicker()
         }
+        let translateEngineAction = UIAction(title: "翻译引擎") { [weak self] _ in
+            self?.showTranslateEngineMenu()
+        }
+        let scenarioAction = UIAction(title: "房间能力") { [weak self] _ in
+            self?.showScenarioMenu()
+        }
+        let channelModeAction = UIAction(title: "通道模式") { [weak self] _ in
+            self?.showDialogChannelModeMenu()
+        }
         let speakerAction = UIAction(title: "音色") { [weak self] _ in
             self?.showSpeakerPicker()
         }
-        return UIMenu(title: "", children: [languageAction, playbackAction, speakerAction])
+        return UIMenu(title: "", children: [languageAction, playbackAction, translateEngineAction, scenarioAction, channelModeAction, speakerAction])
+    }
+
+    func showScenarioMenu() {
+        let alert = UIAlertController(title: "在线一对一房间能力",
+                                      message: nil,
+                                      preferredStyle: .actionSheet)
+        OneToOneScenarioOption.allCases.forEach { option in
+            addScenarioAction(option, to: alert)
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
+        present(alert, animated: true)
+    }
+
+    private func addScenarioAction(_ option: OneToOneScenarioOption,
+                                   to alert: UIAlertController) {
+        let displayTitle = state.scenarioOption == option ? "✓ \(option.title)" : option.title
+        let action = UIAlertAction(title: displayTitle, style: .default) { [weak self] _ in
+            self?.viewModel.updateScenarioOption(option)
+        }
+        alert.addAction(action)
+    }
+
+    func showDialogChannelModeMenu() {
+        let alert = UIAlertController(title: "通道模式",
+                                      message: nil,
+                                      preferredStyle: .actionSheet)
+        addDialogChannelModeAction(mode: .standard, to: alert)
+        addDialogChannelModeAction(mode: .lowLatency, to: alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
+        present(alert, animated: true)
+    }
+
+    private func addDialogChannelModeAction(mode: TmkDialogConversationAudioMode,
+                                            to alert: UIAlertController) {
+        let isSelected = state.dialogConversationAudioMode == mode
+        let title = isSelected ? "\(mode.oneToOneDemoTitle)（当前）" : mode.oneToOneDemoTitle
+        let action = UIAlertAction(title: title, style: .default) { [weak self] _ in
+            self?.viewModel.updateDialogConversationAudioMode(mode)
+        }
+        alert.addAction(action)
+    }
+
+    func showTranslateEngineMenu() {
+        let alert = UIAlertController(title: "翻译引擎",
+                                      message: nil,
+                                      preferredStyle: .actionSheet)
+        addTranslateEngineAction(title: "默认", engine: .automatic, to: alert)
+        addTranslateEngineAction(title: "快速", engine: .fast, to: alert)
+        addTranslateEngineAction(title: "精准", engine: .accurate, to: alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
+        present(alert, animated: true)
+    }
+
+    private func addTranslateEngineAction(title: String,
+                                          engine: TmkOnlineTranslateEngine,
+                                          to alert: UIAlertController) {
+        let displayTitle = state.translateEngine == engine ? "✓ \(title)" : title
+        let action = UIAlertAction(title: displayTitle, style: .default) { [weak self] _ in
+            self?.viewModel.updateTranslateEngine(engine)
+        }
+        alert.addAction(action)
     }
 
     func showPlaybackModePicker() {
@@ -644,16 +720,15 @@ private extension OneToOneController {
         hideSourceLanguagePicker()
     }
 
-    func languageTitle(for locale: TmkSupportedLocale) -> String {
-        let uiLang = locale.uiLang.trimmingCharacters(in: .whitespacesAndNewlines)
-        let uiAccent = locale.uiAccent.trimmingCharacters(in: .whitespacesAndNewlines)
-        if uiLang.isEmpty == false, uiAccent.isEmpty == false {
-            return "\(uiLang)（\(uiAccent)）"
+    func languageTitle(for locale: TmkLocaleItem) -> String {
+        let code = locale.code
+        var name = locale.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty {
+            name = zhLocale.localizedString(forIdentifier: code) ?? code
         }
-        if uiLang.isEmpty == false {
-            return uiLang
-        }
-        return zhLocale.localizedString(forIdentifier: locale.code) ?? locale.code
+        // 语言名称之外补充语言 code,方便区分同名语言的不同地区变体
+        guard name != code else { return code }
+        return "\(name) (\(code))"
     }
 }
 

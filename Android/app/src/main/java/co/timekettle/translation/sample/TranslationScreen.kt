@@ -26,6 +26,8 @@ data class ListenModeScreen(
         val isStarted by viewModel.isStarted.collectAsState()
         val isChannelReady by viewModel.isChannelReady.collectAsState()
         val isLocaleUpdating by viewModel.isLocaleUpdating.collectAsState()
+        val isTranslateEngineUpdating by viewModel.isTranslateEngineUpdating.collectAsState()
+        val isScenarioUpdating by viewModel.isScenarioUpdating.collectAsState()
         val isStarting by viewModel.isStarting.collectAsState()
         val bubbles by viewModel.bubbles.collectAsState()
         val statusText by viewModel.statusText.collectAsState()
@@ -38,11 +40,16 @@ data class ListenModeScreen(
         val lockedSourceLang by viewModel.sourceLang.collectAsState()
         val lockedTargetLang by viewModel.targetLang.collectAsState()
         val speakerGender by viewModel.speakerGender.collectAsState()
+        val onlineTranslateEngine by viewModel.onlineTranslateEngine.collectAsState()
+        val roomScenarioOption by viewModel.roomScenarioOption.collectAsState()
         var settingsExpanded by remember { mutableStateOf(false) }
         var showLocaleDialog by remember { mutableStateOf(false) }
         var showSpeakerDialog by remember { mutableStateOf(false) }
+        var showTranslateEngineDialog by remember { mutableStateOf(false) }
+        var showRoomScenarioDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
-        val onlineLanguageOptions = rememberOnlineLanguageOptions()
+        val onlineLanguageOptions = (rememberOnlineLanguageOptions().state
+            as? LanguageOptionsState.Ready)?.options ?: emptyMap()
 
         LaunchedEffect(viewModel, sourceLang, targetLang) {
             viewModel.setLanguagesIfNeeded(sourceLang, targetLang)
@@ -117,6 +124,22 @@ data class ListenModeScreen(
                                 showSpeakerDialog = true
                             },
                         )
+                        DropdownMenuItem(
+                            text = { Text(if (isTranslateEngineUpdating) "翻译引擎切换中..." else "翻译引擎设置") },
+                            enabled = !isTranslateEngineUpdating,
+                            onClick = {
+                                settingsExpanded = false
+                                showTranslateEngineDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (isScenarioUpdating) "房间能力切换中..." else "房间能力设置") },
+                            enabled = !isScenarioUpdating,
+                            onClick = {
+                                settingsExpanded = false
+                                showRoomScenarioDialog = true
+                            },
+                        )
                     }
                 }
             }
@@ -136,6 +159,7 @@ data class ListenModeScreen(
                 showDetailInfo = showDetailInfo,
                 onToggleDetail = { showDetailInfo = !showDetailInfo },
                 bidirectional = false,
+                displayNames = onlineLanguageOptions,
             )
 
             if (showDetailInfo) {
@@ -143,6 +167,7 @@ data class ListenModeScreen(
                     rows = listOf(
                         "连接：$connectionState",
                         "房间：$currentRoomNo",
+                        "能力：${roomScenarioOption.title}",
                         "通道：listen/online",
                         "采样：配置16000Hz/1ch  采集$captureInfo  回放$playbackInfo",
                     ),
@@ -168,6 +193,7 @@ data class ListenModeScreen(
                     val playback = if (playbackChannels > 0) "${playbackChannels}ch" else "-"
                     "sessionId: ${row.sessionId}  bubbleId: ${row.bubbleId}\n" +
                         "房间: $currentRoomNo  通道: listen/online\n" +
+                        "能力: ${roomScenarioOption.title}\n" +
                         "采样: 配置16000Hz/1ch  采集$capture  回放$playback"
                 },
                 scrollOnLatestUpdate = true,
@@ -197,6 +223,29 @@ data class ListenModeScreen(
                 onConfirm = {
                     showSpeakerDialog = false
                     viewModel.updateSpeaker(it)
+                },
+            )
+        }
+
+        if (showTranslateEngineDialog) {
+            OnlineTranslateEngineDialog(
+                initialEngine = onlineTranslateEngine,
+                onDismiss = { showTranslateEngineDialog = false },
+                onConfirm = {
+                    showTranslateEngineDialog = false
+                    viewModel.updateTranslateEngine(it)
+                },
+            )
+        }
+
+        if (showRoomScenarioDialog) {
+            OnlineRoomScenarioDialog(
+                title = "设置在线收听房间能力",
+                initialOption = roomScenarioOption,
+                onDismiss = { showRoomScenarioDialog = false },
+                onConfirm = {
+                    showRoomScenarioDialog = false
+                    viewModel.updateRoomScenario(it)
                 },
             )
         }
