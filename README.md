@@ -159,7 +159,7 @@ Tmk Translation SDK 是时空壶统一的实时语音翻译能力封装，为开
 
 ### 1、获取演示Demo
 
-- Demo App：https://www\.pgyer\.com/tmktranslationsample 安装密码：tmktrans
+- Demo App：[https://www.pgyer.com/tmktranslationsample](https://www.pgyer.com/tmktranslationsample) 安装密码：tmktrans
 
 - **Demo 源码链接** ：[https://github\.com/timekettle/tmk\-translation\-sdk\-samples](https://github.com/timekettle/tmk-translation-sdk-samples)
 
@@ -167,11 +167,11 @@ Tmk Translation SDK 是时空壶统一的实时语音翻译能力封装，为开
 
     - iOS SDK 链接：
 
-        - Pod Specs https://github\.com/timekettle/TmkTranslationSDK\-iOS\.git 
+        - Pod Specs [https://github.com/timekettle/TmkTranslationSDK-iOS.git](https://github.com/timekettle/TmkTranslationSDK-iOS.git) 
 
-        - XCFramwork https://github\.com/timekettle/TmkTranslationSDK\-xcframework\.git
+        - XCFramwork [https://github.com/timekettle/TmkTranslationSDK-xcframework.git](https://github.com/timekettle/TmkTranslationSDK-xcframework.git)
 
-    - Android  SDK 链接：https://github\.com/timekettle/tmk\-translation\-sdk\-dist
+    - Android  SDK 链接：[https://github.com/timekettle/tmk-translation-sdk-dist](https://github.com/timekettle/tmk-translation-sdk-dist)
 
 更新：SDK 已经发布到Cocoapods和Maven Central，可直接安装使用
 
