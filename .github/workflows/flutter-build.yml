@@ -1,0 +1,325 @@
+name: Flutter Build
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Flutter/apps/tmk_translation_demo
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      build_number: ${{ steps.version.outputs.build_number }}
+      apk_name: ${{ steps.apk.outputs.apk_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        working-directory: .
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          BUILD_NUMBER=$(git rev-list --count HEAD)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION, Build: $BUILD_NUMBER, Tag: $TAG"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Restore Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('Flutter/apps/tmk_translation_demo/android/**/*.gradle*', 'Flutter/apps/tmk_translation_demo/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Configure git auth for private SDK dependency
+        working-directory: .
+        run: git config --global --add url."https://x-access-token:${{ secrets.RELEASE_TOKEN }}@github.com/timekettle/tmk-translation-sdk.git".insteadOf "https://github.com/timekettle/tmk-translation-sdk.git"
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Create local.properties for Android
+        run: |
+          cat > android/local.properties << EOF
+          sdk.dir=$ANDROID_HOME
+          TMK_SAMPLE_APP_ID=${{ secrets.TMK_SAMPLE_APP_ID }}
+          TMK_SAMPLE_APP_SECRET=${{ secrets.TMK_SAMPLE_APP_SECRET }}
+          EOF
+
+      - name: Build APK
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GH_ACCESS_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          TMK_SAMPLE_APP_ID: ${{ secrets.TMK_SAMPLE_APP_ID }}
+          TMK_SAMPLE_APP_SECRET: ${{ secrets.TMK_SAMPLE_APP_SECRET }}
+        run: |
+          flutter build apk --release \
+            --build-name=${{ steps.version.outputs.version }} \
+            --build-number=${{ steps.version.outputs.build_number }}
+
+      - name: Locate APK
+        id: apk
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          APK_PATH="build/app/outputs/flutter-apk/tmk-translation-sdk-samples-${VERSION}.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            APK_PATH=$(find build/app/outputs -name "*.apk" -not -name "*-unsigned*" | head -1)
+          fi
+          echo "APK: $APK_PATH"
+          echo "APK size: $(du -h "$APK_PATH" | cut -f1)"
+          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
+          echo "apk_name=tmk-translation-flutter-demo-${VERSION}-android.apk" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flutter-demo-android-apk
+          path: Flutter/apps/tmk_translation_demo/${{ steps.apk.outputs.apk_path }}
+          retention-days: 14
+
+  build-ios:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: Flutter/apps/tmk_translation_demo
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      build_number: ${{ steps.version.outputs.build_number }}
+      ipa_path: ${{ steps.build_ipa.outputs.ipa_path }}
+      ipa_name: ${{ steps.build_ipa.outputs.ipa_name }}
+      pgyer_download_url: ${{ steps.upload_pgyer.outputs.download_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure git to use HTTPS instead of SSH
+        working-directory: .
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      - name: Configure git auth for private SDK dependency
+        working-directory: .
+        run: git config --global --add url."https://x-access-token:${{ secrets.RELEASE_TOKEN }}@github.com/timekettle/tmk-translation-sdk.git".insteadOf "https://github.com/timekettle/tmk-translation-sdk.git"
+
+      - name: Extract version from tag
+        id: version
+        working-directory: .
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          BUILD_NUMBER=$(git rev-list --count HEAD)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION, Build: $BUILD_NUMBER, Tag: $TAG"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Create LocalSecrets.xcconfig
+        run: |
+          printf 'TMK_SAMPLE_APP_ID = %s\nTMK_SAMPLE_APP_SECRET = %s\n' \
+            "${{ secrets.TMK_SAMPLE_APP_ID }}" \
+            "${{ secrets.TMK_SAMPLE_APP_SECRET }}" \
+            > ios/Flutter/LocalSecrets.xcconfig
+
+
+      # ============ Fastlane 签名打包 ============
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.3
+          bundler-cache: true
+          working-directory: Flutter/apps/tmk_translation_demo/ios
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            Flutter/apps/tmk_translation_demo/ios/Pods
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods
+          key: pods-${{ runner.os }}-${{ hashFiles('Flutter/apps/tmk_translation_demo/ios/Podfile.lock') }}
+          restore-keys: |
+            pods-${{ runner.os }}-
+
+      - name: Install CocoaPods dependencies
+        working-directory: Flutter/apps/tmk_translation_demo/ios
+        run: pod install
+
+      - name: Build IPA with Fastlane
+        id: build_ipa
+        working-directory: Flutter/apps/tmk_translation_demo/ios
+        env:
+          MATCH_GIT_TOKEN: ${{ secrets.FASTLANE_MATCH_TOKEN }}
+          MATCH_PASSWORD: ${{ secrets.FASTLANE_MATCH_PASSWORD }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          bundle exec fastlane ios beta
+          echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
+          echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
+
+      # ============ 上传蒲公英 ============
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.9
+
+      - name: Install Python Dependencies
+        working-directory: .
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests==2.32.5
+
+      - name: Upload to Pgyer
+        id: upload_pgyer
+        working-directory: .
+        env:
+          PGYER_API_KEY: ${{ secrets.PGYER_API_KEY }}
+          IM_WEBHOOK: ${{ secrets.IM_WEBHOOK }}
+          IM_SECRET: ${{ secrets.IM_SECRET }}
+        run: |
+          set +e
+          UPLOAD_OUTPUT=$(python scripts/upload_to_pgyer.py \
+            --path "${{ env.IPA_PATH }}" \
+            --key "${PGYER_API_KEY}" \
+            --password "" \
+            --im-webhook "${IM_WEBHOOK}" \
+            --im-secret "${IM_SECRET}" 2>&1)
+          UPLOAD_EXIT=$?
+          set -e
+
+          if [ $UPLOAD_EXIT -eq 0 ]; then
+            DOWNLOAD_URL=$(echo "$UPLOAD_OUTPUT" | grep -oP '下载链接: \K.*' | head -1)
+            if [ -n "$DOWNLOAD_URL" ]; then
+              echo "download_url=$DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
+            else
+              echo "download_url=Coming Soon" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "download_url=Coming Soon" >> "$GITHUB_OUTPUT"
+          fi
+        continue-on-error: true
+
+      # ============ 上传 GitHub Release ============
+      - name: Upload to GitHub Release
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          gh release upload "${{ steps.version.outputs.tag }}" "${{ env.IPA_PATH }}" --clobber
+        continue-on-error: true
+
+      # ============ 上传 Artifact（用于测试）============
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-demo-ios-ipa
+          path: ${{ env.IPA_PATH }}
+          retention-days: 14
+        continue-on-error: true
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-android, build-ios]
+    permissions:
+      contents: write
+    steps:
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flutter-demo-android-apk
+          path: dist/android
+
+      - name: Download iOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flutter-demo-ios-ipa
+          path: dist/ios
+        continue-on-error: true
+
+      - name: List release assets
+        shell: bash
+        run: ls -R dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: |
+            dist/android/*.apk
+            dist/ios/*.ipa
+
+  notify:
+    name: Notify Feishu
+    needs: [build-android, build-ios, release]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      FEISHU_WEBHOOK_URL: ${{ secrets.IM_WEBHOOK || '' }}
+      FEISHU_WEBHOOK_SECRET: ${{ secrets.IM_SECRET || '' }}
+      FEISHU_USERIDS_MAP: ${{ secrets.FEISHU_USERIDS_MAP || '' }}
+      FEISHU_SUCCESS_NOTIFY_USERS: ${{ vars.FEISHU_SUCCESS_NOTIFY_USERS || '' }}
+      FEISHU_FAILED_NOTIFY_USERS: ${{ vars.FEISHU_FAILED_NOTIFY_USERS || '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Notify Feishu
+        if: always()
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build-android.outputs.version }}
+          ANDROID_RESULT: ${{ needs.build-android.result }}
+          IOS_RESULT: ${{ needs.build-ios.result }}
+          ANDROID_DOWNLOAD_URL: Coming Soon
+          IOS_DOWNLOAD_URL: ${{ needs.build-ios.outputs.pgyer_download_url || 'Coming Soon' }}
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+        run: |
+          bash .github/scripts/notify_workflow_feishu.sh \
+            --title "Translation-SDK-Samples 更新" \
+            --version "$VERSION" \
+            --android-result "$ANDROID_RESULT" \
+            --ios-result "$IOS_RESULT" \
+            --android-download-url "$ANDROID_DOWNLOAD_URL" \
+            --ios-download-url "$IOS_DOWNLOAD_URL" \
+            --release-url "$RELEASE_URL" \
+            --release-tag "$TAG" \
+            --mentions-on-success "${FEISHU_SUCCESS_NOTIFY_USERS:-}" \
+            --mentions-on-failure "${FEISHU_FAILED_NOTIFY_USERS:-}"

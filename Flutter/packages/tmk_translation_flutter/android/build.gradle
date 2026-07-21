@@ -1,0 +1,77 @@
+group = "co.timekettle.translation.flutter"
+version = "1.0-SNAPSHOT"
+
+buildscript {
+    ext.kotlin_version = "2.2.20"
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath("com.android.tools.build:gradle:8.11.1")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version")
+    }
+}
+
+apply plugin: "com.android.library"
+apply plugin: "kotlin-android"
+
+android {
+    namespace = "co.timekettle.translation.flutter"
+
+    compileSdk = 36
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main.java.srcDirs += "src/main/kotlin"
+        test.java.srcDirs += "src/test/kotlin"
+    }
+
+    defaultConfig {
+        minSdk = 28
+    }
+
+    testOptions {
+        unitTests.all {
+            useJUnitPlatform()
+
+            testLogging {
+               events "passed", "skipped", "failed", "standardOut", "standardError"
+               outputs.upToDateWhen {false}
+               showStandardStreams = true
+            }
+        }
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+    maven {
+        name = "GitHubPackagesTmkTranslationSdk"
+        def owner = project.findProperty("TMK_GITHUB_PACKAGES_OWNER") ?: "timekettle"
+        def repo = project.findProperty("TMK_GITHUB_PACKAGES_REPOSITORY") ?: "tmk-translation-sdk-dist"
+        url = uri("https://maven.pkg.github.com/$owner/$repo")
+        credentials {
+            username = project.findProperty("gpr.user") ?: System.getenv("GPR_USER") ?: System.getenv("GITHUB_ACTOR") ?: ""
+            password = project.findProperty("gpr.key") ?: System.getenv("GPR_KEY") ?: System.getenv("GH_ACCESS_TOKEN") ?: ""
+        }
+    }
+}
+
+dependencies {
+    def sdkVersion = project.findProperty("TMK_SDK_VERSION") ?: "1.2.0-beta17"
+
+    implementation("co.timekettle.translation:tmk-translation-sdk:${sdkVersion}")
+    testImplementation("org.jetbrains.kotlin:kotlin-test")
+    testImplementation("org.mockito:mockito-core:5.0.0")
+}

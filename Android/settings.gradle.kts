@@ -39,7 +39,6 @@ dependencyResolutionManagement {
                 password = githubPackagesToken.orNull ?: ""
             }
         }
-        mavenLocal()
     }
 }
 
