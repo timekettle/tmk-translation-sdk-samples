@@ -6,12 +6,24 @@ TMK Translation SDK 的 Flutter 示例 App，用于验证 `tmk_translation_flutt
 
 ```text
 tmk_translation_demo
-  → packages/tmk_translation_flutter
-    → packages/tmk_translation_platform_interface
-    → iOS/Android TMK Translation SDK
+  → tmk_translation_flutter 1.2.0 (pub.dev)
+    → tmk_translation_platform_interface 0.1.0 (pub.dev)
+    → iOS/Android Timekettle Translation SDK 1.2.0
 ```
 
 Demo App 只通过 `package:tmk_translation_flutter/tmk_translation_flutter.dart` 使用 SDK 能力，不直接调用原生 iOS/Android SDK。
+
+## 公开依赖
+
+Demo 通过 `tmk_translation_flutter: ^1.2.0` 从 pub.dev 获取 Flutter wrapper。Android 原生 SDK 1.2.0 从 Maven Central 获取，其公开传递依赖通过公共 Jiagouyun Maven 解析；iOS 原生 SDK 从 CocoaPods CDN/Trunk 获取。整个过程不需要访问主仓，也不需要 Maven 用户名、密码、GitHub token 或 Timekettle 私有凭据。
+
+Android 工程需要在实际生效的 Gradle 仓库配置中加入：
+
+```kotlin
+maven(url = "https://mvnrepo.jiagouyun.com/repository/maven-releases")
+```
+
+企业网络若启用仓库白名单，需要允许访问 `mvnrepo.jiagouyun.com`。
 
 ## 主要能力
 

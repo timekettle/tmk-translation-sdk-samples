@@ -195,21 +195,19 @@ packages:
   tmk_translation_flutter:
     dependency: "direct main"
     description:
-      path: "Flutter/packages/tmk_translation_flutter"
-      ref: "flutter-v0.0.3"
-      resolved-ref: cd23aa2153a46ecc721667440e883d3bbfeca0b8
-      url: "https://github.com/timekettle/tmk-translation-sdk.git"
-    source: git
-    version: "0.0.1"
+      name: tmk_translation_flutter
+      sha256: e98478aad3e8058c7aec05f7a2dfba6202de8c3d39dc8b1ced3b894dcec7f2dc
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.2.0"
   tmk_translation_platform_interface:
     dependency: transitive
     description:
-      path: "Flutter/packages/tmk_translation_platform_interface"
-      ref: cd23aa2153a46ecc721667440e883d3bbfeca0b8
-      resolved-ref: cd23aa2153a46ecc721667440e883d3bbfeca0b8
-      url: "https://github.com/timekettle/tmk-translation-sdk.git"
-    source: git
-    version: "0.0.1"
+      name: tmk_translation_platform_interface
+      sha256: "4025006633bcb63e4de1fba503b4554362d2ccaf249bfc1ae3e64a5bc926ea8a"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.1.0"
   vector_math:
     dependency: transitive
     description:
@@ -222,10 +220,10 @@ packages:
     dependency: transitive
     description:
       name: vm_service
-      sha256: "046d3928e16fa4dc46e8350415661755ab759d9fc97fc21b5ab295f71e4f0499"
+      sha256: "0016aef94fc66495ac78af5859181e3f3bf2026bd8eecc72b9565601e19ab360"
       url: "https://pub.dev"
     source: hosted
-    version: "15.1.0"
+    version: "15.2.0"
 sdks:
   dart: ">=3.10.1 <4.0.0"
   flutter: ">=3.22.0"
