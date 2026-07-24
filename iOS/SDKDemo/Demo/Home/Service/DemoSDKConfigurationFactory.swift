@@ -15,14 +15,18 @@ enum DemoSDKConfigurationFactory {
 
     static func makeGlobalConfig(from config: DemoSettingsConfig) -> TmkTranslationGlobalConfig {
         let credentials = resolveCredentials()
-        return TmkTranslationGlobalConfig.Builder()
+        let builder = TmkTranslationGlobalConfig.Builder()
             .setAuth(appId: credentials.appId, secret: credentials.appSecret)
             .setOnlineAuthContext(tenantId: defaultTenantId)
             .setLogEnabled(config.consoleLogEnabled)
             .setNetworkEnvironment(config.networkEnvironment)
-            .setNetworkBaseURL(URL(string: "https://api-rayneo.timekettle.co")!)
             .setDiagnosisEnabled(config.diagnosisEnabled)
-            .build()
+        if config.customNetworkBaseURLEnabled,
+           let baseURLString = config.normalizedCustomNetworkBaseURL,
+           let baseURL = URL(string: baseURLString) {
+            _ = builder.setNetworkBaseURL(baseURL)
+        }
+        return builder.build()
     }
 
     static func onlineAuthFailureMessage(_ error: Error) -> String {

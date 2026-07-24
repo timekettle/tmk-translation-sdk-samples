@@ -46,6 +46,29 @@ final class DemoSettingsViewModel {
         publishState()
     }
 
+    func setCustomNetworkBaseURLEnabled(_ enabled: Bool) {
+        state.draftConfig.customNetworkBaseURLEnabled = enabled
+        if enabled && state.draftConfig.normalizedCustomNetworkBaseURL == nil {
+            state.draftConfig.customNetworkBaseURL = DemoSettingsConfig.rayneoNetworkBaseURL
+        }
+        publishState()
+    }
+
+    func setCustomNetworkBaseURL(_ url: String) {
+        state.draftConfig.customNetworkBaseURL = url
+        publishState()
+    }
+
+    func setSensitiveWordRedactionEnabled(_ enabled: Bool) {
+        state.draftConfig.sensitiveWordRedactionEnabled = enabled
+        publishState()
+    }
+
+    func selectRayneoNetworkBaseURL() {
+        state.draftConfig.customNetworkBaseURL = DemoSettingsConfig.rayneoNetworkBaseURL
+        publishState()
+    }
+
     func setMockEngineEnabled(_ enabled: Bool) {
         state.draftConfig.mockEngineEnabled = enabled
         publishState()

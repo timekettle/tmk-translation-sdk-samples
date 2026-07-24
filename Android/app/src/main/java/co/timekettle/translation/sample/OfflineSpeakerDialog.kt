@@ -18,7 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import co.timekettle.translation.enums.TmkOfflineAudioChannelMode
-import co.timekettle.translation.model.SpeakerGender
+import co.timekettle.sdk.common.models.SpeakerGender
 
 @Composable
 fun OfflineListenSpeakerDialog(
@@ -85,7 +85,7 @@ fun Offline1v1SpeakerDialog(
 }
 
 @Composable
-fun Offline1v1TtsOutputModeDialog(
+fun Offline1v1ChannelModeDialog(
     initialMode: TmkOfflineAudioChannelMode,
     onDismiss: () -> Unit,
     onConfirm: (TmkOfflineAudioChannelMode) -> Unit,
@@ -93,11 +93,12 @@ fun Offline1v1TtsOutputModeDialog(
     var mode by remember(initialMode) { mutableStateOf(initialMode) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("设置TTS输出方式") },
+        title = { Text("设置通道模式") },
         text = {
             Column(Modifier.fillMaxWidth()) {
-                TtsOutputModeRow("Mono（单声道）", TmkOfflineAudioChannelMode.MONO, mode) { mode = it }
-                TtsOutputModeRow("Stereo（立体声）", TmkOfflineAudioChannelMode.STEREO, mode) { mode = it }
+                // STEREO=标准(传立体声/收立体声混合);MONO=低延迟(左右分别推、各自声道返回)。
+                TtsOutputModeRow("标准模式（传立体声，收立体声）", TmkOfflineAudioChannelMode.STEREO, mode) { mode = it }
+                TtsOutputModeRow("低延迟模式（左右分别推，各自声道返回）", TmkOfflineAudioChannelMode.MONO, mode) { mode = it }
             }
         },
         confirmButton = {

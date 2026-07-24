@@ -34,14 +34,23 @@ enum DemoConversationRuntimePolicy {
         static let internalError = 2_004_199
     }
 
+    /// - Parameter isListening: Demo 当前是否正处于收音中。用于区分 `.running` 状态下
+    ///   的文案语义:收音过程中 RTC 自动重连恢复(reason=.rtcConnected)时,应保持
+    ///   "正在收听中..."而非退回"点击开始收听"的就绪态文案,避免状态栏与实际收音状态不一致。
     static func action(for snapshot: TmkTranslationChannelStateSnapshot,
-                       readyMessage: String = "在线通道已就绪，点击“开始收听”开始采集") -> DemoConversationRuntimeAction {
+                       readyMessage: String = "在线通道已就绪，点击“开始收听”开始采集",
+                       isListening: Bool = false) -> DemoConversationRuntimeAction {
         switch snapshot.state {
         case .idle:
             return .status("通道未启动")
         case .starting:
             return .status("通道连接中...")
         case .running:
+            // 收音过程中连接恢复(含 RTC 自动重连成功):状态栏保持"收听中"语义,
+            // 不覆盖为就绪态文案,确保与实际收音状态一致。
+            if isListening {
+                return .status("正在收听中...")
+            }
             return .status(snapshot.reason == .networkRestored ? "连接已恢复" : readyMessage)
         case .degraded:
             return .weakNetwork("当前网络不稳定，翻译可能延迟")

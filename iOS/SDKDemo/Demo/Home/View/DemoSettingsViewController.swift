@@ -24,6 +24,11 @@ final class DemoSettingsViewController: UIViewController {
     private let diagnosisSwitch = UISwitch()
     private let consoleLogSwitch = UISwitch()
     private let networkButton = UIButton(type: .system)
+    private let customNetworkBaseURLSwitch = UISwitch()
+    private let sensitiveWordRedactionSwitch = UISwitch()
+    private let networkBaseURLTextField = UITextField()
+    private let rayneoBaseURLButton = UIButton(type: .system)
+    private var networkBaseURLRow = UIView()
     private let onlineStatusLabel = UILabel()
     private let onlineStatusHintLabel = UILabel()
     private let offlineStatusLabel = UILabel()
@@ -51,8 +56,13 @@ final class DemoSettingsViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
+        setupKeyboardHandling()
         bindViewModel()
         viewModel.onViewDidLoad()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     private func setupUI() {
@@ -96,12 +106,36 @@ final class DemoSettingsViewController: UIViewController {
 
         diagnosisSwitch.onTintColor = DemoTheme.primary
         consoleLogSwitch.onTintColor = DemoTheme.primary
+        customNetworkBaseURLSwitch.onTintColor = DemoTheme.primary
+        sensitiveWordRedactionSwitch.onTintColor = DemoTheme.primary
         mockSwitch.onTintColor = DemoTheme.primary
         mockSwitch.isEnabled = false
         mockSwitch.alpha = 0.45
 
         diagnosisSwitch.addTarget(self, action: #selector(onDiagnosisChanged), for: .valueChanged)
         consoleLogSwitch.addTarget(self, action: #selector(onConsoleLogChanged), for: .valueChanged)
+        customNetworkBaseURLSwitch.addTarget(self, action: #selector(onCustomNetworkBaseURLSwitchChanged), for: .valueChanged)
+        sensitiveWordRedactionSwitch.addTarget(self, action: #selector(onSensitiveWordRedactionChanged), for: .valueChanged)
+
+        networkBaseURLTextField.textColor = DemoTheme.text
+        networkBaseURLTextField.tintColor = DemoTheme.primaryLight
+        networkBaseURLTextField.font = .systemFont(ofSize: 12)
+        networkBaseURLTextField.keyboardType = .URL
+        networkBaseURLTextField.autocorrectionType = .no
+        networkBaseURLTextField.autocapitalizationType = .none
+        networkBaseURLTextField.borderStyle = .roundedRect
+        networkBaseURLTextField.backgroundColor = DemoTheme.background
+        networkBaseURLTextField.layer.borderColor = DemoTheme.border.cgColor
+        networkBaseURLTextField.layer.borderWidth = 1 / UIScreen.main.scale
+        networkBaseURLTextField.layer.cornerRadius = 8
+        networkBaseURLTextField.placeholder = DemoSettingsConfig.rayneoNetworkBaseURL
+        networkBaseURLTextField.addTarget(self, action: #selector(onNetworkBaseURLBeginEditing), for: .editingDidBegin)
+        networkBaseURLTextField.addTarget(self, action: #selector(onNetworkBaseURLChanged), for: .editingChanged)
+
+        rayneoBaseURLButton.setTitle("RayNeo", for: .normal)
+        rayneoBaseURLButton.setTitleColor(DemoTheme.primaryLight, for: .normal)
+        rayneoBaseURLButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+        rayneoBaseURLButton.addTarget(self, action: #selector(onRayneoBaseURL), for: .touchUpInside)
 
         versionLabel.textColor = DemoTheme.textDim
         versionLabel.font = .systemFont(ofSize: 12)
@@ -167,7 +201,10 @@ final class DemoSettingsViewController: UIViewController {
         let sdkConfigSection = makeSection(title: "SDK 配置", rows: [
             makeToggleRow(title: "诊断模式", hint: "记录详细日志用于排查问题", control: diagnosisSwitch),
             makeToggleRow(title: "控制台日志", hint: "在 Xcode 控制台输出日志", control: consoleLogSwitch),
-            makeValueRow(title: "网络环境", hint: "当前 SDK 请求环境", valueView: networkButton)
+            makeToggleRow(title: "敏感词脱敏", hint: "仅在线翻译生效：对客户端可见文本启用敏感词脱敏", control: sensitiveWordRedactionSwitch),
+            makeValueRow(title: "网络环境", hint: "当前 SDK 请求环境", valueView: networkButton),
+            makeToggleRow(title: "启用自定义URL", hint: "开启后使用自定义 URL，关闭后使用网络环境枚举", control: customNetworkBaseURLSwitch),
+            makeNetworkBaseURLRow()
         ])
         let engineSection = makeSection(title: "引擎状态", rows: [
             makeStatusRow(title: "在线引擎", hint: "LingCast + Agora RTC", statusLabel: onlineStatusLabel, detailLabel: onlineStatusHintLabel),
@@ -192,6 +229,21 @@ final class DemoSettingsViewController: UIViewController {
         }
     }
 
+    private func setupKeyboardHandling() {
+        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(onDismissKeyboard))
+        tapGesture.cancelsTouchesInView = false
+        view.addGestureRecognizer(tapGesture)
+
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(onKeyboardWillChangeFrame(_:)),
+                                               name: UIResponder.keyboardWillChangeFrameNotification,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(onKeyboardWillHide(_:)),
+                                               name: UIResponder.keyboardWillHideNotification,
+                                               object: nil)
+    }
+
     private func bindViewModel() {
         viewModel.$state
             .receive(on: DispatchQueue.main)
@@ -204,8 +256,15 @@ final class DemoSettingsViewController: UIViewController {
     private func render(_ state: DemoSettingsViewState) {
         diagnosisSwitch.isOn = state.draftConfig.diagnosisEnabled
         consoleLogSwitch.isOn = state.draftConfig.consoleLogEnabled
+        customNetworkBaseURLSwitch.isOn = state.draftConfig.customNetworkBaseURLEnabled
+        sensitiveWordRedactionSwitch.isOn = state.draftConfig.sensitiveWordRedactionEnabled
         mockSwitch.isOn = state.draftConfig.mockEngineEnabled
         networkButton.setTitle("\(state.draftConfig.networkEnvironment.rawValue.uppercased()) ▾", for: .normal)
+        if networkBaseURLTextField.text != state.draftConfig.customNetworkBaseURL {
+            networkBaseURLTextField.text = state.draftConfig.customNetworkBaseURL
+        }
+        networkBaseURLRow.isHidden = state.draftConfig.customNetworkBaseURLEnabled == false
+        networkBaseURLTextField.layer.borderColor = state.draftConfig.isCustomNetworkBaseURLValid ? DemoTheme.border.cgColor : DemoTheme.danger.cgColor
         apply(status: state.onlineEngineStatus, to: onlineStatusLabel, detailLabel: onlineStatusHintLabel)
         apply(status: state.offlineEngineStatus, to: offlineStatusLabel, detailLabel: offlineStatusHintLabel)
         tokenStatusLabel.text = state.authInfo.tokenSummary
@@ -246,6 +305,38 @@ final class DemoSettingsViewController: UIViewController {
 
     @objc private func onConsoleLogChanged() {
         viewModel.setConsoleLogEnabled(consoleLogSwitch.isOn)
+    }
+
+    @objc private func onCustomNetworkBaseURLSwitchChanged() {
+        viewModel.setCustomNetworkBaseURLEnabled(customNetworkBaseURLSwitch.isOn)
+    }
+
+    @objc private func onSensitiveWordRedactionChanged() {
+        viewModel.setSensitiveWordRedactionEnabled(sensitiveWordRedactionSwitch.isOn)
+    }
+
+    @objc private func onNetworkBaseURLBeginEditing() {
+        scrollNetworkBaseURLTextFieldIntoVisibleArea()
+    }
+
+    @objc private func onNetworkBaseURLChanged() {
+        viewModel.setCustomNetworkBaseURL(networkBaseURLTextField.text ?? "")
+    }
+
+    @objc private func onRayneoBaseURL() {
+        viewModel.selectRayneoNetworkBaseURL()
+    }
+
+    @objc private func onDismissKeyboard() {
+        view.endEditing(true)
+    }
+
+    @objc private func onKeyboardWillChangeFrame(_ notification: Notification) {
+        updateKeyboardInset(notification: notification, isHiding: false)
+    }
+
+    @objc private func onKeyboardWillHide(_ notification: Notification) {
+        updateKeyboardInset(notification: notification, isHiding: true)
     }
 
     @objc private func onNetworkEnvironment() {
@@ -361,6 +452,58 @@ final class DemoSettingsViewController: UIViewController {
         makeToggleRow(title: title, hint: hint, control: valueView)
     }
 
+    private func makeNetworkBaseURLRow() -> UIView {
+        let row = UIView()
+        networkBaseURLRow = row
+
+        let titleLabel = UILabel()
+        titleLabel.text = "自定义URL"
+        titleLabel.textColor = DemoTheme.text
+        titleLabel.font = .systemFont(ofSize: 14, weight: .medium)
+
+        let hintLabel = UILabel()
+        hintLabel.text = "必须是 HTTPS/HTTP 根地址，例如 RayNeo 地址"
+        hintLabel.textColor = DemoTheme.textDim
+        hintLabel.font = .systemFont(ofSize: 11)
+        hintLabel.numberOfLines = 2
+
+        let textStack = UIStackView(arrangedSubviews: [titleLabel, hintLabel])
+        textStack.axis = .vertical
+        textStack.spacing = 4
+
+        let inputStack = UIStackView(arrangedSubviews: [networkBaseURLTextField, rayneoBaseURLButton])
+        inputStack.axis = .vertical
+        inputStack.spacing = 8
+        inputStack.alignment = .trailing
+
+        let separator = UIView()
+        separator.backgroundColor = DemoTheme.border
+
+        row.addSubview(textStack)
+        row.addSubview(inputStack)
+        row.addSubview(separator)
+
+        textStack.snp.makeConstraints { make in
+            make.top.equalToSuperview().offset(16)
+            make.left.equalToSuperview().offset(14)
+            make.right.equalToSuperview().inset(14)
+        }
+        inputStack.snp.makeConstraints { make in
+            make.top.equalTo(textStack.snp.bottom).offset(12)
+            make.left.right.equalToSuperview().inset(14)
+            make.bottom.equalToSuperview().inset(16)
+        }
+        networkBaseURLTextField.snp.makeConstraints { make in
+            make.left.right.equalToSuperview()
+            make.height.equalTo(40)
+        }
+        separator.snp.makeConstraints { make in
+            make.left.right.bottom.equalToSuperview()
+            make.height.equalTo(1 / UIScreen.main.scale)
+        }
+        return row
+    }
+
     private func makeStatusRow(title: String, hint: String, statusLabel: UILabel, detailLabel: UILabel) -> UIView {
         let row = UIView()
         let leftTitle = UILabel()
@@ -417,5 +560,37 @@ final class DemoSettingsViewController: UIViewController {
             make.height.equalTo(60)
         }
         return row
+    }
+
+    private func updateKeyboardInset(notification: Notification, isHiding: Bool) {
+        let userInfo = notification.userInfo
+        let duration = (userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
+        let curveRaw = (userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? NSNumber)?.uintValue ?? UIView.AnimationOptions.curveEaseInOut.rawValue
+        let options = UIView.AnimationOptions(rawValue: curveRaw << 16)
+
+        let bottomInset: CGFloat
+        if isHiding {
+            bottomInset = 0
+        } else if let keyboardFrame = (userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue {
+            let keyboardFrameInView = view.convert(keyboardFrame, from: nil)
+            bottomInset = max(0, view.bounds.maxY - keyboardFrameInView.minY) + 16
+        } else {
+            bottomInset = 0
+        }
+
+        UIView.animate(withDuration: duration, delay: 0, options: options) {
+            self.scrollView.contentInset.bottom = bottomInset
+            self.scrollView.verticalScrollIndicatorInsets.bottom = bottomInset
+            self.view.layoutIfNeeded()
+        } completion: { _ in
+            if self.networkBaseURLTextField.isFirstResponder {
+                self.scrollNetworkBaseURLTextFieldIntoVisibleArea()
+            }
+        }
+    }
+
+    private func scrollNetworkBaseURLTextFieldIntoVisibleArea() {
+        let targetRect = networkBaseURLTextField.convert(networkBaseURLTextField.bounds.insetBy(dx: 0, dy: -16), to: scrollView)
+        scrollView.scrollRectToVisible(targetRect, animated: true)
     }
 }

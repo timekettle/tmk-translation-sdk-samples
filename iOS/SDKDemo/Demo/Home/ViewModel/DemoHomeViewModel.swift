@@ -126,7 +126,7 @@ final class DemoHomeViewModel {
         }
     }
 
-    private func applyLoadedLanguages(_ options: [DemoLanguageOption], source: TmkSupportedLanguagesSource) {
+    private func applyLoadedLanguages(_ options: [DemoLanguageOption], source: DemoLanguageSource) {
         state.isLoadingLanguages = false
         state.languages = options
         state.sourceLanguage = preferredOption(from: options,

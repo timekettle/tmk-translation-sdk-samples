@@ -23,6 +23,10 @@ struct DemoConversationEvent {
     let sourceLangCode: String
     let targetLangCode: String
     let chunkId: String?
+    /// ASR 句子的 offset(纳秒)；仅 ASR final 句子携带,MT/TTS 为 nil。
+    let offset: Int64?
+    /// ASR 句子的 duration(纳秒)；仅 ASR final 句子携带,MT/TTS 为 nil。
+    let duration: Int64?
 
     init(bubbleId: String,
          sessionId: Int,
@@ -32,7 +36,9 @@ struct DemoConversationEvent {
          text: String?,
          sourceLangCode: String,
          targetLangCode: String,
-         chunkId: String? = nil) {
+         chunkId: String? = nil,
+         offset: Int64? = nil,
+         duration: Int64? = nil) {
         self.bubbleId = bubbleId
         self.sessionId = sessionId
         self.lane = lane
@@ -42,6 +48,8 @@ struct DemoConversationEvent {
         self.sourceLangCode = sourceLangCode
         self.targetLangCode = targetLangCode
         self.chunkId = chunkId
+        self.offset = offset
+        self.duration = duration
     }
 }
 
@@ -75,6 +83,10 @@ struct DemoConversationBubbleSnapshot {
     let translatedSegments: [DemoConversationDisplaySegment]
     /// 是否已收到服务端 bubble_end 信号，仅用于展示结束态，不阻止后续内容更新。
     let isBubbleEnded: Bool
+    /// 气泡内第一条 ASR final 句子的 offset(纳秒);无则为 nil。
+    let bOffset: Int64?
+    /// 气泡时长(纳秒) = 最后一条 ASR final 句子的 (offset+duration) − bOffset;无则为 nil。
+    let bDuration: Int64?
 }
 
 enum DemoConversationEventAdapter {
@@ -89,7 +101,9 @@ enum DemoConversationEventAdapter {
                                      text: text,
                                      sourceLangCode: result.srcCode,
                                      targetLangCode: result.dstCode,
-                                     chunkId: chunkId(from: result))
+                                     chunkId: chunkId(from: result),
+                                     offset: int64Value(result.extraData["offset"]),
+                                     duration: int64Value(result.extraData["duration"]))
     }
 
     static func makeTranslatedEvent(from result: TmkResult<String>, isFinal: Bool) -> DemoConversationEvent? {
@@ -137,6 +151,14 @@ enum DemoConversationEventAdapter {
         if let chunkId = result.extraData["chunkId"] as? String, chunkId.isEmpty == false { return chunkId }
         if let chunkId = result.extraData["chunk_id"] as? Int { return String(chunkId) }
         if let chunkId = result.extraData["chunkId"] as? Int { return String(chunkId) }
+        return nil
+    }
+
+    /// 从 extraData 中提取 Int64 数值，兼容 Int64 / Int / NSNumber 三种装箱形态。
+    private static func int64Value(_ value: Any?) -> Int64? {
+        if let value = value as? Int64 { return value }
+        if let value = value as? Int { return Int64(value) }
+        if let value = value as? NSNumber { return value.int64Value }
         return nil
     }
 
@@ -192,14 +214,50 @@ final class DemoConversationBubbleAssembler {
         var sourceRawChunkByEffective: [Int: Set<String>] = [:]
         var translatedRawChunkByEffective: [Int: Set<String>] = [:]
         var latestSessionId: Int = 0
+        /// 气泡内第一条 ASR final 句子的 offset(纳秒)。
+        var bOffset: Int64? = nil
+        /// 气泡内最后一条 ASR final 句子的 (offset+duration)(纳秒)。
+        var bLastEnd: Int64? = nil
+        /// 内容版本号:每次 consume 改动本 aggregate 时自增,作为快照缓存的失效依据。
+        /// composeText/composeSegments 含 O(文本长度²) 的 LCS/overlap,新闻联播等超长句
+        /// (单气泡累积 500+ 字)下单次成本高。缓存后:内容未变的历史气泡(切换/markBubbleEnded
+        /// 遍历时)直接复用上次结果,只对本轮真正变更的活跃气泡重算,避免长跑随文本长度平方放大
+        /// 的 CPU 占用(设备发烫根因)。
+        var contentVersion: Int64 = 0
+        /// 上次快照缓存:命中条件为 contentVersion 与 isActiveBubble 均未变。
+        var cachedVersion: Int64 = -1
+        var cachedIsActive: Bool = false
+        var cachedSourceText: String = ""
+        var cachedTranslatedText: String = ""
+        var cachedSourceSegments: [DemoConversationDisplaySegment] = []
+        var cachedTranslatedSegments: [DemoConversationDisplaySegment] = []
     }
 
+    /// 组装结果缓存条目:文本 + 分段一并缓存,供快照复用。
+    private struct ComposedResult {
+        let sourceText: String
+        let translatedText: String
+        let sourceSegments: [DemoConversationDisplaySegment]
+        let translatedSegments: [DemoConversationDisplaySegment]
+    }
+
+    /// aggregate 容量上限。1v1/收听长跑(新闻联播数小时)会持续新建气泡,
+    /// aggregates 若不裁剪会单调增长(每个含多份长文本+多个字典),最终 OOM 被系统杀死
+    /// (bug 7056277420:5 小时后 iOS demo 退出)。上限对齐 ViewModel 的 maxDisplayedRows。
+    private let maxRows: Int
     private var aggregates: [String: BubbleAggregate] = [:]
+    /// aggregates 的插入顺序,用于按"最老优先"裁剪(Dictionary 本身无序)。
+    private var aggregateOrder: [String] = []
     private var activeBubbleIdByLane: [DemoConversationLane: String] = [:]
     private var endedBubbleIds = Set<String>()
 
+    init(maxRows: Int = 200) {
+        self.maxRows = max(1, maxRows)
+    }
+
     func reset() {
         aggregates.removeAll()
+        aggregateOrder.removeAll()
         activeBubbleIdByLane.removeAll()
         endedBubbleIds.removeAll()
     }
@@ -211,16 +269,21 @@ final class DemoConversationBubbleAssembler {
         if let previousBubbleId = activeBubbleIdByLane[event.lane],
            previousBubbleId != event.bubbleId {
             let previousKey = DemoConversationBubbleAssembler.rowKey(bubbleId: previousBubbleId, lane: event.lane)
-            if let previousAggregate = aggregates[previousKey],
-               let previousSnapshot = makeSnapshot(bubbleId: previousBubbleId,
-                                                   lane: event.lane,
-                                                   aggregate: previousAggregate,
-                                                   isActiveBubble: false) {
-                snapshots.append(previousSnapshot)
+            if var previousAggregate = aggregates[previousKey] {
+                let previousSnapshot = makeSnapshot(bubbleId: previousBubbleId,
+                                                    lane: event.lane,
+                                                    aggregate: &previousAggregate,
+                                                    isActiveBubble: false)
+                // 写回:makeSnapshot 可能刷新了 previousAggregate 的快照缓存,避免下次重算。
+                aggregates[previousKey] = previousAggregate
+                if let previousSnapshot {
+                    snapshots.append(previousSnapshot)
+                }
             }
         }
 
         activeBubbleIdByLane[event.lane] = event.bubbleId
+        let isNewAggregate = aggregates[key] == nil
         var aggregate = aggregates[key] ?? BubbleAggregate(sourceLangCode: event.sourceLangCode,
                                                            targetLangCode: event.targetLangCode)
         aggregate.latestSessionId = max(aggregate.latestSessionId, event.sessionId)
@@ -255,13 +318,29 @@ final class DemoConversationBubbleAssembler {
             break
         }
 
-        aggregates[key] = aggregate
-        if let currentSnapshot = makeSnapshot(bubbleId: event.bubbleId,
-                                              lane: event.lane,
-                                              aggregate: aggregate,
-                                              isActiveBubble: true) {
+        // 聚合 b_offset/b_duration：仅统计 ASR 且 final 的句子。
+        // b_offset = 第一条 final 句子的 offset;b_duration = 最后一条 final 句子的 (offset+duration) − b_offset。
+        if event.stage == .asr, event.isFinal, let off = event.offset {
+            if aggregate.bOffset == nil { aggregate.bOffset = off }
+            if let dur = event.duration { aggregate.bLastEnd = off + dur }
+        }
+
+        // 本 aggregate 内容已变(source/translated/offset 任一),自增版本使其快照缓存失效。
+        aggregate.contentVersion &+= 1
+
+        if isNewAggregate {
+            aggregateOrder.append(key)
+        }
+        var currentAggregate = aggregate
+        let currentSnapshot = makeSnapshot(bubbleId: event.bubbleId,
+                                           lane: event.lane,
+                                           aggregate: &currentAggregate,
+                                           isActiveBubble: true)
+        aggregates[key] = currentAggregate
+        if let currentSnapshot {
             snapshots.append(currentSnapshot)
         }
+        trimIfNeeded()
         return snapshots
     }
 
@@ -272,14 +351,16 @@ final class DemoConversationBubbleAssembler {
         var snapshots: [DemoConversationBubbleSnapshot] = []
         for lane in [DemoConversationLane.left, .right] {
             let key = DemoConversationBubbleAssembler.rowKey(bubbleId: normalized, lane: lane)
-            guard let aggregate = aggregates[key],
-                  let snapshot = makeSnapshot(bubbleId: normalized,
-                                              lane: lane,
-                                              aggregate: aggregate,
-                                              isActiveBubble: activeBubbleIdByLane[lane] == normalized) else {
-                continue
+            guard var aggregate = aggregates[key] else { continue }
+            let snapshot = makeSnapshot(bubbleId: normalized,
+                                        lane: lane,
+                                        aggregate: &aggregate,
+                                        isActiveBubble: activeBubbleIdByLane[lane] == normalized)
+            // 写回:makeSnapshot 可能刷新了快照缓存。
+            aggregates[key] = aggregate
+            if let snapshot {
+                snapshots.append(snapshot)
             }
-            snapshots.append(snapshot)
         }
         return snapshots
     }
@@ -288,19 +369,22 @@ final class DemoConversationBubbleAssembler {
         "\(bubbleId)_\(lane.rawValue)"
     }
 
-    private func makeSnapshot(bubbleId: String,
-                              lane: DemoConversationLane,
-                              aggregate: BubbleAggregate,
-                              isActiveBubble: Bool) -> DemoConversationBubbleSnapshot? {
+    /// 取本 aggregate 的组装结果:contentVersion 与 isActiveBubble 均命中缓存则直接复用,
+    /// 否则重算 composeText/composeSegments(含 O(n²) LCS/overlap)并写回缓存。
+    /// 使"全量气泡 × O(n²)/次"降为"仅变更气泡重算",消除长跑随文本长度平方放大的 CPU 占用。
+    private func resolveComposed(_ aggregate: inout BubbleAggregate, isActiveBubble: Bool) -> ComposedResult {
+        if aggregate.cachedVersion == aggregate.contentVersion, aggregate.cachedIsActive == isActiveBubble {
+            return ComposedResult(sourceText: aggregate.cachedSourceText,
+                                  translatedText: aggregate.cachedTranslatedText,
+                                  sourceSegments: aggregate.cachedSourceSegments,
+                                  translatedSegments: aggregate.cachedTranslatedSegments)
+        }
         let sourceText = composeText(order: aggregate.sourceSessionOrder,
                                      segments: aggregate.sourceBySession,
                                      isActiveBubble: isActiveBubble)
         let translatedText = composeText(order: aggregate.translatedSessionOrder,
                                          segments: aggregate.translatedBySession,
                                          isActiveBubble: isActiveBubble)
-        if sourceText.isEmpty && translatedText.isEmpty {
-            return nil
-        }
         let sourceSegments = composeSegments(order: aggregate.sourceSessionOrder,
                                              segments: aggregate.sourceBySession,
                                              rawIds: aggregate.sourceRawIdsByEffective,
@@ -311,6 +395,55 @@ final class DemoConversationBubbleAssembler {
                                                  rawIds: aggregate.translatedRawIdsByEffective,
                                                  rawChunks: aggregate.translatedRawChunkByEffective,
                                                  isActiveBubble: isActiveBubble)
+        aggregate.cachedVersion = aggregate.contentVersion
+        aggregate.cachedIsActive = isActiveBubble
+        aggregate.cachedSourceText = sourceText
+        aggregate.cachedTranslatedText = translatedText
+        aggregate.cachedSourceSegments = sourceSegments
+        aggregate.cachedTranslatedSegments = translatedSegments
+        return ComposedResult(sourceText: sourceText,
+                              translatedText: translatedText,
+                              sourceSegments: sourceSegments,
+                              translatedSegments: translatedSegments)
+    }
+
+    /// 裁剪最老的 aggregate,使容量不超过 maxRows。长跑场景防内存无限增长(bug 7056277420 OOM)。
+    private func trimIfNeeded() {
+        while aggregateOrder.count > maxRows {
+            let oldestKey = aggregateOrder.removeFirst()
+            aggregates.removeValue(forKey: oldestKey)
+            // 同步收敛 endedBubbleIds,避免其随裁剪后仍无限增长。
+            let bubbleId = DemoConversationBubbleAssembler.bubbleId(fromRowKey: oldestKey)
+            if aggregateOrder.contains(where: { DemoConversationBubbleAssembler.bubbleId(fromRowKey: $0) == bubbleId }) == false {
+                endedBubbleIds.remove(bubbleId)
+            }
+        }
+    }
+
+    /// 从 rowKey("<bubbleId>_<lane>") 还原 bubbleId;lane 后缀为 left/right。
+    private static func bubbleId(fromRowKey key: String) -> String {
+        if key.hasSuffix("_\(DemoConversationLane.left.rawValue)") {
+            return String(key.dropLast(DemoConversationLane.left.rawValue.count + 1))
+        }
+        if key.hasSuffix("_\(DemoConversationLane.right.rawValue)") {
+            return String(key.dropLast(DemoConversationLane.right.rawValue.count + 1))
+        }
+        return key
+    }
+
+    private func makeSnapshot(bubbleId: String,
+                              lane: DemoConversationLane,
+                              aggregate: inout BubbleAggregate,
+                              isActiveBubble: Bool) -> DemoConversationBubbleSnapshot? {
+        let composed = resolveComposed(&aggregate, isActiveBubble: isActiveBubble)
+        let sourceText = composed.sourceText
+        let translatedText = composed.translatedText
+        if sourceText.isEmpty && translatedText.isEmpty {
+            return nil
+        }
+        let bDuration = (aggregate.bOffset != nil && aggregate.bLastEnd != nil)
+            ? aggregate.bLastEnd! - aggregate.bOffset!
+            : nil
         return DemoConversationBubbleSnapshot(bubbleId: bubbleId,
                                               sessionId: aggregate.latestSessionId,
                                               lane: lane,
@@ -318,9 +451,11 @@ final class DemoConversationBubbleAssembler {
                                               targetLangCode: aggregate.targetLangCode,
                                               sourceText: sourceText,
                                               translatedText: translatedText,
-                                              sourceSegments: sourceSegments,
-                                              translatedSegments: translatedSegments,
-                                              isBubbleEnded: endedBubbleIds.contains(bubbleId))
+                                              sourceSegments: composed.sourceSegments,
+                                              translatedSegments: composed.translatedSegments,
+                                              isBubbleEnded: endedBubbleIds.contains(bubbleId),
+                                              bOffset: aggregate.bOffset,
+                                              bDuration: bDuration)
     }
 
     private func update(segmentText: String?,
@@ -460,14 +595,25 @@ final class DemoConversationBubbleAssembler {
     }
 
     private func longestOverlap(_ lhs: String, _ rhs: String) -> Int {
-        let maxCount = min(lhs.count, rhs.count)
+        // 逐位比较取代 lhs[...] == rhs[...] 的 Substring 相等,不分配子串。
+        // 与原实现同阶但常数与内存分配大幅降低,对齐 Android(regionMatches);
+        // 新闻联播超长句下 mergeCumulativeText 高频调用,子串分配是发烫的次要来源。
+        let a = Array(lhs)
+        let b = Array(rhs)
+        let maxCount = min(a.count, b.count)
         guard maxCount > 0 else { return 0 }
         for k in stride(from: maxCount, through: 1, by: -1) {
-            let lhsStart = lhs.index(lhs.endIndex, offsetBy: -k)
-            let rhsEnd = rhs.index(rhs.startIndex, offsetBy: k)
-            if lhs[lhsStart...] == rhs[..<rhsEnd] {
-                return k
+            var matched = true
+            let lhsOffset = a.count - k
+            var i = 0
+            while i < k {
+                if a[lhsOffset + i] != b[i] {
+                    matched = false
+                    break
+                }
+                i += 1
             }
+            if matched { return k }
         }
         return 0
     }
@@ -581,16 +727,26 @@ final class DemoConversationBubbleAssembler {
         let a = Array(lhs)
         let b = Array(rhs)
         guard a.isEmpty == false, b.isEmpty == false else { return 0 }
-        var dp = Array(repeating: Array(repeating: 0, count: b.count + 1), count: a.count + 1)
+        // 一维滚动数组:空间 O(min) 而非二维 O(a×b)。
+        // 新闻联播超长句(500+ 字)下,二维 DP 每次分配 ~25 万个 Int 的嵌套数组,
+        // partial 高频重算是设备发烫根因之一(bug 7056277420)。dp[j] 表示以 a[i-1]、b[j-1]
+        // 结尾的最长公共子串长度;按 j 从大到小更新,diagUpLeft 保存上一行 dp[j-1](左上角)。
+        let inner = b.count
+        var dp = Array(repeating: 0, count: inner + 1)
         var best = 0
         var i = 1
         while i <= a.count {
+            var diagUpLeft = 0 // dp[i-1][j-1]
             var j = 1
-            while j <= b.count {
+            while j <= inner {
+                let temp = dp[j] // 保存 dp[i-1][j],作为下一列的左上角
                 if a[i - 1] == b[j - 1] {
-                    dp[i][j] = dp[i - 1][j - 1] + 1
-                    if dp[i][j] > best { best = dp[i][j] }
+                    dp[j] = diagUpLeft + 1
+                    if dp[j] > best { best = dp[j] }
+                } else {
+                    dp[j] = 0
                 }
+                diagUpLeft = temp
                 j += 1
             }
             i += 1
@@ -611,7 +767,8 @@ enum DemoConversationSegmentRenderer {
                                targetLangCode: String,
                                translatedSegments: [DemoConversationDisplaySegment],
                                translatedFallbackText: String,
-                               font: UIFont) -> NSAttributedString {
+                               font: UIFont,
+                               timeRangeText: String? = nil) -> NSAttributedString {
         let result = NSMutableAttributedString()
         result.append(NSAttributedString(string: metaText,
                                          attributes: [.font: font, .foregroundColor: UIColor.secondaryLabel]))
@@ -623,6 +780,14 @@ enum DemoConversationSegmentRenderer {
                                          attributes: [.font: font, .foregroundColor: UIColor.label]))
         appendLine(to: result, label: "目标语言(\(targetLangCode))：",
                    segments: translatedSegments, fallbackText: translatedFallbackText, font: font)
+        // bubbleEnd 后单独一行醒目展示气泡时间段(纳秒),与源/译文和 meta 明显区分。
+        if let timeRangeText, timeRangeText.isEmpty == false {
+            result.append(NSAttributedString(string: "\n",
+                                             attributes: [.font: font, .foregroundColor: UIColor.label]))
+            let emphasisFont = UIFont.systemFont(ofSize: font.pointSize, weight: .semibold)
+            result.append(NSAttributedString(string: timeRangeText,
+                                             attributes: [.font: emphasisFont, .foregroundColor: UIColor.systemOrange]))
+        }
         return result
     }
 
@@ -650,5 +815,24 @@ enum DemoConversationSegmentRenderer {
             result.append(NSAttributedString(string: segment.text,
                                              attributes: [.font: font, .foregroundColor: color]))
         }
+    }
+}
+
+/// 生成气泡时间段的单行展示文本,供在线收听 / 一对一两个 cell 共用。
+///
+/// 仅当气泡收到 bubbleEnd 且已聚合出 offset 时展示 `⏱ offset=…s duration=…s`;
+/// 时间由纳秒换算为秒,保留 3 位小数(到毫秒)。否则返回 nil(不占行)。
+/// 离线场景无服务端 offset,bOffset 恒为 nil → 永不显示(需求:离线不管)。
+enum DemoBubbleTimeRangeFormatter {
+    static func text(isBubbleEnded: Bool, bOffset: Int64?, bDuration: Int64?) -> String? {
+        guard isBubbleEnded, let bOffset else { return nil }
+        let offsetSec = secondsText(fromNanos: bOffset)
+        let durationSec = secondsText(fromNanos: bDuration ?? 0)
+        return "⏱ offset=\(offsetSec)s duration=\(durationSec)s"
+    }
+
+    /// 纳秒 → 秒,保留 3 位小数(到毫秒)。
+    private static func secondsText(fromNanos nanos: Int64) -> String {
+        String(format: "%.3f", Double(nanos) / 1_000_000_000.0)
     }
 }

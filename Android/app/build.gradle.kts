@@ -6,7 +6,7 @@ plugins {
     alias(libs.plugins.hilt.android)
 }
 
-val sampleSdkVersion = providers.gradleProperty("TMK_SDK_VERSION").orElse("1.2.0-rc3").get()
+val sampleSdkVersion = providers.gradleProperty("TMK_SDK_VERSION").orElse("1.3.1-rc.1").get()
 val sampleAppId = providers.environmentVariable("TMK_SAMPLE_APP_ID")
     .orElse(providers.gradleProperty("TMK_SAMPLE_APP_ID"))
     .orElse("")
@@ -55,6 +55,11 @@ android {
         compose = true
         buildConfig = true
     }
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
@@ -75,6 +80,11 @@ dependencies {
 
     implementation(libs.voyager.navigator)
     implementation(libs.voyager.transitions)
+    implementation(libs.voyager.screenmodel)
+    implementation(libs.voyager.hilt)
+
+    // ViewModel Compose
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

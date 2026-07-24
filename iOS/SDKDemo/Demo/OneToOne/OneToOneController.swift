@@ -219,7 +219,10 @@ private extension OneToOneController {
                        translatedText: row.translatedText,
                        translatedSegments: row.translatedSegments,
                        isRightBubble: row.lane == .right,
-                       isBubbleEnded: row.isBubbleEnded)
+                       isBubbleEnded: row.isBubbleEnded,
+                       timeRangeText: DemoBubbleTimeRangeFormatter.text(isBubbleEnded: row.isBubbleEnded,
+                                                                        bOffset: row.bOffset,
+                                                                        bDuration: row.bDuration))
     }
 
     func refreshVisibleCells() {

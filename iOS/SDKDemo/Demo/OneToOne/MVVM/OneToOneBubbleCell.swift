@@ -41,7 +41,8 @@ final class OneToOneBubbleCell: UITableViewCell {
                    translatedText: String,
                    translatedSegments: [DemoConversationDisplaySegment],
                    isRightBubble: Bool,
-                   isBubbleEnded: Bool) {
+                   isBubbleEnded: Bool,
+                   timeRangeText: String? = nil) {
         contentLabel.attributedText = DemoConversationSegmentRenderer.makeBubbleText(
             metaText: metaText,
             sourceLangCode: sourceLangCode,
@@ -50,7 +51,8 @@ final class OneToOneBubbleCell: UITableViewCell {
             targetLangCode: targetLangCode,
             translatedSegments: translatedSegments,
             translatedFallbackText: translatedText,
-            font: contentLabel.font
+            font: contentLabel.font,
+            timeRangeText: timeRangeText
         )
         bubbleView.layer.borderWidth = isBubbleEnded ? 1 : 0
         bubbleView.layer.borderColor = bubbleBorderColor(isRightBubble: isRightBubble, isBubbleEnded: isBubbleEnded)

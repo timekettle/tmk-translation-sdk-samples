@@ -9,6 +9,8 @@ final class OfflineModelPackageListView: UIView {
     private var tableHeightConstraint: Constraint?
     private var isExpanded = false
     private var packages: [TmkOfflineModelPackageInfo] = []
+    // 缓存上次应用到约束的表格高度，避免每帧对相同高度重复触发整页 Auto Layout。
+    private var lastAppliedTableHeight: CGFloat = -1
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -28,6 +30,9 @@ final class OfflineModelPackageListView: UIView {
     func render(packages: [TmkOfflineModelPackageInfo]) {
         let oldPackages = self.packages
         self.packages = packages
+        // 折叠态短路：仅缓存最新数据（已在上面赋值），跳过高度更新与表格刷新，
+        // 避免下载进度高频回调时对隐藏视图做无意义的整页布局。展开时会一次性全量刷新。
+        guard isExpanded else { return }
         refreshSummaryLabel()
         updateExpandedState()
         updateTableHeight()
@@ -46,6 +51,12 @@ final class OfflineModelPackageListView: UIView {
     func toggleExpanded() {
         isExpanded.toggle()
         updateExpandedState()
+        // 展开(false→true)时，折叠期间只缓存了数据未刷新 UI，这里一次性全量刷新到最新进度。
+        if isExpanded {
+            refreshSummaryLabel()
+            updateTableHeight()
+            tableView.reloadData()
+        }
     }
 }
 
@@ -100,6 +111,9 @@ private extension OfflineModelPackageListView {
     func updateTableHeight() {
         let rows = max(packages.count, 1)
         let height = min(CGFloat(rows) * 44, 220)
+        // 仅当高度确实变化时才更新约束，避免相同值也触发 invalidate 整页布局。
+        guard height != lastAppliedTableHeight else { return }
+        lastAppliedTableHeight = height
         tableHeightConstraint?.update(offset: height)
     }
 

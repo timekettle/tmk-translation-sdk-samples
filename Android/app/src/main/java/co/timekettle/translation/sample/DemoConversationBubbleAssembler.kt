@@ -25,6 +25,10 @@ data class DemoConversationEvent(
     val sourceLangCode: String,
     val targetLangCode: String,
     val chunkId: String? = null,
+    /** ASR 结果携带的起始偏移(纳秒);MT 不携带,恒为 null。 */
+    val offset: Long? = null,
+    /** ASR 结果携带的时长(纳秒);MT 不携带,恒为 null。 */
+    val duration: Long? = null,
 )
 
 /**
@@ -56,6 +60,10 @@ data class DemoConversationBubbleSnapshot(
     val sourceSegments: List<DemoConversationDisplaySegment>,
     /** 目标语言按 session 切分的展示片段；离线场景可忽略。 */
     val translatedSegments: List<DemoConversationDisplaySegment>,
+    /** 气泡内第一条 final ASR 的 offset(纳秒)，无则 null。 */
+    val bOffset: Long? = null,
+    /** 气泡内 (最后一条 final ASR 的 offset+duration) − bOffset(纳秒)，无则 null。 */
+    val bDuration: Long? = null,
 )
 
 /** 按 online_tts_state 维护的高亮集合，对快照分段计算 isHighlighted。 */
@@ -86,6 +94,8 @@ object DemoConversationHighlighter {
 }
 
 object DemoConversationEventAdapter {
+    private const val TAG = "DemoConvEventAdapter"
+
     fun makeRecognizedEvent(
         result: Result<String>?,
         isFinal: Boolean,
@@ -94,9 +104,21 @@ object DemoConversationEventAdapter {
     ): DemoConversationEvent? {
         val text = normalized(result?.data)
         if (!isDisplayable(text, isFinal)) return null
+        // ASR(识别)必要字段校验:bubbleId + sessionId 不能为空。
+        // 注意不校验 chunkId——ASR 结果服务端恒不下发 chunk_id(按 session_id 分段),
+        // 若校验 chunkId 会把所有 ASR 数据误丢。缺失即为脏数据,丢弃并打日志。
+        val rawBubble = rawBubbleId(result)
+        val sessionId = result?.sessionId.orEmpty()
+        if (rawBubble.isNullOrEmpty() || sessionId.isEmpty()) {
+            android.util.Log.w(
+                TAG,
+                "丢弃ASR数据: 必要字段为空 bubbleId=$rawBubble sessionId=$sessionId isFinal=$isFinal text=$text"
+            )
+            return null
+        }
         return DemoConversationEvent(
-            bubbleId = bubbleId(result),
-            sessionId = result?.sessionId.orEmpty(),
+            bubbleId = rawBubble,
+            sessionId = sessionId,
             lane = lane(result),
             stage = DemoConversationStage.ASR,
             isFinal = isFinal,
@@ -104,6 +126,8 @@ object DemoConversationEventAdapter {
             sourceLangCode = result?.srcCode?.takeIf { it.isNotEmpty() } ?: fallbackSourceLangCode,
             targetLangCode = result?.dstCode?.takeIf { it.isNotEmpty() } ?: fallbackTargetLangCode,
             chunkId = chunkId(result),
+            offset = longExtra(result?.extraData, "offset"),
+            duration = longExtra(result?.extraData, "duration"),
         )
     }
 
@@ -115,16 +139,31 @@ object DemoConversationEventAdapter {
     ): DemoConversationEvent? {
         val text = normalized(result?.data)
         if (!isDisplayable(text, isFinal)) return null
+        // MT(翻译)必要字段校验:bubbleId + sessionId + chunkId 三者不能为空。
+        // 根因(bug 7049772181):服务端 MT 中间态(partial)曾下发空 chunk_id,导致同一句话的
+        // partial(按 session_id 归段)与 completed(按 chunk_id 归段)落入不同 effectiveSessionId、
+        // 未能覆盖而并排展示,分段渲染拼成重复译文。此处对缺失必要字段的脏数据直接丢弃并打日志,
+        // 待服务端修复后 partial 带上稳定 chunk_id,中间态可正常恢复。
+        val rawBubble = rawBubbleId(result)
+        val sessionId = result?.sessionId.orEmpty()
+        val chunk = chunkId(result)
+        if (rawBubble.isNullOrEmpty() || sessionId.isEmpty() || chunk.isNullOrEmpty()) {
+            android.util.Log.w(
+                TAG,
+                "丢弃MT数据: 必要字段为空 bubbleId=$rawBubble sessionId=$sessionId chunkId=$chunk isFinal=$isFinal text=$text"
+            )
+            return null
+        }
         return DemoConversationEvent(
-            bubbleId = bubbleId(result),
-            sessionId = result?.sessionId.orEmpty(),
+            bubbleId = rawBubble,
+            sessionId = sessionId,
             lane = lane(result),
             stage = DemoConversationStage.MT,
             isFinal = isFinal,
             text = text,
             sourceLangCode = result?.srcCode?.takeIf { it.isNotEmpty() } ?: fallbackSourceLangCode,
             targetLangCode = result?.dstCode?.takeIf { it.isNotEmpty() } ?: fallbackTargetLangCode,
-            chunkId = chunkId(result),
+            chunkId = chunk,
         )
     }
 
@@ -137,12 +176,16 @@ object DemoConversationEventAdapter {
         )
     }
 
-    private fun bubbleId(result: Result<*>?): String {
+    /**
+     * 提取「原始」bubbleId,不做 `sid_<sessionId>` 兜底。
+     * 用于必要字段非空校验:服务端未下发 bubble_id 时返回 null,以便上层判定为脏数据丢弃,
+     * 而非用 sessionId 合成一个看似有效的 id 掩盖问题。
+     */
+    private fun rawBubbleId(result: Result<*>?): String? {
         val extraData = result?.extraData
         return stringExtra(extraData, "bubble_id")
             ?: stringExtra(extraData, "bubbleId")
             ?: result?.bubbleId?.takeIf { it.isNotEmpty() }
-            ?: "sid_${result?.sessionId.orEmpty()}"
     }
 
     private fun lane(result: Result<*>?): DemoConversationLane {
@@ -168,6 +211,11 @@ object DemoConversationEventAdapter {
         }
     }
 
+    /** 从 extraData 读 Long(值可能是 Long 或其他 Number),无则 null。用于 ASR 的 offset/duration。 */
+    private fun longExtra(extraData: Map<String, Any?>?, key: String): Long? {
+        return (extraData?.get(key) as? Number)?.toLong()
+    }
+
     private fun normalized(text: String?): String = text.orEmpty().trim()
 
     private fun isDisplayable(text: String, isFinal: Boolean): Boolean {
@@ -176,7 +224,7 @@ object DemoConversationEventAdapter {
     }
 }
 
-class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
+class DemoConversationBubbleAssembler(private val maxRows: Int = 500) {
     private data class SessionSegment(
         val text: String,
         val isFinal: Boolean,
@@ -200,6 +248,24 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
         val sourceRawChunkByEffective: MutableMap<String, MutableSet<String>> = mutableMapOf(),
         val translatedRawChunkByEffective: MutableMap<String, MutableSet<String>> = mutableMapOf(),
         var latestSessionId: String = "",
+        /** 第一条 final ASR 的 offset(纳秒),一旦设置不再覆盖。 */
+        var bOffset: Long? = null,
+        /** 最后一条 final ASR 的 (offset+duration)(纳秒),每条 final 更新为最新。 */
+        var bLastEnd: Long? = null,
+        /**
+         * 内容版本号:每次 consume 改动本 aggregate 时自增,作为快照缓存的失效依据。
+         * composeText/composeSegments 含 O(文本长度²) 的 LCS/overlap,新闻联播等超长句(单气泡累积 200+ 字)
+         * 下单次成本高;且每次快照要遍历全部气泡(可达数百)。缓存后:未变的历史气泡直接复用上次结果,
+         * 每次快照只对本轮真正变更的 1~2 个活跃气泡重算,避免"全量气泡 × O(n²)"随时长放大(bug 卡顿根因)。
+         */
+        var contentVersion: Long = 0L,
+        /** 上次快照缓存:命中条件为 contentVersion 与 isActiveBubble 均未变。 */
+        var cachedVersion: Long = -1L,
+        var cachedIsActive: Boolean = false,
+        var cachedSourceText: String = "",
+        var cachedTranslatedText: String = "",
+        var cachedSourceSegments: List<DemoConversationDisplaySegment> = emptyList(),
+        var cachedTranslatedSegments: List<DemoConversationDisplaySegment> = emptyList(),
     )
 
     private val lock = Any()
@@ -229,13 +295,19 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
         // 切换语言后,正在进行的旧气泡应保留其原始源/目标语言(译文文本仍是旧语言),
         // 新气泡才使用新语言。覆盖会导致旧气泡标签错误地跟随全局语言(见 1v1 语言切换 bug)。
 
+        // offset/duration 聚合:仅 ASR 且 isFinal 的句子参与。bOffset 取第一条 final(不覆盖),
+        // bLastEnd 每条 final 更新为最新的 offset+duration。partial(非 final)不影响。
+        if (event.stage == DemoConversationStage.ASR && event.isFinal && event.offset != null) {
+            if (aggregate.bOffset == null) aggregate.bOffset = event.offset
+            if (event.duration != null) aggregate.bLastEnd = event.offset!! + event.duration!!
+        }
+
         when (event.stage) {
             DemoConversationStage.ASR -> update(
                 segmentText = event.text,
                 isFinal = event.isFinal,
                 sessionId = event.sessionId,
                 chunkId = event.chunkId,
-                appendNonIncrementalSegment = false,
                 sessionOrder = aggregate.sourceSessionOrder,
                 segments = aggregate.sourceBySession,
                 sessionAliases = aggregate.sourceSessionAlias,
@@ -248,7 +320,6 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
                 isFinal = event.isFinal,
                 sessionId = event.sessionId,
                 chunkId = event.chunkId,
-                appendNonIncrementalSegment = true,
                 sessionOrder = aggregate.translatedSessionOrder,
                 segments = aggregate.translatedBySession,
                 sessionAliases = aggregate.translatedSessionAlias,
@@ -258,6 +329,9 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
             )
             DemoConversationStage.TTS -> Unit
         }
+
+        // 本 aggregate 内容已变(source/translated/offset 任一),自增版本使其快照缓存失效。
+        aggregate.contentVersion++
 
         trimIfNeeded()
         snapshotLocked()
@@ -286,7 +360,6 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
         isFinal: Boolean,
         sessionId: String,
         chunkId: String?,
-        appendNonIncrementalSegment: Boolean,
         sessionOrder: MutableList<String>,
         segments: MutableMap<String, SessionSegment>,
         sessionAliases: MutableMap<String, String>,
@@ -307,10 +380,21 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
         }
 
         val old = segments[effectiveSessionId]
-        val shouldAppendAsNewSegment = old != null &&
+        // 仅当已固定(old.isFinal)且新文本非增量时才另起新段(对齐 iOS)。
+        // 同一 chunkId 的中间态(old.isFinal=false)收到 final 时不另起新段,而是走下方合并:
+        // 用新文本替换上次的中间态,避免 partial 与 final 同时保留导致文本重复、"..." 落在中间。
+        //
+        // 豁免：新消息是 final 且旧消息也是 final 时，这是服务端对同一 session/chunk 发出的
+        // 第二次修正版 completed(如 ASR/MT 二次识别或重算结果)。此时应直接覆盖旧 final 而非另起
+        // 新段，否则同一句话会重复展示两次(bug 7049772181)。
+        // 注意：chunkId 非空时，effectiveSessionId 由 chunkAliases 分配且唯一，同一 chunkId
+        // 的多次 final 仍归同一 effectiveSessionId → 正常覆盖，不会多段。
+        val isServerCorrectionFinal = isFinal && old != null && old.isFinal
+        val shouldAppendAsNewSegment = !isServerCorrectionFinal &&
+            old != null &&
+            old.isFinal &&
             text.isNotEmpty() &&
-            !isIncrementalTransition(old.text, text) &&
-            (old.isFinal || (appendNonIncrementalSegment && isFinal))
+            !isIncrementalTransition(old.text, text)
         if (shouldAppendAsNewSegment) {
             val newSessionId = nextSyntheticSessionId(segments)
             sessionOrder.add(newSessionId)
@@ -343,16 +427,70 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
         }
     }
 
+    /** 组装结果缓存条目:文本 + 分段一并缓存,两个 snapshot 方法共用。 */
+    private class ComposedResult(
+        val sourceText: String,
+        val translatedText: String,
+        val sourceSegments: List<DemoConversationDisplaySegment>,
+        val translatedSegments: List<DemoConversationDisplaySegment>,
+    )
+
+    /**
+     * 取本 aggregate 的组装结果:contentVersion 与 isActiveBubble 均命中缓存则直接复用,
+     * 否则重算 composeText/composeSegments(含 O(n²) LCS)并写回缓存。
+     * 使"全量气泡 × O(n²)/次"降为"仅变更气泡重算",消除长跑随文本长度平方放大的卡顿。
+     */
+    private fun resolveComposed(aggregate: BubbleAggregate, isActiveBubble: Boolean): ComposedResult {
+        if (aggregate.cachedVersion == aggregate.contentVersion && aggregate.cachedIsActive == isActiveBubble) {
+            return ComposedResult(
+                aggregate.cachedSourceText,
+                aggregate.cachedTranslatedText,
+                aggregate.cachedSourceSegments,
+                aggregate.cachedTranslatedSegments,
+            )
+        }
+        val sourceText = composeText(aggregate.sourceSessionOrder, aggregate.sourceBySession, isActiveBubble)
+        val translatedText = composeText(aggregate.translatedSessionOrder, aggregate.translatedBySession, isActiveBubble)
+        val sourceSegments = composeSegments(
+            aggregate.sourceSessionOrder,
+            aggregate.sourceBySession,
+            aggregate.sourceRawIdsByEffective,
+            aggregate.sourceRawChunkByEffective,
+            isActiveBubble,
+        )
+        val translatedSegments = composeSegments(
+            aggregate.translatedSessionOrder,
+            aggregate.translatedBySession,
+            aggregate.translatedRawIdsByEffective,
+            aggregate.translatedRawChunkByEffective,
+            isActiveBubble,
+        )
+        aggregate.cachedVersion = aggregate.contentVersion
+        aggregate.cachedIsActive = isActiveBubble
+        aggregate.cachedSourceText = sourceText
+        aggregate.cachedTranslatedText = translatedText
+        aggregate.cachedSourceSegments = sourceSegments
+        aggregate.cachedTranslatedSegments = translatedSegments
+        return ComposedResult(sourceText, translatedText, sourceSegments, translatedSegments)
+    }
+
     private fun snapshotLocked(): List<BubbleRowData> {
         return aggregates.mapNotNull { (key, aggregate) ->
             val lane = laneFromRowKey(key)
             val bubbleId = bubbleIdFromRowKey(key)
             val isActiveBubble = activeBubbleIdByLane[lane] == bubbleId
-            val sourceText = composeText(aggregate.sourceSessionOrder, aggregate.sourceBySession, isActiveBubble)
-            val translatedText = composeText(aggregate.translatedSessionOrder, aggregate.translatedBySession, isActiveBubble)
+            val composed = resolveComposed(aggregate, isActiveBubble)
+            val sourceText = composed.sourceText
+            val translatedText = composed.translatedText
             if (sourceText.isEmpty() && translatedText.isEmpty()) {
                 null
             } else {
+                val bOffset = aggregate.bOffset
+                val bDuration = if (bOffset != null && aggregate.bLastEnd != null) {
+                    aggregate.bLastEnd!! - bOffset
+                } else {
+                    null
+                }
                 BubbleRowData(
                     sessionId = aggregate.latestSessionId,
                     bubbleId = bubbleId,
@@ -363,6 +501,8 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
                     sourceText = sourceText,
                     translatedText = translatedText,
                     isBubbleEnded = endedBubbleIds.contains(bubbleId),
+                    bOffset = bOffset,
+                    bDuration = bDuration,
                 )
             }
         }
@@ -373,11 +513,18 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
             val lane = laneFromRowKey(key)
             val bubbleId = bubbleIdFromRowKey(key)
             val isActiveBubble = activeBubbleIdByLane[lane] == bubbleId
-            val sourceText = composeText(aggregate.sourceSessionOrder, aggregate.sourceBySession, isActiveBubble)
-            val translatedText = composeText(aggregate.translatedSessionOrder, aggregate.translatedBySession, isActiveBubble)
+            val composed = resolveComposed(aggregate, isActiveBubble)
+            val sourceText = composed.sourceText
+            val translatedText = composed.translatedText
             if (sourceText.isEmpty() && translatedText.isEmpty()) {
                 null
             } else {
+                val bOffset = aggregate.bOffset
+                val bDuration = if (bOffset != null && aggregate.bLastEnd != null) {
+                    aggregate.bLastEnd!! - bOffset
+                } else {
+                    null
+                }
                 val row = BubbleRowData(
                     sessionId = aggregate.latestSessionId,
                     bubbleId = bubbleId,
@@ -388,23 +535,15 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
                     sourceText = sourceText,
                     translatedText = translatedText,
                     isBubbleEnded = endedBubbleIds.contains(bubbleId),
+                    bOffset = bOffset,
+                    bDuration = bDuration,
                 )
                 DemoConversationBubbleSnapshot(
                     row = row,
-                    sourceSegments = composeSegments(
-                        aggregate.sourceSessionOrder,
-                        aggregate.sourceBySession,
-                        aggregate.sourceRawIdsByEffective,
-                        aggregate.sourceRawChunkByEffective,
-                        isActiveBubble,
-                    ),
-                    translatedSegments = composeSegments(
-                        aggregate.translatedSessionOrder,
-                        aggregate.translatedBySession,
-                        aggregate.translatedRawIdsByEffective,
-                        aggregate.translatedRawChunkByEffective,
-                        isActiveBubble,
-                    ),
+                    sourceSegments = composed.sourceSegments,
+                    translatedSegments = composed.translatedSegments,
+                    bOffset = bOffset,
+                    bDuration = bDuration,
                 )
             }
         }
@@ -414,6 +553,13 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
         while (aggregates.size > maxRows) {
             val firstKey = aggregates.keys.firstOrNull() ?: return
             aggregates.remove(firstKey)
+            // 同步收敛 endedBubbleIds：被淘汰的 bubbleId 若在 left/right 两 lane 都已无存活 aggregate,
+            // 从 endedBubbleIds 移除。否则该集合只增不减(markBubbleEnded 每句都 add,仅 reset 清空),
+            // 离线旁听新闻联播长跑(14h 数万句)下单调增长 → 内存耗尽被系统杀(bug 7051627151:退出 demo/回首页)。
+            val bubbleId = bubbleIdFromRowKey(firstKey)
+            if (aggregates.keys.none { bubbleIdFromRowKey(it) == bubbleId }) {
+                endedBubbleIds.remove(bubbleId)
+            }
         }
     }
 
@@ -505,9 +651,12 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
     }
 
     private fun longestOverlap(lhs: String, rhs: String): Int {
+        // 求 lhs 后缀与 rhs 前缀的最长重叠。原实现每个 count 都 takeLast/take 建子串再 == 比较,
+        // 是 O(n²) 且产生大量临时字符串;新闻联播等超长句(单气泡 200+ 字)下高频调用会剧烈拖慢。
+        // 改用 regionMatches 逐位比较,不分配子串,复杂度与原来同阶但常数与 GC 大幅降低。
         val maxCount = minOf(lhs.length, rhs.length)
         for (count in maxCount downTo 1) {
-            if (lhs.takeLast(count) == rhs.take(count)) return count
+            if (lhs.regionMatches(lhs.length - count, rhs, 0, count)) return count
         }
         return 0
     }
@@ -604,14 +753,25 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 50) {
 
     private fun longestCommonSubstringLength(lhs: String, rhs: String): Int {
         if (lhs.isEmpty() || rhs.isEmpty()) return 0
-        val dp = Array(lhs.length + 1) { IntArray(rhs.length + 1) }
+        // 用一维滚动数组替代原二维 dp:原实现每次分配 (n+1)×(m+1) 的 IntArray,
+        // 新闻联播等超长句(实测单句归一后可达数百字符)会一次性分配数十万 int(数 MB),
+        // 长时间高频调用(旁听每秒数次、每次遍历数百气泡)造成剧烈 GC 与主线程停顿(bug 7051627151)。
+        // 一维数组把空间从 O(n×m) 降到 O(m);dp[i][j] 依赖左上角 dp[i-1][j-1],
+        // 故内层 j 从大到小遍历,dp[j-1] 在被覆盖前仍是上一行(i-1)的值,结果与二维实现完全等价。
+        // 让 rhs 作为较短串以最小化数组长度。
+        val a: String
+        val b: String
+        if (lhs.length >= rhs.length) {
+            a = lhs; b = rhs
+        } else {
+            a = rhs; b = lhs
+        }
+        val dp = IntArray(b.length + 1)
         var best = 0
-        for (i in 1..lhs.length) {
-            for (j in 1..rhs.length) {
-                if (lhs[i - 1] == rhs[j - 1]) {
-                    dp[i][j] = dp[i - 1][j - 1] + 1
-                    if (dp[i][j] > best) best = dp[i][j]
-                }
+        for (i in 1..a.length) {
+            for (j in b.length downTo 1) {
+                dp[j] = if (a[i - 1] == b[j - 1]) dp[j - 1] + 1 else 0
+                if (dp[j] > best) best = dp[j]
             }
         }
         return best

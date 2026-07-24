@@ -38,6 +38,11 @@ enum DemoHomeScenario: String {
     }
 }
 
+enum DemoLanguageSource: Equatable {
+    case online
+    case offline
+}
+
 enum DemoHomeMode: String, CaseIterable {
     case online
     case offline
@@ -105,7 +110,7 @@ enum DemoHomeMode: String, CaseIterable {
         }
     }
 
-    var source: TmkSupportedLanguagesSource? {
+    var source: DemoLanguageSource? {
         switch self {
         case .online:
             return .online

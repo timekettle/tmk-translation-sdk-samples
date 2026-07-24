@@ -1,5 +1,5 @@
 source 'https://cdn.cocoapods.org/'
-# 正式版 podspec 发布在公开 spec 仓库的 main 分支(默认分支)。
+# TmkTranslationSDK 的 podspec 发布在此公开 spec 仓库。
 source 'https://github.com/timekettle/TmkTranslationSDK-iOS.git'
 
 platform :ios, '15.0'
@@ -9,11 +9,7 @@ target 'SDKDemo' do
   use_frameworks!
 
   # Pods for SDKDemo
-  # 1.2.0-rc3 为预发布版,其 podspec 仅推送到公开 spec 仓库的 rc 分支,
-  # 不在默认分支 main 上;而 CocoaPods 的 source 只读取默认分支,无法解析到该版本。
-  # 因此这里用 :podspec 直接锁定 rc 分支上该版本 podspec 的 raw 地址。
-  # 升级到正式版后,改回 pod 'TmkTranslationSDK', 'X.Y.Z' 即可(走上面的 source)。
-  pod 'TmkTranslationSDK', :podspec => 'https://raw.githubusercontent.com/timekettle/TmkTranslationSDK-iOS/rc/Specs/TmkTranslationSDK/1.2.0-rc3/TmkTranslationSDK.podspec'
+  pod 'TmkTranslationSDK', '1.3.1-rc.1'
   pod 'SnapKit'
 
   target 'SDKDemoTests' do

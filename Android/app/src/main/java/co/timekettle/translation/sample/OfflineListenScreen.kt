@@ -1,5 +1,6 @@
 package co.timekettle.translation.sample
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,6 +22,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -54,8 +56,34 @@ data class OfflineListenScreen(
         val sourceLang by viewModel.sourceLang.collectAsState()
         val targetLang by viewModel.targetLang.collectAsState()
         val speakerGender by viewModel.speakerGender.collectAsState()
+        val isLocaleUpdating by viewModel.isLocaleUpdating.collectAsState()
+        val localeSwitchError by viewModel.localeSwitchError.collectAsState()
+        val translateMode by viewModel.translateMode.collectAsState()
+        val scenarioOption by viewModel.scenarioOption.collectAsState()
+        val isScenarioUpdating by viewModel.isScenarioUpdating.collectAsState()
+        val pendingDownloadPrompt by viewModel.pendingDownloadPrompt.collectAsState()
+        val retryHintAfterDownload by viewModel.retryHintAfterDownload.collectAsState()
+        val totalDownloadProgress by viewModel.totalDownloadProgress.collectAsState()
+        val context = LocalContext.current
+        // 语言切换失败:轻量 Toast 提示,不打断当前通道。
+        LaunchedEffect(localeSwitchError) {
+            localeSwitchError?.let {
+                Toast.makeText(context, it, Toast.LENGTH_LONG).show()
+                viewModel.consumeLocaleSwitchError()
+            }
+        }
+        // Bug2:模型下载完成后提示用户手动重试切换(不自动重试)。
+        LaunchedEffect(retryHintAfterDownload) {
+            retryHintAfterDownload?.let {
+                Toast.makeText(context, it, Toast.LENGTH_LONG).show()
+                viewModel.consumeRetryHintAfterDownload()
+            }
+        }
         var settingsExpanded by remember { mutableStateOf(false) }
         var showSpeakerDialog by remember { mutableStateOf(false) }
+        var showLocaleDialog by remember { mutableStateOf(false) }
+        var showTranslateModeDialog by remember { mutableStateOf(false) }
+        var showScenarioDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
         val offlineLanguageOptions = (rememberOfflineLanguageOptions().state
             as? LanguageOptionsState.Ready)?.options ?: emptyMap()
@@ -134,6 +162,28 @@ data class OfflineListenScreen(
                                 showSpeakerDialog = true
                             },
                         )
+                        DropdownMenuItem(
+                            text = { Text("语言设置") },
+                            onClick = {
+                                settingsExpanded = false
+                                showLocaleDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("翻译模式: ${TranslateModeOption.from(translateMode).title}") },
+                            onClick = {
+                                settingsExpanded = false
+                                showTranslateModeDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (isScenarioUpdating) "能力: ${scenarioOption.title}(切换中...)" else "能力: ${scenarioOption.title}") },
+                            enabled = !isScenarioUpdating,
+                            onClick = {
+                                settingsExpanded = false
+                                showScenarioDialog = true
+                            },
+                        )
                     }
                 }
             }
@@ -146,6 +196,7 @@ data class OfflineListenScreen(
                 downloadProgress == "下载失败" -> "模型下载失败"
                 downloadProgress == "下载已取消" -> "模型下载已取消"
                 downloadProgress == "下载完成" && !isChannelReady && !isStarting && !isStarted -> "模型下载完成"
+                isLocaleUpdating -> "正在切换语言..."
                 !isModelReady -> "模型未下载"
                 isStarted -> "正在收听中..."
                 isChannelReady -> "离线通道已就绪，可以开始收听"
@@ -177,7 +228,7 @@ data class OfflineListenScreen(
                         "通道：listen/offline",
                         "模型：${if (isModelReady) "已就绪" else "未下载"}",
                         "采样：配置16000Hz/1ch",
-                        "音色：${if (speakerGender == co.timekettle.translation.model.SpeakerGender.MALE) "男声" else "女声"}",
+                        "音色：${if (speakerGender == co.timekettle.sdk.common.models.SpeakerGender.MALE) "男声" else "女声"}",
                     ),
                 )
             }
@@ -225,6 +276,8 @@ data class OfflineListenScreen(
             OfflineModelPackageList(
                 packages = offlineModelPackages,
                 modifier = Modifier.padding(bottom = 6.dp),
+                // Bug3:下载中用 SDK 按字节总进度;非下载态传 null 回退等权平均。
+                totalProgress = if (isDownloading) totalDownloadProgress else null,
             )
 
             TranslationStartStopButtons(
@@ -258,6 +311,52 @@ data class OfflineListenScreen(
                     showSpeakerDialog = false
                     viewModel.updateSpeaker(it)
                 },
+            )
+        }
+
+        if (showLocaleDialog) {
+            OnlineLocaleSwitchDialog(
+                title = "切换离线收听语言",
+                sourceLabel = "源语言",
+                targetLabel = "目标语言",
+                initialSourceLang = sourceLang,
+                initialTargetLang = targetLang,
+                languageOptions = offlineLanguageOptions,
+                onDismiss = { showLocaleDialog = false },
+                onConfirm = { source, target ->
+                    showLocaleDialog = false
+                    viewModel.updateLanguages(source, target)
+                },
+            )
+        }
+
+        if (showTranslateModeDialog) {
+            TranslateModeDialog(
+                initialMode = translateMode,
+                onDismiss = { showTranslateModeDialog = false },
+                onConfirm = { mode ->
+                    showTranslateModeDialog = false
+                    viewModel.setTranslateMode(mode)
+                },
+            )
+        }
+        if (showScenarioDialog) {
+            OfflineScenarioDialog(
+                title = "选择能力档位",
+                initialOption = scenarioOption,
+                onDismiss = { showScenarioDialog = false },
+                onConfirm = { option ->
+                    showScenarioDialog = false
+                    viewModel.updateScenario(option)
+                },
+            )
+        }
+        // Bug2:模型未就绪确认弹窗(切语言/升档触发)。下载→VM 下载,取消→VM 清弹窗并提示未切换。
+        pendingDownloadPrompt?.let { info ->
+            OfflineModelDownloadPromptDialog(
+                info = info,
+                onConfirm = { viewModel.confirmPendingDownload() },
+                onDismiss = { viewModel.cancelPendingDownload() },
             )
         }
     }

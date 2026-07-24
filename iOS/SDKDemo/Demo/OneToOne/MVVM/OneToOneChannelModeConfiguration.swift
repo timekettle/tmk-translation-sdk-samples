@@ -14,6 +14,7 @@ struct OneToOneChannelAudioPushPlan {
 protocol OneToOneChannelModeConfiguration {
     var audioMode: TmkDialogConversationAudioMode { get }
     var pcmChannels: Int { get }
+    var speechStartMetadataChannelsForCurrentVADSource: [UInt8] { get }
     var fillsMissingFileAudioWithSilence: Bool { get }
 
     func makeInputAudioPushPlan(fileData: Data, rightMicData: Data) -> [OneToOneChannelAudioPushPlan]
@@ -22,6 +23,11 @@ protocol OneToOneChannelModeConfiguration {
 extension OneToOneChannelModeConfiguration {
     var fillsMissingFileAudioWithSilence: Bool {
         audioMode == .standard
+    }
+
+    var speechStartMetadataChannelsForCurrentVADSource: [UInt8] {
+        // 当前 Demo 的 VAD 只来自右侧麦克风，不能复用一次 speechStart 同时触发左右两路。
+        [OneToOneChannelModeConstants.rightMicMetadataChannel]
     }
 }
 
@@ -33,6 +39,18 @@ enum OneToOneChannelModeConfigurationFactory {
         case .lowLatency:
             return OneToOneLowLatencyChannelModeConfiguration()
         }
+    }
+}
+
+enum OneToOneSpeechMetadataRouting {
+    static func channelsForCurrentVADSource(_ audioMode: TmkDialogConversationAudioMode) -> [UInt8] {
+        OneToOneChannelModeConfigurationFactory
+            .make(mode: audioMode)
+            .speechStartMetadataChannelsForCurrentVADSource
+    }
+
+    static func channelForLeftFileLoop() -> UInt8 {
+        OneToOneChannelModeConstants.leftFileMetadataChannel
     }
 }
 
@@ -103,6 +121,11 @@ struct OneToOneLocalAudioLoopBuffer {
         return OneToOneLocalAudioLoopChunk(data: slice,
                                            startsNewCycle: startsNewCycle && slice.isEmpty == false)
     }
+}
+
+private enum OneToOneChannelModeConstants {
+    static let leftFileMetadataChannel: UInt8 = 1
+    static let rightMicMetadataChannel: UInt8 = 2
 }
 
 enum OneToOneTranslatedAudioPlaybackSelector {

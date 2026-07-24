@@ -439,11 +439,13 @@ private extension NowListeningController {
         sourceLabel.snp.makeConstraints { make in
             make.left.equalToSuperview()
             make.top.equalTo(cancelButton.snp.bottom).offset(6)
+            make.height.equalTo(20)
             make.width.equalToSuperview().multipliedBy(0.5)
         }
         targetLabel.snp.makeConstraints { make in
             make.right.equalToSuperview()
             make.top.equalTo(sourceLabel)
+            make.height.equalTo(sourceLabel)
             make.width.equalTo(sourceLabel)
         }
         topLine.snp.makeConstraints { make in

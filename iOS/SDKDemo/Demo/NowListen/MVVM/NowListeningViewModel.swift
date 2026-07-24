@@ -304,38 +304,52 @@ final class NowListeningViewModel: NSObject {
 
 private extension NowListeningViewModel {
     func startOnlineListening() {
+        let startupStartedAt = Date()
+        let authStartedAt = Date()
         TmkTranslationSDK.shared.verifyAuth { [weak self] result in
             guard let self else { return }
+            let authDurationMs = self.durationMs(since: authStartedAt)
             switch result {
             case .success:
                 self.isAuthVerified = true
+                Self.logger.info("启动翻译耗时 鉴权耗时 authDurationMs=\(authDurationMs, privacy: .public) result=success")
                 self.updateStatus("鉴权成功，准备创建房间...")
-                self.createRoomAndChannel()
+                self.createRoomAndChannel(startupStartedAt: startupStartedAt)
             case .failure(let error):
                 self.isAuthVerified = false
+                Self.logger.info("启动翻译耗时 鉴权耗时 authDurationMs=\(authDurationMs, privacy: .public) totalDurationMs=\(self.durationMs(since: startupStartedAt), privacy: .public) result=failure")
                 self.updateStatus(DemoSDKConfigurationFactory.authFailureMessage(error))
             }
         }
     }
 
-    func createRoomAndChannel() {
-        TmkTranslationSDK.shared.createTmkTranslationRoom(sourceLang: selectedSourceLang,
-                                                          targetLang: selectedTargetLang,
-                                                          scenario: selectedScenarioOption.roomScenario,
-                                                          channelScenario: .listen,
-                                                          speakers: configuredSpeakers(),
-                                                          translateEngine: selectedTranslateEngine) { [weak self] roomResult in
+    func createRoomAndChannel(startupStartedAt: Date) {
+        let roomStartedAt = Date()
+        let settings = DemoSettingsStore().loadCurrentConfig()
+        let roomConfig = TmkTranslationRoomConfig(
+            sourceLang: selectedSourceLang,
+            targetLang: selectedTargetLang,
+            scenario: selectedScenarioOption.roomScenario,
+            channelScenario: .listen,
+            speakers: configuredSpeakers(),
+            translateEngine: selectedTranslateEngine,
+            enableSensitiveWordRedaction: settings.sensitiveWordRedactionEnabled ? .enabled : .disabled
+        )
+        TmkTranslationSDK.shared.createTmkTranslationRoom(config: roomConfig) { [weak self] roomResult in
             guard let self else { return }
+            let roomDurationMs = self.durationMs(since: roomStartedAt)
             switch roomResult {
             case .success(let room):
-                self.createTranslationChannel(room: room)
+                Self.logger.info("启动翻译耗时 创建房间耗时 roomDurationMs=\(roomDurationMs, privacy: .public) result=success")
+                self.createTranslationChannel(room: room, startupStartedAt: startupStartedAt)
             case .failure(let error):
+                Self.logger.info("启动翻译耗时 创建房间耗时 roomDurationMs=\(roomDurationMs, privacy: .public) totalDurationMs=\(self.durationMs(since: startupStartedAt), privacy: .public) result=failure")
                 self.updateStatus("房间创建失败：\(error.localizedDescription)")
             }
         }
     }
 
-    func createTranslationChannel(room: TmkTranslationRoom) {
+    func createTranslationChannel(room: TmkTranslationRoom, startupStartedAt: Date) {
         self.room = room
         refreshTargetPlaybackUIDs(from: room)
 
@@ -356,16 +370,21 @@ private extension NowListeningViewModel {
             $0.configuredChannels = channelConfig.pcmChannels
         }
 
+        let channelStartedAt = Date()
         TmkTranslationSDK.shared.createTranslationChannel(channelConfig, listener: self) { [weak self] channelResult in
             guard let self else { return }
+            let channelDurationMs = self.durationMs(since: channelStartedAt)
+            let totalDurationMs = self.durationMs(since: startupStartedAt)
             switch channelResult {
             case .success(let channel):
                 self.channel = channel
                 self.updateStateOnMain {
                     $0.canStartListening = true
                 }
+                Self.logger.info("启动翻译耗时 加入通道耗时 channelDurationMs=\(channelDurationMs, privacy: .public) totalDurationMs=\(totalDurationMs, privacy: .public) result=success")
                 self.updateStatus("在线通道已就绪，点击“开始收听”开始采集")
             case .failure(let error):
+                Self.logger.info("启动翻译耗时 加入通道耗时 channelDurationMs=\(channelDurationMs, privacy: .public) totalDurationMs=\(totalDurationMs, privacy: .public) result=failure")
                 self.updateStatus("通道启动失败：\(error.localizedDescription)")
             }
         }
@@ -530,6 +549,8 @@ private extension NowListeningViewModel {
                 row.sourceSegments = self.highlightedSource(snapshot.sourceSegments)
                 row.translatedSegments = self.highlightedTranslated(snapshot.translatedSegments)
                 row.isBubbleEnded = snapshot.isBubbleEnded
+                row.bOffset = snapshot.bOffset
+                row.bDuration = snapshot.bDuration
                 self.rows[rowIndex] = row
                 self.rowMutation.send(.update(row: row, index: rowIndex, heightMayChange: true))
                 self.publishRows()
@@ -543,7 +564,9 @@ private extension NowListeningViewModel {
                                               translatedText: snapshot.translatedText,
                                               sourceSegments: self.highlightedSource(snapshot.sourceSegments),
                                               translatedSegments: self.highlightedTranslated(snapshot.translatedSegments),
-                                              isBubbleEnded: snapshot.isBubbleEnded)
+                                              isBubbleEnded: snapshot.isBubbleEnded,
+                                              bOffset: snapshot.bOffset,
+                                              bDuration: snapshot.bDuration)
             self.rows.append(row)
             let newIndex = self.rows.count - 1
             self.bubbleIndexMap[key] = newIndex
@@ -793,14 +816,16 @@ enum NowListeningConversationEventNormalizer {
                               text: event.text,
                               sourceLangCode: event.sourceLangCode,
                               targetLangCode: event.targetLangCode,
-                              chunkId: event.chunkId)
+                              chunkId: event.chunkId,
+                              offset: event.offset,
+                              duration: event.duration)
     }
 }
 
 extension NowListeningViewModel: TmkTranslationListener {
     func onRecognized(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        NSLog("%@", DemoTmkResultLogFormatter.makeLine(scene: "OnlineListen", stage: "ASR", result: result, isFinal: isFinal))
+        DemoTmkResultLogFormatter.log(DemoTmkResultLogFormatter.makeLine(scene: "OnlineListen", stage: "ASR", result: result, isFinal: isFinal))
         guard let event = DemoConversationEventAdapter.makeRecognizedEvent(from: result, isFinal: isFinal) else { return }
         let normalized = NowListeningConversationEventNormalizer.normalized(event)
         let snapshots = bubbleAssembler.consume(normalized)
@@ -810,7 +835,7 @@ extension NowListeningViewModel: TmkTranslationListener {
 
     func onTranslate(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        NSLog("%@", DemoTmkResultLogFormatter.makeLine(scene: "OnlineListen", stage: "MT", result: result, isFinal: isFinal))
+        DemoTmkResultLogFormatter.log(DemoTmkResultLogFormatter.makeLine(scene: "OnlineListen", stage: "MT", result: result, isFinal: isFinal))
         guard let event = DemoConversationEventAdapter.makeTranslatedEvent(from: result, isFinal: isFinal) else { return }
         let normalized = NowListeningConversationEventNormalizer.normalized(event)
         let snapshots = bubbleAssembler.consume(normalized)
@@ -870,7 +895,7 @@ extension NowListeningViewModel: TmkTranslationListener {
         if name == "online_bubble_end",
            let result = args as? TmkResult<String> {
             let snapshots = bubbleAssembler.markBubbleEnded(bubbleId: result.bubbleId)
-            NSLog("%@", DemoTmkResultLogFormatter.makeBubbleEndLine(scene: "OnlineListen",
+            DemoTmkResultLogFormatter.log(DemoTmkResultLogFormatter.makeBubbleEndLine(scene: "OnlineListen",
                                                                      result: result,
                                                                      affectedSnapshots: snapshots))
             snapshots.forEach(applyBubbleSnapshot)
@@ -878,7 +903,7 @@ extension NowListeningViewModel: TmkTranslationListener {
         }
         if name == "online_tts_state",
            let result = args as? TmkResult<String> {
-            NSLog("%@", DemoTmkResultLogFormatter.makeLine(scene: "OnlineListen",
+            DemoTmkResultLogFormatter.log(DemoTmkResultLogFormatter.makeLine(scene: "OnlineListen",
                                                            stage: "TTSState",
                                                            result: result,
                                                            isFinal: result.isLast))
@@ -894,7 +919,8 @@ extension NowListeningViewModel: TmkTranslationListener {
 
     func onStateChanged(from engine: AbstractChannelEngine, snapshot: TmkTranslationChannelStateSnapshot) {
         _ = engine
-        applyRuntimeAction(DemoConversationRuntimePolicy.action(for: snapshot))
+        applyRuntimeAction(DemoConversationRuntimePolicy.action(for: snapshot,
+                                                                isListening: getListeningActive()))
     }
 
     private func handleRemoteCloseRoom() {
