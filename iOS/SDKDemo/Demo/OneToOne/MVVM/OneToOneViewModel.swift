@@ -49,7 +49,7 @@ final class OneToOneViewModel: NSObject {
     private var selectedLeftLang: String { selectedTargetLang }
     private var selectedLeftSpeakerGender: TmkSpeakerGender = .male
     private var selectedRightSpeakerGender: TmkSpeakerGender = .female
-    private var selectedTranslateEngine: TmkOnlineTranslateEngine = .accurate
+    private var selectedTranslateEngine: TmkOnlineTranslateEngine = .fast
     private var selectedScenarioOption: OneToOneScenarioOption = .defaultOption
     private var selectedChannelModeConfiguration: OneToOneChannelModeConfiguration = OneToOneStandardChannelModeConfiguration()
     private var selectedDialogConversationAudioMode: TmkDialogConversationAudioMode {
@@ -130,7 +130,6 @@ final class OneToOneViewModel: NSObject {
                                                                framesPerBuffer: 1024))
         }
         guard let voiceIO else { return }
-
         configureInterruptionHandling(for: voiceIO)
 
         do {
@@ -143,7 +142,7 @@ final class OneToOneViewModel: NSObject {
             return
         }
 
-        voiceIO.onInputPCM = { [weak self, weak channel] data, format, _ in
+        voiceIO.onInputPCM = { [weak self, weak channel] data, format, vadState in
             guard let self else { return }
             let micChannels = Int(format.mChannelsPerFrame)
             let micSampleRate = Int(format.mSampleRate)
@@ -461,7 +460,7 @@ private extension OneToOneViewModel {
             channelScenario: .oneToOne,
             speakers: configuredSpeakers(),
             translateEngine: selectedTranslateEngine,
-            translateMode: .partial,
+            recognizeEngine: .endToEnd,//端到端
             dialogConversationAudioMode: selectedDialogConversationAudioMode
         )
         TmkTranslationSDK.shared.createTmkTranslationRoom(config: roomConfig) { [weak self] result in
@@ -1242,7 +1241,8 @@ extension OneToOneViewModel: TmkTranslationListener {
 
     func onStateChanged(from engine: AbstractChannelEngine, snapshot: TmkTranslationChannelStateSnapshot) {
         _ = engine
-        applyRuntimeAction(DemoConversationRuntimePolicy.action(for: snapshot))
+        applyRuntimeAction(DemoConversationRuntimePolicy.action(for: snapshot,
+                                                                isListening: getListeningActive()))
     }
 
     private func handleRemoteCloseRoom() {
