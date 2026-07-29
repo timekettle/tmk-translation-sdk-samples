@@ -34,14 +34,23 @@ enum DemoConversationRuntimePolicy {
         static let internalError = 2_004_199
     }
 
+    /// - Parameter isListening: Demo 当前是否正处于收音中。用于区分 `.running` 状态下
+    ///   的文案语义:收音过程中 RTC 自动重连恢复(reason=.rtcConnected)时,应保持
+    ///   "正在收听中..."而非退回"点击开始收听"的就绪态文案,避免状态栏与实际收音状态不一致。
     static func action(for snapshot: TmkTranslationChannelStateSnapshot,
-                       readyMessage: String = "在线通道已就绪，点击“开始收听”开始采集") -> DemoConversationRuntimeAction {
+                       readyMessage: String = "在线通道已就绪，点击“开始收听”开始采集",
+                       isListening: Bool = false) -> DemoConversationRuntimeAction {
         switch snapshot.state {
         case .idle:
             return .status("通道未启动")
         case .starting:
             return .status("通道连接中...")
         case .running:
+            // 收音过程中连接恢复(含 RTC 自动重连成功):状态栏保持"收听中"语义,
+            // 不覆盖为就绪态文案,确保与实际收音状态一致。
+            if isListening {
+                return .status("正在收听中...")
+            }
             return .status(snapshot.reason == .networkRestored ? "连接已恢复" : readyMessage)
         case .degraded:
             return .weakNetwork("当前网络不稳定，翻译可能延迟")
@@ -130,6 +139,7 @@ enum DemoConversationRuntimePolicy {
                                  message: "当前网络请求失败，可以检查网络后重试。\n\n\(detail)",
                                  style: .restart))
         case TmkSDKErrorCode.networkHTTPStatusError.rawValue:
+            // 旧的通用 HTTP 错误码（2002003），已被细分码取代，此分支保留作兜底
             if actualCode == 401 || actualCode == 403 {
                 return .prompt(.init(title: "鉴权已失效",
                                      message: "服务端拒绝当前鉴权信息，请重新鉴权后再使用。\n\n\(detail)",
@@ -139,14 +149,51 @@ enum DemoConversationRuntimePolicy {
                                  message: "服务端返回异常状态，可以稍后重试。\n\n\(detail)",
                                  style: .restart))
         case TmkSDKErrorCode.networkBusinessError.rawValue:
+            // 旧的通用后台业务错误码（2002005），已被细分码取代，此分支保留作兜底
             return .prompt(.init(title: "服务端拒绝请求",
                                  message: "服务端返回业务错误，请按错误信息处理后重试。\n\n\(detail)",
                                  style: actualCode == 401 || actualCode == 403 ? .leaveOnly : .restart))
+
+        // ── HTTP 状态码细分（2002400-2002599 = 2002000 + statusCode）────────────────
+        case 2002400...2002599:
+            let httpStatus = code - 2002000
+            if httpStatus == 401 || httpStatus == 403 {
+                return .prompt(.init(title: "鉴权已失效",
+                                     message: "服务端拒绝当前鉴权信息，请重新鉴权后再使用。\n\n\(detail)",
+                                     style: .leaveOnly))
+            } else if httpStatus >= 500 {
+                return .prompt(.init(title: "服务请求失败",
+                                     message: "服务端返回异常状态，可以稍后重试。\n\n\(detail)",
+                                     style: .restart))
+            } else {
+                return .prompt(.init(title: "服务请求失败",
+                                     message: "请求参数有误，请按错误信息处理后重试。\n\n\(detail)",
+                                     style: .restart))
+            }
+
+        // ── 后台业务码细分（2005xxx/2006xxx/2007xxx = 2004000 + 后台码）─────────────
+        case 2005000...2007999:
+            return .prompt(.init(title: "服务端拒绝请求",
+                                 message: "服务端返回业务错误，请按错误信息处理后重试。\n\n\(detail)",
+                                 style: .restart))
         case TmkSDKErrorCode.audioProcessingError.rawValue,
              TmkSDKErrorCode.bufferOverflow.rawValue,
              TmkSDKErrorCode.audioChannelCreationFailed.rawValue:
             return .prompt(.init(title: "音频通道异常",
                                  message: "当前音频链路无法继续，可以重新创建或重新初始化。\n\n\(detail)",
+                                 style: .restart))
+        case TmkSDKErrorCode.rtcBannedByServer.rawValue,
+             TmkSDKErrorCode.rtcUserBanned.rawValue:
+            return .prompt(.init(title: "对话已被服务端终止",
+                                 message: "当前账号或对话已被服务端封禁，无法继续使用。\n\n\(detail)",
+                                 style: .leaveOnly))
+        case TmkSDKErrorCode.rtcRejectedByServer.rawValue:
+            return .prompt(.init(title: "对话被服务端拒绝",
+                                 message: "服务端拒绝了当前对话，无法继续使用。\n\n\(detail)",
+                                 style: .leaveOnly))
+        case TmkSDKErrorCode.rtcJoinFailed.rawValue:
+            return .prompt(.init(title: "加入频道失败",
+                                 message: "当前无法加入实时频道，可以重新创建对话或检查网络。\n\n\(detail)",
                                  style: .restart))
         case TmkSDKErrorCode.threadInterrupted.rawValue,
              TmkSDKErrorCode.invalidState.rawValue,
@@ -245,6 +292,16 @@ enum DemoConversationRuntimePolicy {
              TmkSDKErrorCode.networkBusinessError.rawValue,
              TmkSDKErrorCode.networkResponseDecodingError.rawValue,
              TmkSDKErrorCode.quotaExceeded.rawValue:
+            return true
+        // HTTP 状态码细分段（2002400-2002599）和后台业务码细分段（2005xxx-2007xxx）
+        // 同样需要优先产出具体弹窗，不被 failed reason 吞掉
+        case 2002400...2002599, 2005000...2007999:
+            return true
+        // 声网 RTC 细分码（banned/join/rejected/userBanned）在 failed 状态下也优先产出具体弹窗
+        case TmkSDKErrorCode.rtcBannedByServer.rawValue,
+             TmkSDKErrorCode.rtcJoinFailed.rawValue,
+             TmkSDKErrorCode.rtcRejectedByServer.rawValue,
+             TmkSDKErrorCode.rtcUserBanned.rawValue:
             return true
         default:
             return false
