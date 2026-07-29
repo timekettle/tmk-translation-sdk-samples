@@ -229,7 +229,7 @@ final class Offline1V1ViewModel: NSObject {
             updateStatus("音频会话配置失败：\(error.localizedDescription)")
             return
         }
-        voiceIO.onInputPCM = { [weak self, weak channel] data, format, _ in
+        voiceIO.onInputPCM = { [weak self, weak channel] data, format, vadState in
             guard let self else { return }
             let captureChannels = Int(format.mChannelsPerFrame)
             self.updateCaptureAudioInfo(sampleRate: Int(format.mSampleRate), channels: captureChannels)
@@ -901,7 +901,8 @@ extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadLi
     func onStateChanged(from engine: AbstractChannelEngine, snapshot: TmkTranslationChannelStateSnapshot) {
         _ = engine
         applyRuntimeAction(DemoConversationRuntimePolicy.action(for: snapshot,
-                                                                readyMessage: #"离线一对一通道已就绪，点击"开始收听"开始采集"#))
+                                                                readyMessage: #"离线一对一通道已就绪，点击"开始收听"开始采集"#,
+                                                                isListening: getListeningActive()))
     }
 
     func onOfflineModelEvent(name: String, args: Any?) {
