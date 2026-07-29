@@ -20,6 +20,7 @@ import co.timekettle.translation.config.TmkTransGlobalConfig
 import co.timekettle.translation.config.TmkTranslationRoomConfig
 import co.timekettle.translation.core.AbstractChannelEngine
 import co.timekettle.translation.enums.Scenario
+import co.timekettle.translation.enums.TmkOnlineRecognizeEngine
 import co.timekettle.translation.enums.TmkOnlineTranslateEngine
 import co.timekettle.translation.enums.TranslationMode
 import co.timekettle.translation.lingcast.common.enums.TransModeType
@@ -397,6 +398,7 @@ class Online1v1ViewModel @Inject constructor(
             .setTargetLang(channelLanguages.rightLang)
             .setSpeakers(currentSpeakers())
             .setOnlineTranslateEngine(_onlineTranslateEngine.value)
+            .setOnlineRecognizeEngine(TmkOnlineRecognizeEngine.THREE_STAGE)
             .setRoomScenario(_roomScenarioOption.value.roomScenario)
             .setTranslateMode(TmkTranslateDeliveryMode.PARTIAL)
             .build()

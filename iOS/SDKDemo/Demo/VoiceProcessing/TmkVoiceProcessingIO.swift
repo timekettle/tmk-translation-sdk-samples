@@ -41,7 +41,6 @@ final class TmkVoiceProcessingIO {
 
     // 录音数据回调（业务层拿到后自行处理）
     typealias InputPCMHandler = (_ pcmData: Data, _ format: AudioStreamBasicDescription, _ vadState: VADState) -> Void
-    typealias VADStateResolver = (_ pcmData: Data, _ format: AudioStreamBasicDescription) -> VADState
 
     // 记录最近一次激活会话所用参数，用于中断结束后由自身重新激活会话。
     private struct AudioSessionSetup {
@@ -66,8 +65,6 @@ final class TmkVoiceProcessingIO {
 
     // 录音回调（业务层获取原始 PCM）
     var onInputPCM: InputPCMHandler?
-    // VAD 状态由业务层外部注入；未设置时表示当前不启用 VAD，回调中的 vadState 无实际语义。
-    var resolveVADState: VADStateResolver?
     // 采集中断/恢复事件回调（统一切回主线程触发），业务层据此更新 UI。
     var onInterruptionEvent: ((InterruptionEvent) -> Void)?
     // 外部可读取当前实际采集声道数
@@ -429,8 +426,7 @@ final class TmkVoiceProcessingIO {
         if let dataPtr = bufferList.mBuffers.mData {
             let byteSize = Int(bufferList.mBuffers.mDataByteSize)
             let data = Data(bytes: dataPtr, count: byteSize)
-            let vadState = resolveVADState?(data, activeStreamDescription) ?? .silence
-            onInputPCM?(data, activeStreamDescription, vadState)
+            onInputPCM?(data, activeStreamDescription, .silence)
         }
 
         return noErr

@@ -87,6 +87,39 @@ object OnlineConversationErrorPrompts {
                 restartText = "重新检查",
             )
 
+            // HTTP 状态码细分（2002400-2002599）
+            in 2002400..2002599 -> {
+                val httpStatus = code - 2002000
+                if (httpStatus == 401 || httpStatus == 403) {
+                    restartPrompt(
+                        id = "http_auth_$code",
+                        title = "鉴权已失效",
+                        message = "服务端拒绝当前鉴权信息，请重新鉴权后再使用。\n\n错误[$code]：$message",
+                        restartText = "重新鉴权"
+                    )
+                } else if (httpStatus >= 500) {
+                    restartPrompt(
+                        id = "http_server_$code",
+                        title = "服务请求失败",
+                        message = "服务端返回异常状态，可以稍后重试。\n\n错误[$code]：$message",
+                        restartText = restartText(mode)
+                    )
+                } else {
+                    restartPrompt(
+                        id = "http_client_$code",
+                        title = "服务请求失败",
+                        message = "请求参数有误，请按错误信息处理后重试。\n\n错误[$code]：$message"
+                    )
+                }
+            }
+            // 后台业务码细分（2005xxx/2006xxx/2007xxx）
+            in 2005000..2007999 -> restartPrompt(
+                id = "biz_$code",
+                title = "服务端拒绝请求",
+                message = "服务端返回业务错误，请按错误信息处理后重试。\n\n错误[$code]：$message",
+                restartText = restartText(mode)
+            )
+
             else -> fromReason(reason, message, code, mode)
         }
     }
