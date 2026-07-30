@@ -894,7 +894,8 @@ extension NowListeningViewModel: TmkTranslationListener {
 
     func onStateChanged(from engine: AbstractChannelEngine, snapshot: TmkTranslationChannelStateSnapshot) {
         _ = engine
-        applyRuntimeAction(DemoConversationRuntimePolicy.action(for: snapshot))
+        applyRuntimeAction(DemoConversationRuntimePolicy.action(for: snapshot,
+                                                                isListening: getListeningActive()))
     }
 
     private func handleRemoteCloseRoom() {

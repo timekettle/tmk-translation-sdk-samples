@@ -43,7 +43,7 @@ class SettingsScreen : Screen {
         val context = LocalContext.current
         BackHandler { navigator.pop() }
 
-        var diagnosisEnabled by remember { mutableStateOf(SdkDiagnosisManager.isEnabled()) }
+        var diagnosisEnabled by remember { mutableStateOf(DemoSettingsStore.loadDiagnosisEnabled(context)) }
         var consoleEnabled by remember { mutableStateOf(SdkDiagnosisManager.isConsoleEnabled()) }
         var environmentExpanded by remember { mutableStateOf(false) }
         var networkEnvironment by remember { mutableStateOf(DemoSettingsStore.loadNetworkEnvironment(context)) }
@@ -106,7 +106,9 @@ class SettingsScreen : Screen {
             SectionLabel("SDK 配置")
             SettingToggle("诊断模式", "记录详细日志用于排查问题", diagnosisEnabled) {
                 diagnosisEnabled = it
+                DemoSettingsStore.saveDiagnosisEnabled(context, it)
                 SdkDiagnosisManager.setEnabled(it)
+                refreshEngineStatus()
             }
             SettingToggle("控制台日志", "在 Logcat 输出日志", consoleEnabled) {
                 consoleEnabled = it
