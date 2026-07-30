@@ -6,7 +6,7 @@ plugins {
     alias(libs.plugins.hilt.android)
 }
 
-val sampleSdkVersion = providers.gradleProperty("TMK_SDK_VERSION").orElse("1.2.1").get()
+val sampleSdkVersion = providers.gradleProperty("TMK_SDK_VERSION").orElse("1.2.3").get()
 val sampleAppId = providers.environmentVariable("TMK_SAMPLE_APP_ID")
     .orElse(providers.gradleProperty("TMK_SAMPLE_APP_ID"))
     .orElse("")
@@ -87,6 +87,7 @@ dependencies {
     implementation(libs.hilt.navigation.compose)
 
     implementation(libs.voyager.navigator)
+    implementation(libs.voyager.hilt)
     implementation(libs.voyager.transitions)
 
     testImplementation(libs.junit)
