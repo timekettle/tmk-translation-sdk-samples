@@ -12,6 +12,7 @@ object SampleSdkConfig {
 
     fun globalConfig(
         networkEnvironment: TmkTranslationNetworkEnvironment = TmkTranslationNetworkEnvironment.TEST,
+        diagnosisEnabled: Boolean = false,
     ): TmkTransGlobalConfig {
         check(BuildConfig.TMK_SAMPLE_APP_ID.isNotBlank()) {
             "Missing $ENV_APP_ID. Export it in your shell or configure it in $USER_GRADLE_PROPERTIES_PATH."
@@ -23,13 +24,17 @@ object SampleSdkConfig {
         return TmkTransGlobalConfig.Builder()
             .setAuth(BuildConfig.TMK_SAMPLE_APP_ID, BuildConfig.TMK_SAMPLE_APP_SECRET)
             .setOnlineAuthContext(tenantId = "timekettle")
+            .setDiagnosisEnabled(diagnosisEnabled)
             .setNetworkEnvironment(networkEnvironment)
             .setNetworkBaseURL("https://api-rayneo.timekettle.co")
             .build()
     }
 
     fun globalConfig(context: Context): TmkTransGlobalConfig {
-        return globalConfig(DemoSettingsStore.loadNetworkEnvironment(context))
+        return globalConfig(
+            networkEnvironment = DemoSettingsStore.loadNetworkEnvironment(context),
+            diagnosisEnabled = DemoSettingsStore.loadDiagnosisEnabled(context),
+        )
     }
 
     fun hasCredentials(): Boolean {
