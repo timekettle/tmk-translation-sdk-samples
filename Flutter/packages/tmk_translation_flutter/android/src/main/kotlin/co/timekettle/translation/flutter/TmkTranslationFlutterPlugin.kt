@@ -847,6 +847,20 @@ private abstract class BaseAudioListenSession(
             emitError("record_permission_denied", "请先授予麦克风权限")
             return
         }
+        if (mode == TranslationMode.OFFLINE) {
+            if (getOfflineModelStatus()["isReady"] != true) {
+                emitError("offline_models_missing", "当前语言对仍缺少离线模型")
+                emitSessionState(
+                    "离线模型未就绪",
+                    isStarting = false,
+                    isModelReady = false,
+                )
+                return
+            }
+            emitSessionState("正在创建离线通道...", isStarting = true)
+            createChannel(null)
+            return
+        }
         emitSessionState("开始鉴权...", isStarting = true)
         TmkTranslationSDK.verifyAuth(object : AuthCallback {
             override fun onSuccess() {
@@ -892,17 +906,17 @@ private abstract class BaseAudioListenSession(
         emitSessionState("翻译已停止", isStarted = false, isStarting = false)
     }
 
-    private fun createChannel(room: TmkTranslationRoom) {
-        updateRoomNo(if (config.mode == "offline") "-" else extractRoomNo(room))
+    private fun createChannel(room: TmkTranslationRoom?) {
+        updateRoomNo(room?.let(::extractRoomNo) ?: "-")
         updateConfiguredAudio(16_000, 1)
         val builder = TmkTransChannelConfig.Builder()
-            .setRoom(room)
             .setMode(mode)
             .setSourceLang(config.sourceLanguage)
             .setTargetLang(config.targetLanguage)
             .setSampleRate(16_000)
             .setChannelNum(1)
             .setTransModeType(transModeType)
+        room?.let(builder::setRoom)
         scenario?.let(builder::setScenario)
         extraParams.forEach(builder::addExtraParams)
         val channelConfig = builder.build()
@@ -1048,6 +1062,20 @@ private abstract class BaseOneToOneSession(
             emitError("record_permission_denied", "请先授予麦克风权限")
             return
         }
+        if (mode == TranslationMode.OFFLINE) {
+            if (getOfflineModelStatus()["isReady"] != true) {
+                emitError("offline_models_missing", "当前语言对仍缺少双向离线模型")
+                emitSessionState(
+                    "离线双向模型未就绪",
+                    isStarting = false,
+                    isModelReady = false,
+                )
+                return
+            }
+            emitSessionState("正在创建离线 1v1 通道...", isStarting = true)
+            createChannel(null)
+            return
+        }
         emitSessionState("开始鉴权...", isStarting = true)
         TmkTranslationSDK.verifyAuth(object : AuthCallback {
             override fun onSuccess() {
@@ -1103,17 +1131,17 @@ private abstract class BaseOneToOneSession(
         }
     }
 
-    private fun createChannel(room: TmkTranslationRoom) {
-        updateRoomNo(if (config.mode == "offline") "-" else extractRoomNo(room))
+    private fun createChannel(room: TmkTranslationRoom?) {
+        updateRoomNo(room?.let(::extractRoomNo) ?: "-")
         updateConfiguredAudio(16_000, 2)
         val builder = TmkTransChannelConfig.Builder()
-            .setRoom(room)
             .setMode(mode)
             .setScenario(scenario)
             .setSourceLang(config.sourceLanguage)
             .setTargetLang(config.targetLanguage)
             .setSampleRate(16_000)
             .setChannelNum(2)
+        room?.let(builder::setRoom)
         transModeType?.let(builder::setTransModeType)
         extraParams.forEach(builder::addExtraParams)
         val channelConfig = builder.build()
