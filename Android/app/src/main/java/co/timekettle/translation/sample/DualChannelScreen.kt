@@ -7,8 +7,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
-import androidx.hilt.navigation.compose.hiltViewModel
 import cafe.adriel.voyager.core.screen.Screen
+import cafe.adriel.voyager.hilt.getViewModel
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 
@@ -20,7 +20,7 @@ data class DualChannelScreen(
     @Composable
     override fun Content() {
         val navigator = LocalNavigator.currentOrThrow
-        val viewModel: Online1v1ViewModel = hiltViewModel()
+        val viewModel: Online1v1ViewModel = getViewModel()
         val initErrorMessage by viewModel.initErrorMessage.collectAsState()
         val isStarted by viewModel.isStarted.collectAsState()
         val isChannelReady by viewModel.isChannelReady.collectAsState()
@@ -55,7 +55,7 @@ data class DualChannelScreen(
             viewModel.setLanguagesIfNeeded(sourceLang, targetLang)
             viewModel.initSDK()
         }
-        BackHandler(enabled = true) { viewModel.stopTranslation(); navigator.pop() }
+        BackHandler(enabled = true) { navigator.pop() }
         DisposableEffect(Unit) { onDispose { viewModel.stopTranslation() } }
 
         if (initErrorMessage != null) {
