@@ -6,8 +6,8 @@ package co.timekettle.translation.sample
  * 对齐 iOS 在线/离线共用的 `OneToOneTranslatedAudioPlaybackSelector`。
  *
  * 规则(输出恒为可直接播放的 PCM,并带上其真实声道数):
- * 1. 低延迟单声道帧(`audio_route`=left/right):按本机[播放音源][OneToOnePlaybackMode]只播选中那一路,
- *    对侧丢弃(返回 null)。对齐 iOS「一台设备只听一路」。
+ * 1. 低延迟单声道帧(`audio_route`=left/right):在线 Demo 按原始说话侧 `speaker_channel` 选择，
+ *    使“左路/右路翻译”与标准模式保持同一语义；对侧丢弃(返回 null)。
  * 2. 立体声(`audio_route`=stereo 或 channelCount>=2 的交织数据):按播放音源拆出对应一路,**输出单声道**。
  * 3. 其余非立体声:直接播放(原样返回,声道数不变)。
  */
@@ -69,6 +69,23 @@ object OneToOnePlaybackSelector {
     }
 
     /**
+     * 解析在线低延迟帧的原始说话侧。
+     *
+     * 新版 SDK 直接提供 `speaker_channel`;旧版缺失时由最终播放目标 [audioRoute] 取对侧兜底。
+     * `audio_route=stereo` 不代表单一说话侧，返回 null。
+     */
+    fun resolveOnlineSpeakerChannel(audioRoute: AudioRoute?, rawSpeakerChannel: Any?): AudioRoute? {
+        AudioRoute.from(rawSpeakerChannel)?.let { explicit ->
+            if (explicit == AudioRoute.LEFT || explicit == AudioRoute.RIGHT) return explicit
+        }
+        return when (audioRoute) {
+            AudioRoute.LEFT -> AudioRoute.RIGHT
+            AudioRoute.RIGHT -> AudioRoute.LEFT
+            AudioRoute.STEREO, null -> null
+        }
+    }
+
+    /**
      * 选择结果:要播放的 PCM 及其真实声道数。
      * 立体声拆分后 [channelCount] 为 1,调用方须按此声道数播放(而非原始帧声道数)。
      */
@@ -86,17 +103,27 @@ object OneToOnePlaybackSelector {
      * 选择实际要送去播放的 PCM;返回 null 表示该帧不属于本机播放音源(仅低延迟单路帧),应丢弃。
      *
      * @param audioRoute SDK 交付的 `extraData["audio_route"]`;标准模式通常为 null。
+     * @param speakerChannel 在线低延迟帧的原始说话侧 `extraData["speaker_channel"]`。
      */
     fun selectPlaybackData(
         data: ByteArray,
         channelCount: Int,
         playbackMode: OneToOnePlaybackMode,
         audioRoute: AudioRoute?,
+        speakerChannel: AudioRoute? = null,
         leftActive: Boolean? = null,
         rightActive: Boolean? = null,
     ): PlaybackOutput? {
         if (data.isEmpty()) return null
-        // 低延迟单路帧:按播放音源只播选中一路,对侧丢弃。
+        // 在线低延迟优先按原始说话侧选择，保持与标准 stereo 的左右路语义一致。
+        when (speakerChannel) {
+            AudioRoute.LEFT ->
+                return if (playbackMode == OneToOnePlaybackMode.LEFT) PlaybackOutput(data, channelCount) else null
+            AudioRoute.RIGHT ->
+                return if (playbackMode == OneToOnePlaybackMode.RIGHT) PlaybackOutput(data, channelCount) else null
+            AudioRoute.STEREO, null -> Unit
+        }
+        // 未提供说话侧时保留原有 route 行为，供离线和旧调用方使用。
         when (audioRoute) {
             AudioRoute.LEFT ->
                 return if (playbackMode == OneToOnePlaybackMode.LEFT) PlaybackOutput(data, channelCount) else null

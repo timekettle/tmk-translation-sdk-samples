@@ -258,6 +258,9 @@ private extension NowListeningController {
             UIAction(title: "翻译引擎") { [weak self] _ in
                 self?.showTranslateEngineMenu()
             },
+            UIAction(title: "识别引擎") { [weak self] _ in
+                self?.showRecognizeEngineMenu()
+            },
             UIAction(title: "音色") { [weak self] _ in
                 self?.showSpeakerMenu()
             }
@@ -303,6 +306,28 @@ private extension NowListeningController {
         let displayTitle = state.translateEngine == engine ? "✓ \(title)" : title
         let action = UIAlertAction(title: displayTitle, style: .default) { [weak self] _ in
             self?.viewModel.updateTranslateEngine(engine)
+        }
+        alert.addAction(action)
+    }
+
+    func showRecognizeEngineMenu() {
+        let alert = UIAlertController(title: "识别引擎",
+                                      message: "切换后将重新创建房间和通道。",
+                                      preferredStyle: .actionSheet)
+        addRecognizeEngineAction(title: "默认", engine: .default, to: alert)
+        addRecognizeEngineAction(title: "端到端", engine: .endToEnd, to: alert)
+        addRecognizeEngineAction(title: "三段式", engine: .threeStage, to: alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
+        present(alert, animated: true)
+    }
+
+    private func addRecognizeEngineAction(title: String,
+                                          engine: TmkOnlineRecognizeEngine,
+                                          to alert: UIAlertController) {
+        let displayTitle = state.recognizeEngine == engine ? "✓ \(title)" : title
+        let action = UIAlertAction(title: displayTitle, style: .default) { [weak self] _ in
+            self?.viewModel.updateRecognizeEngine(engine)
         }
         alert.addAction(action)
     }

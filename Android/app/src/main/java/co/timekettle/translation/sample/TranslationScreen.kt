@@ -41,11 +41,13 @@ data class ListenModeScreen(
         val lockedTargetLang by viewModel.targetLang.collectAsState()
         val speakerGender by viewModel.speakerGender.collectAsState()
         val onlineTranslateEngine by viewModel.onlineTranslateEngine.collectAsState()
+        val onlineRecognizeEngine by viewModel.onlineRecognizeEngine.collectAsState()
         val roomScenarioOption by viewModel.roomScenarioOption.collectAsState()
         var settingsExpanded by remember { mutableStateOf(false) }
         var showLocaleDialog by remember { mutableStateOf(false) }
         var showSpeakerDialog by remember { mutableStateOf(false) }
         var showTranslateEngineDialog by remember { mutableStateOf(false) }
+        var showRecognizeEngineDialog by remember { mutableStateOf(false) }
         var showRoomScenarioDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
         val onlineLanguageOptions = (rememberOnlineLanguageOptions().state
@@ -130,6 +132,13 @@ data class ListenModeScreen(
                             onClick = {
                                 settingsExpanded = false
                                 showTranslateEngineDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("识别引擎设置") },
+                            onClick = {
+                                settingsExpanded = false
+                                showRecognizeEngineDialog = true
                             },
                         )
                         DropdownMenuItem(
@@ -234,6 +243,17 @@ data class ListenModeScreen(
                 onConfirm = {
                     showTranslateEngineDialog = false
                     viewModel.updateTranslateEngine(it)
+                },
+            )
+        }
+
+        if (showRecognizeEngineDialog) {
+            OnlineRecognizeEngineDialog(
+                initialEngine = onlineRecognizeEngine,
+                onDismiss = { showRecognizeEngineDialog = false },
+                onConfirm = {
+                    showRecognizeEngineDialog = false
+                    viewModel.setOnlineRecognizeEngine(it)
                 },
             )
         }

@@ -55,6 +55,7 @@ struct NowListeningViewState: Equatable {
     var sourceLanguage: String = "zh-CN"
     var targetLanguage: String = "en-US"
     var translateEngine: TmkOnlineTranslateEngine = .accurate
+    var recognizeEngine: TmkOnlineRecognizeEngine = .default
     var scenarioOption: NowListeningScenarioOption = .defaultOption
     var canStartListening: Bool = false
     var canStopListening: Bool = false

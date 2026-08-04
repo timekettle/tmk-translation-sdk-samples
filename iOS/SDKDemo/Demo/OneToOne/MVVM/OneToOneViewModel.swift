@@ -50,6 +50,7 @@ final class OneToOneViewModel: NSObject {
     private var selectedLeftSpeakerGender: TmkSpeakerGender = .male
     private var selectedRightSpeakerGender: TmkSpeakerGender = .female
     private var selectedTranslateEngine: TmkOnlineTranslateEngine = .fast
+    private var selectedRecognizeEngine: TmkOnlineRecognizeEngine = .default
     private var selectedScenarioOption: OneToOneScenarioOption = .defaultOption
     private var selectedChannelModeConfiguration: OneToOneChannelModeConfiguration = OneToOneStandardChannelModeConfiguration()
     private var selectedDialogConversationAudioMode: TmkDialogConversationAudioMode {
@@ -69,8 +70,6 @@ final class OneToOneViewModel: NSObject {
     private let maxDisplayedRows = 200
     private var hasPCMData = false
     private var isPCMRecordingEnabled = false
-    private var lastSpeechStartMetadataAt: Date?
-    private let speechStartTraceMinInterval: TimeInterval = 6
     private var pcmOutputDirectory: URL?
     private var pcmFileHandles: [PCMFileKey: FileHandle] = [:]
     private var pcmFileURLs: [PCMFileKey: URL] = [:]
@@ -105,6 +104,7 @@ final class OneToOneViewModel: NSObject {
             $0.sourceLanguage = self.selectedSourceLang
             $0.targetLanguage = self.selectedTargetLang
             $0.translateEngine = self.selectedTranslateEngine
+            $0.recognizeEngine = self.selectedRecognizeEngine
             $0.scenarioOption = self.selectedScenarioOption
             $0.dialogConversationAudioMode = self.selectedDialogConversationAudioMode
             $0.configuredChannels = self.selectedChannelModeConfiguration.pcmChannels
@@ -132,8 +132,6 @@ final class OneToOneViewModel: NSObject {
                                                                framesPerBuffer: 1024))
         }
         guard let voiceIO else { return }
-        voiceIO.resolveVADState = nil
-
         configureInterruptionHandling(for: voiceIO)
 
         do {
@@ -146,15 +144,8 @@ final class OneToOneViewModel: NSObject {
             return
         }
 
-        voiceIO.onInputPCM = { [weak self, weak channel] data, format, vadState in
+        voiceIO.onInputPCM = { [weak self, weak channel] data, format, _ in
             guard let self else { return }
-            if vadState == .speechStart, let channel {
-                if self.shouldSendSpeechStartTrace(now: Date()) == false {
-                    Self.logger.info("speechStart metadata skipped by debounce")
-                } else {
-                    self.sendSpeechStartMetadataIfNeeded(channel: channel)
-                }
-            }
             let micChannels = Int(format.mChannelsPerFrame)
             let micSampleRate = Int(format.mSampleRate)
             self.updateCaptureAudioInfo(sampleRate: micSampleRate, channels: micChannels)
@@ -163,9 +154,6 @@ final class OneToOneViewModel: NSObject {
             guard recordData.isEmpty == false else { return }
             let fileChunk = self.nextLeftFileAudioChunk(expectedLength: recordData.count)
             guard let channel else { return }
-            if fileChunk.startsNewCycle {
-                self.sendLeftFileSpeechStartMetadata(channel: channel)
-            }
             self.pushInputAudio(fileData: fileChunk.data, rightMicData: recordData, channel: channel)
         }
 
@@ -199,7 +187,6 @@ final class OneToOneViewModel: NSObject {
         closeAllPCMFiles()
         resetLocalPCMPlaybackState()
         setListeningActive(false)
-        lastSpeechStartMetadataAt = nil
         activePlaybackUID = nil
         playbackLaneByUID.removeAll()
         updateStateOnMain {
@@ -400,6 +387,16 @@ final class OneToOneViewModel: NSObject {
         }
         recreateRoomAndChannel(statusText: "在线一对一通道模式已切换，重新创建通道中...")
     }
+
+    /// 识别引擎在创建房间时下发，切换后沿用通道模式的释放并重建流程使新引擎生效。
+    func updateRecognizeEngine(_ recognizeEngine: TmkOnlineRecognizeEngine) {
+        guard selectedRecognizeEngine != recognizeEngine else { return }
+        selectedRecognizeEngine = recognizeEngine
+        updateStateOnMain {
+            $0.recognizeEngine = recognizeEngine
+        }
+        recreateRoomAndChannel(statusText: "在线一对一识别引擎已切换，重新创建通道中...")
+    }
 }
 
 enum DemoTmkResultLogFormatter {
@@ -496,6 +493,7 @@ private extension OneToOneViewModel {
             channelScenario: .oneToOne,
             speakers: configuredSpeakers(),
             translateEngine: selectedTranslateEngine,
+            recognizeEngine: selectedRecognizeEngine,
             dialogConversationAudioMode: selectedDialogConversationAudioMode,
             enableSensitiveWordRedaction: DemoSettingsStore().loadCurrentConfig().sensitiveWordRedactionEnabled ? .enabled : .disabled
         )
@@ -561,7 +559,6 @@ private extension OneToOneViewModel {
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
-        lastSpeechStartMetadataAt = nil
         voiceIO?.stop()
         closeAllPCMFiles()
         resetLocalPCMPlaybackState()
@@ -582,7 +579,6 @@ private extension OneToOneViewModel {
         closeAllPCMFiles()
         resetLocalPCMPlaybackState()
         setListeningActive(false)
-        lastSpeechStartMetadataAt = nil
         activePlaybackUID = nil
         targetPlaybackUIDs.removeAll()
         playbackLaneByUID.removeAll()
@@ -670,30 +666,6 @@ private extension OneToOneViewModel {
             case .speaker(let speakerChannel):
                 channel.pushStreamAudioData(plan.data, speakerChannel: speakerChannel, extraChunk: nil)
             }
-        }
-    }
-
-    func sendSpeechStartMetadataIfNeeded(channel: TmkTranslationChannel) {
-        let metadataChannels = selectedChannelModeConfiguration.speechStartMetadataChannelsForCurrentVADSource
-        for metadataChannel in metadataChannels {
-            let traceResult = channel.sendAudioMetadata(vadStatus: 0, channel: metadataChannel, baseTraceId: nil)
-            switch traceResult {
-            case .success(let traceId):
-                Self.logger.info("speechStart metadata channel=\(metadataChannel, privacy: .public) traceId=\(traceId, privacy: .public)")
-            case .failure(let error):
-                Self.logger.error("speechStart metadata channel=\(metadataChannel, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-    }
-
-    func sendLeftFileSpeechStartMetadata(channel: TmkTranslationChannel) {
-        let metadataChannel = OneToOneSpeechMetadataRouting.channelForLeftFileLoop()
-        let traceResult = channel.sendAudioMetadata(vadStatus: 0, channel: metadataChannel, baseTraceId: nil)
-        switch traceResult {
-        case .success(let traceId):
-            Self.logger.info("left file speechStart metadata channel=\(metadataChannel, privacy: .public) traceId=\(traceId, privacy: .public)")
-        case .failure(let error):
-            Self.logger.error("left file speechStart metadata channel=\(metadataChannel, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -1139,17 +1111,6 @@ private extension OneToOneViewModel {
         return isCaptureEnabled
     }
 
-    func shouldSendSpeechStartTrace(now: Date) -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        if let last = lastSpeechStartMetadataAt,
-           now.timeIntervalSince(last) <= speechStartTraceMinInterval {
-            return false
-        }
-        lastSpeechStartMetadataAt = now
-        return true
-    }
-
     func applyRuntimeAction(_ action: DemoConversationRuntimeAction) {
         switch action {
         case .none, .ignore:
@@ -1175,7 +1136,6 @@ private extension OneToOneViewModel {
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
-        lastSpeechStartMetadataAt = nil
         voiceIO?.stop()
         closeAllPCMFiles()
         resetLocalPCMPlaybackState()
@@ -1279,7 +1239,11 @@ extension OneToOneViewModel: TmkTranslationListener {
                     }
                 }
                 let playbackMode = self.getPlaybackMode()
-                let sourceLane = lane ?? (playbackMode == .left ? OneToOneRowViewData.Lane.left : .right)
+                let sourceLane = OneToOneTranslatedAudioSourceRouting.sourceLane(
+                    audioRoute: audioRoute,
+                    rawSpeakerChannel: result.extraData["speaker_channel"]
+                ) ?? (audioRoute == nil ? lane : nil)
+                    ?? (playbackMode == .left ? OneToOneRowViewData.Lane.left : .right)
                 guard let output = OneToOneTranslatedAudioPlaybackSelector.selectPlaybackData(
                     data: data,
                     channelCount: channelCount,
@@ -1344,7 +1308,6 @@ extension OneToOneViewModel: TmkTranslationListener {
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
-        lastSpeechStartMetadataAt = nil
         voiceIO?.stop()
         closeAllPCMFiles()
         resetLocalPCMPlaybackState()

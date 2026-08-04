@@ -73,6 +73,7 @@ struct OneToOneViewState: Equatable {
     var sourceLanguage: String = "zh-CN"
     var targetLanguage: String = "en-US"
     var translateEngine: TmkOnlineTranslateEngine = .fast
+    var recognizeEngine: TmkOnlineRecognizeEngine = .default
     var scenarioOption: OneToOneScenarioOption = .defaultOption
     var canStartListening: Bool = false
     var canStopListening: Bool = false

@@ -36,6 +36,16 @@ final class DemoSettingsViewModel {
         publishState()
     }
 
+    func setDiagnosisLevel(_ level: DemoDiagnosisLevel) {
+        state.draftConfig.diagnosisLevel = level
+        publishState()
+    }
+
+    func setDiagnosisAudioCaptureEnabled(_ enabled: Bool) {
+        state.draftConfig.diagnosisAudioCaptureEnabled = enabled
+        publishState()
+    }
+
     func setConsoleLogEnabled(_ enabled: Bool) {
         state.draftConfig.consoleLogEnabled = enabled
         publishState()

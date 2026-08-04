@@ -9,6 +9,8 @@ import TmkTranslationSDK
 struct DemoSettingsStore {
     private enum Key {
         static let diagnosisEnabled = "demo.settings.diagnosisEnabled"
+        static let diagnosisLevel = "demo.settings.diagnosisLevel"
+        static let diagnosisAudioCaptureEnabled = "demo.settings.diagnosisAudioCaptureEnabled"
         static let consoleLogEnabled = "demo.settings.consoleLogEnabled"
         static let networkEnvironment = "demo.settings.networkEnvironment"
         static let customNetworkBaseURLEnabled = "demo.settings.customNetworkBaseURLEnabled"
@@ -35,6 +37,8 @@ struct DemoSettingsStore {
             ?? DemoSettingsConfig.rayneoNetworkBaseURL
         let storedConfig = DemoSettingsConfig(
             diagnosisEnabled: userDefaults.bool(forKey: Key.diagnosisEnabled),
+            diagnosisLevel: DemoDiagnosisLevel(rawValue: userDefaults.string(forKey: Key.diagnosisLevel) ?? "") ?? .essential,
+            diagnosisAudioCaptureEnabled: userDefaults.bool(forKey: Key.diagnosisAudioCaptureEnabled),
             consoleLogEnabled: userDefaults.bool(forKey: Key.consoleLogEnabled),
             networkEnvironment: environment,
             customNetworkBaseURLEnabled: userDefaults.bool(forKey: Key.customNetworkBaseURLEnabled),
@@ -47,9 +51,11 @@ struct DemoSettingsStore {
         guard schemaVersion < DemoSettingsConfig.default.schemaVersion else {
             return storedConfig
         }
-        // 迁移旧 Demo 配置：默认打开日志，同时保留用户已选择的环境和 Mock 引擎设置。
+        // 迁移旧 Demo 配置：补齐新增诊断配置，同时保留用户已选择的环境和 Mock 引擎设置。
         let migratedConfig = DemoSettingsConfig(
             diagnosisEnabled: DemoSettingsConfig.default.diagnosisEnabled,
+            diagnosisLevel: DemoSettingsConfig.default.diagnosisLevel,
+            diagnosisAudioCaptureEnabled: DemoSettingsConfig.default.diagnosisAudioCaptureEnabled,
             consoleLogEnabled: DemoSettingsConfig.default.consoleLogEnabled,
             networkEnvironment: storedConfig.networkEnvironment,
             customNetworkBaseURLEnabled: schemaVersion >= 5 ? storedConfig.customNetworkBaseURLEnabled : false,
@@ -64,6 +70,8 @@ struct DemoSettingsStore {
 
     func save(_ config: DemoSettingsConfig) {
         userDefaults.set(config.diagnosisEnabled, forKey: Key.diagnosisEnabled)
+        userDefaults.set(config.diagnosisLevel.rawValue, forKey: Key.diagnosisLevel)
+        userDefaults.set(config.diagnosisAudioCaptureEnabled, forKey: Key.diagnosisAudioCaptureEnabled)
         userDefaults.set(config.consoleLogEnabled, forKey: Key.consoleLogEnabled)
         userDefaults.set(config.networkEnvironment.rawValue, forKey: Key.networkEnvironment)
         userDefaults.set(config.customNetworkBaseURLEnabled, forKey: Key.customNetworkBaseURLEnabled)

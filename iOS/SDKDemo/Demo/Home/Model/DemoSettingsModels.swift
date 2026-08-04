@@ -54,8 +54,16 @@ struct DemoSettingsViewState: Equatable {
     }
 }
 
+enum DemoDiagnosisLevel: String, CaseIterable {
+    case essential
+    case diagnostic
+    case trace
+}
+
 struct DemoSettingsConfig: Equatable {
     var diagnosisEnabled: Bool
+    var diagnosisLevel: DemoDiagnosisLevel
+    var diagnosisAudioCaptureEnabled: Bool
     var consoleLogEnabled: Bool
     var networkEnvironment: TmkTranslationNetworkEnvironment
     var customNetworkBaseURLEnabled: Bool
@@ -77,13 +85,15 @@ struct DemoSettingsConfig: Equatable {
     static var `default`: DemoSettingsConfig {
         DemoSettingsConfig(
             diagnosisEnabled: false,
+            diagnosisLevel: .essential,
+            diagnosisAudioCaptureEnabled: false,
             consoleLogEnabled: true,
             networkEnvironment: .test,
             customNetworkBaseURLEnabled: false,
             customNetworkBaseURL: rayneoNetworkBaseURL,
             sensitiveWordRedactionEnabled: true,
             mockEngineEnabled: false,
-            schemaVersion: 6
+            schemaVersion: 7
         )
     }
 
@@ -109,5 +119,18 @@ struct DemoSettingsConfig: Equatable {
         components.query = nil
         components.fragment = nil
         return components.string
+    }
+}
+
+extension DemoDiagnosisLevel {
+    var demoDisplayName: String {
+        switch self {
+        case .essential:
+            return "Essential"
+        case .diagnostic:
+            return "Diagnostic"
+        case .trace:
+            return "Trace"
+        }
     }
 }

@@ -1,6 +1,7 @@
 package co.timekettle.translation.sample
 
 import android.content.Context
+import co.timekettle.translation.config.TmkDiagnosisLevel
 import co.timekettle.translation.config.TmkTranslationNetworkEnvironment
 import java.net.URI
 
@@ -9,6 +10,10 @@ object DemoSettingsStore {
     private const val KEY_NETWORK_ENVIRONMENT = "network_environment"
     private const val KEY_CUSTOM_NETWORK_BASE_URL_ENABLED = "custom_network_base_url_enabled"
     private const val KEY_CUSTOM_NETWORK_BASE_URL = "custom_network_base_url"
+    private const val KEY_DIAGNOSIS_ENABLED = "diagnosis_enabled"
+    private const val KEY_DIAGNOSIS_LEVEL = "diagnosis_level"
+    private const val KEY_DIAGNOSIS_AUDIO_CAPTURE_ENABLED = "diagnosis_audio_capture_enabled"
+    private const val KEY_CONSOLE_LOG_ENABLED = "console_log_enabled"
     private const val KEY_SENSITIVE_WORD_REDACTION_ENABLED = "sensitive_word_redaction_enabled"
     const val RAYNEO_NETWORK_BASE_URL = "https://api-rayneo.timekettle.co"
 
@@ -67,6 +72,63 @@ object DemoSettingsStore {
         editor.apply()
     }
 
+    fun loadDiagnosisEnabled(context: Context): Boolean {
+        return context.applicationContext
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_DIAGNOSIS_ENABLED, false)
+    }
+
+    fun saveDiagnosisEnabled(context: Context, enabled: Boolean) {
+        context.applicationContext
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_DIAGNOSIS_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadDiagnosisLevel(context: Context): TmkDiagnosisLevel {
+        val raw = context.applicationContext
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_DIAGNOSIS_LEVEL, null)
+        return parseDiagnosisLevel(raw)
+    }
+
+    fun saveDiagnosisLevel(context: Context, level: TmkDiagnosisLevel) {
+        context.applicationContext
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_DIAGNOSIS_LEVEL, level.name)
+            .apply()
+    }
+
+    fun loadDiagnosisAudioCaptureEnabled(context: Context): Boolean {
+        return context.applicationContext
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_DIAGNOSIS_AUDIO_CAPTURE_ENABLED, false)
+    }
+
+    fun saveDiagnosisAudioCaptureEnabled(context: Context, enabled: Boolean) {
+        context.applicationContext
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_DIAGNOSIS_AUDIO_CAPTURE_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadConsoleLogEnabled(context: Context): Boolean {
+        return context.applicationContext
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_CONSOLE_LOG_ENABLED, true)
+    }
+
+    fun saveConsoleLogEnabled(context: Context, enabled: Boolean) {
+        context.applicationContext
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_CONSOLE_LOG_ENABLED, enabled)
+            .apply()
+    }
+
     fun loadSensitiveWordRedactionEnabled(context: Context): Boolean {
         return context.applicationContext
             .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -85,6 +147,12 @@ object DemoSettingsStore {
         val normalized = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return TmkTranslationNetworkEnvironment.TEST
         return supportedNetworkEnvironments.firstOrNull { it.name.equals(normalized, ignoreCase = true) }
             ?: TmkTranslationNetworkEnvironment.TEST
+    }
+
+    fun parseDiagnosisLevel(raw: String?): TmkDiagnosisLevel {
+        val normalized = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return TmkDiagnosisLevel.ESSENTIAL
+        return TmkDiagnosisLevel.entries.firstOrNull { it.name.equals(normalized, ignoreCase = true) }
+            ?: TmkDiagnosisLevel.ESSENTIAL
     }
 
     fun normalizeCustomNetworkBaseURL(raw: String?): String? {

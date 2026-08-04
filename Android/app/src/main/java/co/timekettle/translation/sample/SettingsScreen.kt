@@ -35,6 +35,7 @@ import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 
 import co.timekettle.offlinesdk.diagnosis.SdkDiagnosisManager
+import co.timekettle.translation.config.TmkDiagnosisLevel
 import co.timekettle.translation.config.TmkTranslationNetworkEnvironment
 import co.timekettle.translation.listener.AuthCallback
 import kotlinx.coroutines.Dispatchers
@@ -71,13 +72,16 @@ class SettingsScreen : Screen {
         var autoRefresh by remember { mutableStateOf(true) }
         var exportingDiagnosis by remember { mutableStateOf(false) }
         var environmentExpanded by remember { mutableStateOf(false) }
+        var diagnosisLevelExpanded by remember { mutableStateOf(false) }
         // 对齐 iOS 设置页:所有设置项(诊断/控制台/敏感词脱敏/网络环境/自定义URL 开关/URL)改动只更新 draft,
         // 一律不即时生效;点「确认并应用」才把 draft 落地(持久化 + 应用到运行时 + 重建 SDK)。
         // persisted 为已生效快照,确认成功后才 = draft;确认按钮启用条件用 draft != persisted 值比较。
         val initialConfig = remember {
             DemoDraftConfig(
-                diagnosisEnabled = SdkDiagnosisManager.isEnabled(),
-                consoleLogEnabled = SdkDiagnosisManager.isConsoleEnabled(),
+                diagnosisEnabled = DemoSettingsStore.loadDiagnosisEnabled(context),
+                diagnosisLevel = DemoSettingsStore.loadDiagnosisLevel(context),
+                diagnosisAudioCaptureEnabled = DemoSettingsStore.loadDiagnosisAudioCaptureEnabled(context),
+                consoleLogEnabled = DemoSettingsStore.loadConsoleLogEnabled(context),
                 networkEnvironment = DemoSettingsStore.loadNetworkEnvironment(context),
                 customBaseURLEnabled = DemoSettingsStore.loadCustomNetworkBaseURLEnabled(context),
                 customBaseURLInput = DemoSettingsStore.loadCustomNetworkBaseURL(context)
@@ -141,10 +145,14 @@ class SettingsScreen : Screen {
             isApplying = true
             onlineEngineStatus = DemoEngineStatus.CHECKING
             offlineEngineStatus = DemoEngineStatus.CHECKING
-            // 诊断/控制台是运行期开关(非 globalConfig 注入),在此刻统一生效——与网络设置同受确认按钮控制。
+            // 诊断/控制台在此刻统一生效；并写入配置，保证下次初始化仍使用已确认的状态。
             SdkDiagnosisManager.setEnabled(target.diagnosisEnabled)
             SdkDiagnosisManager.setConsoleEnabled(target.consoleLogEnabled)
-            // 网络设置持久化,供 SampleSdkConfig.globalConfig(context) 读取后重建 SDK。
+            // 设置持久化，供 SampleSdkConfig.globalConfig(context) 读取后重建 SDK。
+            DemoSettingsStore.saveDiagnosisEnabled(context, target.diagnosisEnabled)
+            DemoSettingsStore.saveDiagnosisLevel(context, target.diagnosisLevel)
+            DemoSettingsStore.saveDiagnosisAudioCaptureEnabled(context, target.diagnosisAudioCaptureEnabled)
+            DemoSettingsStore.saveConsoleLogEnabled(context, target.consoleLogEnabled)
             DemoSettingsStore.saveNetworkEnvironment(context, target.networkEnvironment)
             DemoSettingsStore.saveCustomNetworkBaseURLEnabled(context, target.customBaseURLEnabled)
             if (target.customBaseURLEnabled) {
@@ -223,6 +231,34 @@ class SettingsScreen : Screen {
             SectionLabel("SDK 配置")
             SettingToggle("诊断模式", "记录详细日志用于排查问题", draft.diagnosisEnabled) {
                 draft = draft.copy(diagnosisEnabled = it)
+            }
+            if (draft.diagnosisEnabled) {
+                SettingRow("日志级别", "控制诊断采集范围") {
+                    Box {
+                        TextButton(onClick = { diagnosisLevelExpanded = true }) {
+                            Text("${draft.diagnosisLevel.displayName()} ▾", color = PrimaryLight, fontSize = 13.sp)
+                        }
+                        DropdownMenu(
+                            expanded = diagnosisLevelExpanded,
+                            onDismissRequest = { diagnosisLevelExpanded = false },
+                        ) {
+                            TmkDiagnosisLevel.entries.forEach { level ->
+                                DropdownMenuItem(
+                                    text = { Text(level.displayName()) },
+                                    onClick = {
+                                        diagnosisLevelExpanded = false
+                                        draft = draft.copy(diagnosisLevel = level)
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+                if (draft.diagnosisLevel == TmkDiagnosisLevel.TRACE) {
+                    SettingToggle("PCM 采集", "采集音频 PCM 文件", draft.diagnosisAudioCaptureEnabled) {
+                        draft = draft.copy(diagnosisAudioCaptureEnabled = it)
+                    }
+                }
             }
             SettingToggle("控制台日志", "在 Logcat 输出日志", draft.consoleLogEnabled) {
                 draft = draft.copy(consoleLogEnabled = it)
@@ -402,6 +438,8 @@ class SettingsScreen : Screen {
  */
 private data class DemoDraftConfig(
     val diagnosisEnabled: Boolean,
+    val diagnosisLevel: TmkDiagnosisLevel,
+    val diagnosisAudioCaptureEnabled: Boolean,
     val consoleLogEnabled: Boolean,
     val networkEnvironment: TmkTranslationNetworkEnvironment,
     val customBaseURLEnabled: Boolean,
@@ -445,6 +483,12 @@ private fun DemoEngineStatus.color(): Color {
 }
 
 private fun TmkTranslationNetworkEnvironment.displayName(): String = name
+
+private fun TmkDiagnosisLevel.displayName(): String = when (this) {
+    TmkDiagnosisLevel.ESSENTIAL -> "Essential"
+    TmkDiagnosisLevel.DIAGNOSTIC -> "Diagnostic"
+    TmkDiagnosisLevel.TRACE -> "Trace"
+}
 
 @Composable
 private fun SectionLabel(text: String) {

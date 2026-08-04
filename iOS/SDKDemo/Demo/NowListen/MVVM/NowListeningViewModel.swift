@@ -34,6 +34,7 @@ final class NowListeningViewModel: NSObject {
     private var selectedTargetLang = "en-US"
     private var selectedSpeakerGender: TmkSpeakerGender = .female
     private var selectedTranslateEngine: TmkOnlineTranslateEngine = .accurate
+    private var selectedRecognizeEngine: TmkOnlineRecognizeEngine = .default
     private var selectedScenarioOption: NowListeningScenarioOption = .defaultOption
     private var supportedLanguages: Set<String> = []
     private var isAuthVerified = false
@@ -66,6 +67,7 @@ final class NowListeningViewModel: NSObject {
             $0.sourceLanguage = self.selectedSourceLang
             $0.targetLanguage = self.selectedTargetLang
             $0.translateEngine = self.selectedTranslateEngine
+            $0.recognizeEngine = self.selectedRecognizeEngine
             $0.scenarioOption = self.selectedScenarioOption
             $0.isCaptureEnabled = self.isCaptureEnabled
         }
@@ -275,6 +277,16 @@ final class NowListeningViewModel: NSObject {
         }
     }
 
+    /// 识别引擎在创建房间时下发，切换后沿用通道模式的释放并重建流程使新引擎生效。
+    func updateRecognizeEngine(_ recognizeEngine: TmkOnlineRecognizeEngine) {
+        guard selectedRecognizeEngine != recognizeEngine else { return }
+        selectedRecognizeEngine = recognizeEngine
+        updateStateOnMain {
+            $0.recognizeEngine = recognizeEngine
+        }
+        recreateRoomAndChannel(statusText: "在线收听识别引擎已切换，重新创建通道中...")
+    }
+
     func updateScenarioOption(_ option: NowListeningScenarioOption) {
         guard selectedScenarioOption != option else { return }
         guard let room else {
@@ -333,7 +345,7 @@ private extension NowListeningViewModel {
             channelScenario: .listen,
             speakers: configuredSpeakers(),
             translateEngine: selectedTranslateEngine,
-            enableSensitiveWordRedaction: settings.sensitiveWordRedactionEnabled ? .enabled : .disabled
+            recognizeEngine: selectedRecognizeEngine
         )
         TmkTranslationSDK.shared.createTmkTranslationRoom(config: roomConfig) { [weak self] roomResult in
             guard let self else { return }

@@ -22,6 +22,8 @@ final class DemoSettingsViewController: UIViewController {
     private let confirmButton = UIButton(type: .system)
 
     private let diagnosisSwitch = UISwitch()
+    private let diagnosisLevelButton = UIButton(type: .system)
+    private let diagnosisAudioCaptureSwitch = UISwitch()
     private let consoleLogSwitch = UISwitch()
     private let networkButton = UIButton(type: .system)
     private let customNetworkBaseURLSwitch = UISwitch()
@@ -41,6 +43,8 @@ final class DemoSettingsViewController: UIViewController {
     private let exportButton = UIButton(type: .system)
     private let versionLabel = UILabel()
     private let loadingIndicator = UIActivityIndicatorView(style: .medium)
+    private var diagnosisLevelRow = UIView()
+    private var diagnosisAudioCaptureRow = UIView()
     private var diagnosisSectionView = UIView()
 
     init(viewModel: DemoSettingsViewModel = DemoSettingsViewModel()) {
@@ -105,6 +109,7 @@ final class DemoSettingsViewController: UIViewController {
         networkButton.addTarget(self, action: #selector(onNetworkEnvironment), for: .touchUpInside)
 
         diagnosisSwitch.onTintColor = DemoTheme.primary
+        diagnosisAudioCaptureSwitch.onTintColor = DemoTheme.primary
         consoleLogSwitch.onTintColor = DemoTheme.primary
         customNetworkBaseURLSwitch.onTintColor = DemoTheme.primary
         sensitiveWordRedactionSwitch.onTintColor = DemoTheme.primary
@@ -113,6 +118,10 @@ final class DemoSettingsViewController: UIViewController {
         mockSwitch.alpha = 0.45
 
         diagnosisSwitch.addTarget(self, action: #selector(onDiagnosisChanged), for: .valueChanged)
+        diagnosisLevelButton.setTitleColor(DemoTheme.primaryLight, for: .normal)
+        diagnosisLevelButton.contentHorizontalAlignment = .right
+        diagnosisLevelButton.addTarget(self, action: #selector(onDiagnosisLevel), for: .touchUpInside)
+        diagnosisAudioCaptureSwitch.addTarget(self, action: #selector(onDiagnosisAudioCaptureChanged), for: .valueChanged)
         consoleLogSwitch.addTarget(self, action: #selector(onConsoleLogChanged), for: .valueChanged)
         customNetworkBaseURLSwitch.addTarget(self, action: #selector(onCustomNetworkBaseURLSwitchChanged), for: .valueChanged)
         sensitiveWordRedactionSwitch.addTarget(self, action: #selector(onSensitiveWordRedactionChanged), for: .valueChanged)
@@ -198,8 +207,12 @@ final class DemoSettingsViewController: UIViewController {
             make.width.equalTo(scrollView)
         }
 
+        diagnosisLevelRow = makeValueRow(title: "日志级别", hint: "控制诊断采集范围", valueView: diagnosisLevelButton)
+        diagnosisAudioCaptureRow = makeToggleRow(title: "PCM 采集", hint: "仅 Trace 采集音频 PCM 文件", control: diagnosisAudioCaptureSwitch)
         let sdkConfigSection = makeSection(title: "SDK 配置", rows: [
             makeToggleRow(title: "诊断模式", hint: "记录详细日志用于排查问题", control: diagnosisSwitch),
+            diagnosisLevelRow,
+            diagnosisAudioCaptureRow,
             makeToggleRow(title: "控制台日志", hint: "在 Xcode 控制台输出日志", control: consoleLogSwitch),
             makeToggleRow(title: "敏感词脱敏", hint: "仅在线翻译生效：对客户端可见文本启用敏感词脱敏", control: sensitiveWordRedactionSwitch),
             makeValueRow(title: "网络环境", hint: "当前 SDK 请求环境", valueView: networkButton),
@@ -255,6 +268,8 @@ final class DemoSettingsViewController: UIViewController {
 
     private func render(_ state: DemoSettingsViewState) {
         diagnosisSwitch.isOn = state.draftConfig.diagnosisEnabled
+        diagnosisLevelButton.setTitle("\(state.draftConfig.diagnosisLevel.demoDisplayName) ▾", for: .normal)
+        diagnosisAudioCaptureSwitch.isOn = state.draftConfig.diagnosisAudioCaptureEnabled
         consoleLogSwitch.isOn = state.draftConfig.consoleLogEnabled
         customNetworkBaseURLSwitch.isOn = state.draftConfig.customNetworkBaseURLEnabled
         sensitiveWordRedactionSwitch.isOn = state.draftConfig.sensitiveWordRedactionEnabled
@@ -273,6 +288,8 @@ final class DemoSettingsViewController: UIViewController {
         autoRefreshHintLabel.text = state.authInfo.autoRefreshDetail
         versionLabel.text = state.versionText
         diagnosisSectionView.isHidden = state.draftConfig.diagnosisEnabled == false
+        diagnosisLevelRow.isHidden = state.draftConfig.diagnosisEnabled == false
+        diagnosisAudioCaptureRow.isHidden = state.draftConfig.diagnosisEnabled == false || state.draftConfig.diagnosisLevel != .trace
         confirmButton.isEnabled = state.isConfirmEnabled
         confirmButton.alpha = state.isConfirmEnabled ? 1 : 0.5
         state.isApplying ? loadingIndicator.startAnimating() : loadingIndicator.stopAnimating()
@@ -301,6 +318,25 @@ final class DemoSettingsViewController: UIViewController {
 
     @objc private func onDiagnosisChanged() {
         viewModel.setDiagnosisEnabled(diagnosisSwitch.isOn)
+    }
+
+    @objc private func onDiagnosisLevel() {
+        let alert = UIAlertController(title: "日志级别", message: nil, preferredStyle: .actionSheet)
+        [.essential, .diagnostic, .trace].forEach { level in
+            alert.addAction(UIAlertAction(title: level.demoDisplayName, style: .default) { [weak self] _ in
+                self?.viewModel.setDiagnosisLevel(level)
+            })
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        if let popover = alert.popoverPresentationController {
+            popover.sourceView = diagnosisLevelButton
+            popover.sourceRect = diagnosisLevelButton.bounds
+        }
+        present(alert, animated: true)
+    }
+
+    @objc private func onDiagnosisAudioCaptureChanged() {
+        viewModel.setDiagnosisAudioCaptureEnabled(diagnosisAudioCaptureSwitch.isOn)
     }
 
     @objc private func onConsoleLogChanged() {

@@ -41,6 +41,7 @@ data class DualChannelScreen(
         val leftSpeakerGender by viewModel.leftSpeakerGender.collectAsState()
         val rightSpeakerGender by viewModel.rightSpeakerGender.collectAsState()
         val onlineTranslateEngine by viewModel.onlineTranslateEngine.collectAsState()
+        val onlineRecognizeEngine by viewModel.onlineRecognizeEngine.collectAsState()
         val roomScenarioOption by viewModel.roomScenarioOption.collectAsState()
         val audioMode by viewModel.audioMode.collectAsState()
         val playbackMode by viewModel.playbackMode.collectAsState()
@@ -48,6 +49,7 @@ data class DualChannelScreen(
         var showLocaleDialog by remember { mutableStateOf(false) }
         var showSpeakerDialog by remember { mutableStateOf(false) }
         var showTranslateEngineDialog by remember { mutableStateOf(false) }
+        var showRecognizeEngineDialog by remember { mutableStateOf(false) }
         var showRoomScenarioDialog by remember { mutableStateOf(false) }
         var showChannelAudioModeDialog by remember { mutableStateOf(false) }
         var showPlaybackModeDialog by remember { mutableStateOf(false) }
@@ -134,6 +136,13 @@ data class DualChannelScreen(
                             onClick = {
                                 settingsExpanded = false
                                 showTranslateEngineDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("识别引擎设置") },
+                            onClick = {
+                                settingsExpanded = false
+                                showRecognizeEngineDialog = true
                             },
                         )
                         DropdownMenuItem(
@@ -255,6 +264,17 @@ data class DualChannelScreen(
                 onConfirm = {
                     showTranslateEngineDialog = false
                     viewModel.updateTranslateEngine(it)
+                },
+            )
+        }
+
+        if (showRecognizeEngineDialog) {
+            OnlineRecognizeEngineDialog(
+                initialEngine = onlineRecognizeEngine,
+                onDismiss = { showRecognizeEngineDialog = false },
+                onConfirm = {
+                    showRecognizeEngineDialog = false
+                    viewModel.setOnlineRecognizeEngine(it)
                 },
             )
         }

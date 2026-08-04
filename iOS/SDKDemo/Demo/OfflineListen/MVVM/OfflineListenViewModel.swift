@@ -59,8 +59,6 @@ final class OfflineListenViewModel: NSObject {
     private var lastCaptureChannels = 0
     private var offlineSupportChecked = false
     private var offlineTranslationSupported = false
-    private var lastSpeechStartMetadataAt: Date?
-    private let speechStartTraceMinInterval: TimeInterval = 6
 
     /// 模型根目录（App Documents/tmkOfflineModel/）。
     private var modelRootDirectory: String {
@@ -192,7 +190,6 @@ final class OfflineListenViewModel: NSObject {
                                                                framesPerBuffer: 512))
         }
         guard let voiceIO else { return }
-        voiceIO.resolveVADState = nil
         configureInterruptionHandling(for: voiceIO)
         do {
             try voiceIO.activateAudioSession(sampleRate: 16000,
@@ -203,17 +200,8 @@ final class OfflineListenViewModel: NSObject {
             updateStatus("音频会话配置失败：\(error.localizedDescription)")
             return
         }
-        voiceIO.onInputPCM = { [weak self, weak channel] data, format, vadState in
+        voiceIO.onInputPCM = { [weak self, weak channel] data, format, _ in
             guard let self else { return }
-            if vadState == .speechStart, let channel {
-                let now = Date()
-                if self.shouldSendSpeechStartTrace(now: now) {
-                    let traceResult = channel.sendAudioMetadata(vadStatus: 0, channel: 1, baseTraceId: nil)
-                    if case .success(let traceId) = traceResult {
-                        NSLog("[OfflineListen] speechStart metadata traceId=%@", traceId)
-                    }
-                }
-            }
             let captureChannels = Int(format.mChannelsPerFrame)
             self.updateCaptureAudioInfo(sampleRate: Int(format.mSampleRate), channels: captureChannels)
             channel?.pushStreamAudioData(data, channelCount: captureChannels, extraChunk: nil)
@@ -241,7 +229,6 @@ final class OfflineListenViewModel: NSObject {
     func stopListening() {
         voiceIO?.stop()
         setListeningActive(false)
-        lastSpeechStartMetadataAt = nil
         updateStateOnMain {
             $0.canStopListening = false
             $0.canStartListening = self.channel != nil
@@ -639,7 +626,6 @@ private extension OfflineListenViewModel {
     func resetAndRecreateChannel(reason: String) {
         voiceIO?.stop()
         setListeningActive(false)
-        lastSpeechStartMetadataAt = nil
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         hasStoppedListening = false
@@ -666,7 +652,6 @@ private extension OfflineListenViewModel {
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
         voiceIO?.stop()
-        lastSpeechStartMetadataAt = nil
         voiceIO = nil
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
@@ -678,7 +663,6 @@ private extension OfflineListenViewModel {
         pendingRowsPublishWorkItem = nil
         voiceIO?.stop()
         setListeningActive(false)
-        lastSpeechStartMetadataAt = nil
         voiceIO = nil
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
@@ -710,7 +694,6 @@ private extension OfflineListenViewModel {
     func stopCurrentChannelForMissingModels() {
         voiceIO?.stop()
         setListeningActive(false)
-        lastSpeechStartMetadataAt = nil
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
     }
@@ -765,17 +748,6 @@ private extension OfflineListenViewModel {
         stateLock.lock()
         defer { stateLock.unlock() }
         return isListeningActive
-    }
-
-    func shouldSendSpeechStartTrace(now: Date) -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        if let last = lastSpeechStartMetadataAt,
-           now.timeIntervalSince(last) <= speechStartTraceMinInterval {
-            return false
-        }
-        lastSpeechStartMetadataAt = now
-        return true
     }
 
     func applyBubbleSnapshot(_ snapshot: DemoConversationBubbleSnapshot) {

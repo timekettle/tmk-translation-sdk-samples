@@ -20,7 +20,6 @@ enum DemoSDKConfigurationFactory {
             .setOnlineAuthContext(tenantId: defaultTenantId)
             .setLogEnabled(config.consoleLogEnabled)
             .setNetworkEnvironment(config.networkEnvironment)
-            .setDiagnosisEnabled(config.diagnosisEnabled)
         if config.customNetworkBaseURLEnabled,
            let baseURLString = config.normalizedCustomNetworkBaseURL,
            let baseURL = URL(string: baseURLString) {

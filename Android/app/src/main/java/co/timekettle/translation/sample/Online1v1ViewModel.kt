@@ -21,6 +21,7 @@ import co.timekettle.translation.config.TmkTranslationRoomConfig
 import co.timekettle.translation.core.AbstractChannelEngine
 import co.timekettle.translation.enums.Scenario
 import co.timekettle.translation.enums.TmkDialogConversationAudioMode
+import co.timekettle.translation.enums.TmkOnlineRecognizeEngine
 import co.timekettle.translation.enums.TmkOnlineTranslateEngine
 import co.timekettle.translation.enums.TmkSensitiveWordRedactionOption
 import co.timekettle.translation.enums.TmkTranslateDeliveryMode
@@ -91,7 +92,7 @@ class Online1v1ViewModel @Inject constructor(
     private val lifecycleGate = DemoConversationLifecycleGate()
     private val pageSessionId = AtomicInteger(0)
     private val isPreparingChannel = java.util.concurrent.atomic.AtomicBoolean(false)
-    /** 因切换通道模式而重建后,是否自动恢复收听(重建前正在收听时置 true)。 */
+    /** 因切换通道模式或识别引擎而重建后,是否自动恢复收听(重建前正在收听时置 true)。 */
     @Volatile private var pendingAutoStartAfterRecreate = false
     private var recordingThread: Thread? = null
     private val bubbleAssembler = DemoConversationBubbleAssembler()
@@ -177,6 +178,8 @@ class Online1v1ViewModel @Inject constructor(
     val rightSpeakerGender: StateFlow<SpeakerGender> = _rightSpeakerGender.asStateFlow()
     private val _onlineTranslateEngine = MutableStateFlow(TmkOnlineTranslateEngine.ACCURATE)
     val onlineTranslateEngine: StateFlow<TmkOnlineTranslateEngine> = _onlineTranslateEngine.asStateFlow()
+    private val _onlineRecognizeEngine = MutableStateFlow(TmkOnlineRecognizeEngine.DEFAULT)
+    val onlineRecognizeEngine: StateFlow<TmkOnlineRecognizeEngine> = _onlineRecognizeEngine.asStateFlow()
     private val _roomScenarioOption = MutableStateFlow(OnlineRoomScenarioOption.defaultOption)
     val roomScenarioOption: StateFlow<OnlineRoomScenarioOption> = _roomScenarioOption.asStateFlow()
     // 通道模式:标准(混合双声道单UID) / 低延迟(左右独立单声道双UID)。
@@ -204,6 +207,23 @@ class Online1v1ViewModel @Inject constructor(
         } else {
             addLog("通道模式切换为 $modeText，将在创建房间时生效")
             _statusText.value = "通道模式已切换为 $modeText"
+        }
+    }
+
+    /**
+     * 识别引擎在建房时下发，已创建房间或通道后无法热切换；因此沿用通道模式的释放并重建流程。
+     */
+    fun setOnlineRecognizeEngine(engine: TmkOnlineRecognizeEngine) {
+        if (_onlineRecognizeEngine.value == engine) return
+        _onlineRecognizeEngine.value = engine
+        val engineText = OnlineRecognizeEngineOption.from(engine).title
+        val hadChannel = channel != null || _isStarted.value || isPreparingChannel.get()
+        if (hadChannel) {
+            addLog("识别引擎切换为 $engineText，正在重建翻译引擎...")
+            recreateChannelForModeChange("正在以$engineText 识别引擎重建翻译引擎...")
+        } else {
+            addLog("识别引擎切换为 $engineText，将在创建房间时生效")
+            _statusText.value = "识别引擎已切换为 $engineText"
         }
     }
 
@@ -516,6 +536,7 @@ class Online1v1ViewModel @Inject constructor(
             .setTargetLang(channelLanguages.rightLang)
             .setSpeakers(currentSpeakers())
             .setOnlineTranslateEngine(_onlineTranslateEngine.value)
+            .setOnlineRecognizeEngine(_onlineRecognizeEngine.value)
             .setRoomScenario(_roomScenarioOption.value.roomScenario)
             .setTranslateMode(TmkTranslateDeliveryMode.PARTIAL)
             .setDialogConversationAudioMode(_audioMode.value)
@@ -610,7 +631,7 @@ class Online1v1ViewModel @Inject constructor(
                     if (!isActiveSession(sessionId)) return
                     _onlineTranslateEngine.value = engine
                     _isTranslateEngineUpdating.value = false
-                    addLog("翻译引擎切换成功: ${engine.name}(${engine.value})")
+                    addLog("翻译引擎切换成功: ${engine.name}(${engine})")
                     _statusText.value = "翻译引擎已切换，下一句话生效"
                 }
 
@@ -780,11 +801,16 @@ class Online1v1ViewModel @Inject constructor(
             _playbackChannels.value = channelCount
             // 立体声按播放音源拆一路(输出单声道)、非立体声直接播;低延迟单路帧仅播选中音源那一路。返回 null 则不播。
             val audioRoute = OneToOnePlaybackSelector.AudioRoute.from(r?.extraData?.get("audio_route"))
+            val speakerChannel = OneToOnePlaybackSelector.resolveOnlineSpeakerChannel(
+                audioRoute = audioRoute,
+                rawSpeakerChannel = r?.extraData?.get("speaker_channel"),
+            )
             val output = OneToOnePlaybackSelector.selectPlaybackData(
                 data = data,
                 channelCount = channelCount,
                 playbackMode = _playbackMode.value,
                 audioRoute = audioRoute,
+                speakerChannel = speakerChannel,
             ) ?: return
             // 按选择结果的真实声道数播放(立体声拆分后为单声道)。
             ttsPlayer.play(output.data, output.channelCount)

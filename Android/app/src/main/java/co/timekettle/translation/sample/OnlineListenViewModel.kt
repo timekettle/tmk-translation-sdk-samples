@@ -21,6 +21,7 @@ import co.timekettle.translation.config.TmkTransGlobalConfig
 import co.timekettle.translation.config.TmkTranslationRoomConfig
 import co.timekettle.translation.core.AbstractChannelEngine
 import co.timekettle.translation.enums.Scenario
+import co.timekettle.translation.enums.TmkOnlineRecognizeEngine
 import co.timekettle.translation.enums.TmkOnlineTranslateEngine
 import co.timekettle.translation.enums.TmkSensitiveWordRedactionOption
 import co.timekettle.translation.enums.TranslationMode
@@ -113,6 +114,8 @@ class OnlineListenViewModel @Inject constructor(
     private val lifecycleGate = DemoConversationLifecycleGate()
     private val pageSessionId = AtomicInteger(0)
     private val isPreparingChannel = java.util.concurrent.atomic.AtomicBoolean(false)
+    /** 因切换识别引擎而重建后,是否自动恢复收听(重建前正在收听时置 true)。 */
+    @Volatile private var pendingAutoStartAfterRecreate = false
     private var recordingThread: Thread? = null
 
     private val idleChannelSnapshot = TmkTranslationChannelStateSnapshot(
@@ -162,6 +165,8 @@ class OnlineListenViewModel @Inject constructor(
     val speakerGender: StateFlow<SpeakerGender> = _speakerGender.asStateFlow()
     private val _onlineTranslateEngine = MutableStateFlow(TmkOnlineTranslateEngine.ACCURATE)
     val onlineTranslateEngine: StateFlow<TmkOnlineTranslateEngine> = _onlineTranslateEngine.asStateFlow()
+    private val _onlineRecognizeEngine = MutableStateFlow(TmkOnlineRecognizeEngine.DEFAULT)
+    val onlineRecognizeEngine: StateFlow<TmkOnlineRecognizeEngine> = _onlineRecognizeEngine.asStateFlow()
     private val _roomScenarioOption = MutableStateFlow(OnlineRoomScenarioOption.defaultOption)
     val roomScenarioOption: StateFlow<OnlineRoomScenarioOption> = _roomScenarioOption.asStateFlow()
     private var hasLockedLanguages = false
@@ -230,6 +235,23 @@ class OnlineListenViewModel @Inject constructor(
     fun setLanguagesIfNeeded(sourceLang: String, targetLang: String) {
         if (hasLockedLanguages) return
         _sourceLang.value = sourceLang; _targetLang.value = targetLang; hasLockedLanguages = true
+    }
+
+    /**
+     * 识别引擎在建房时下发，已创建房间或通道后无法热切换；因此沿用通道模式的释放并重建流程。
+     */
+    fun setOnlineRecognizeEngine(engine: TmkOnlineRecognizeEngine) {
+        if (_onlineRecognizeEngine.value == engine) return
+        _onlineRecognizeEngine.value = engine
+        val engineText = OnlineRecognizeEngineOption.from(engine).title
+        val hadChannel = channel != null || _isStarted.value || isPreparingChannel.get()
+        if (hadChannel) {
+            log("识别引擎切换为 $engineText，正在重建翻译引擎...")
+            recreateChannelForRecognizeEngineChange("正在以$engineText 识别引擎重建翻译引擎...")
+        } else {
+            log("识别引擎切换为 $engineText，将在创建房间时生效")
+            _statusText.value = "识别引擎已切换为 $engineText"
+        }
     }
 
     private fun nextPageSession(): Int = pageSessionId.incrementAndGet()
@@ -410,6 +432,10 @@ class OnlineListenViewModel @Inject constructor(
                         log("Channel 已就绪")
                         // 通道就绪:若建房窗口内改过语言,补发对齐服务端(见 bug 7024923916)。
                         reconcilePendingLocaleIfNeeded(sessionId)
+                        if (pendingAutoStartAfterRecreate) {
+                            pendingAutoStartAfterRecreate = false
+                            startTranslation()
+                        }
                     }
                     override fun onError(errorId: Int, e: Exception) {
                         channelCancelable = null
@@ -439,6 +465,7 @@ class OnlineListenViewModel @Inject constructor(
             .setTargetLang(_targetLang.value)
             .setSpeakers(listOf(TmkSpeaker(SpeakerChannel.LEFT, _speakerGender.value)))
             .setOnlineTranslateEngine(_onlineTranslateEngine.value)
+            .setOnlineRecognizeEngine(_onlineRecognizeEngine.value)
             .setRoomScenario(_roomScenarioOption.value.roomScenario)
             .setEnableSensitiveWordRedaction(
                 if (DemoSettingsStore.loadSensitiveWordRedactionEnabled(application)) {
@@ -567,7 +594,7 @@ class OnlineListenViewModel @Inject constructor(
                     _onlineTranslateEngine.value = engine
                     _isTranslateEngineUpdating.value = false
                     _statusText.value = "翻译引擎已切换，下一句话生效"
-                    log("翻译引擎切换成功: ${engine.name}(${engine.value})")
+                    log("翻译引擎切换成功: ${engine.name}(${engine})")
                 }
 
                 override fun onError(errorId: Int, e: Exception) {
@@ -743,6 +770,16 @@ class OnlineListenViewModel @Inject constructor(
         clearConversation()
         _statusText.value = "正在重新创建通道..."
         lifecycleGate.reopen()
+        initSDK()
+    }
+
+    private fun recreateChannelForRecognizeEngineChange(status: String) {
+        val wasListening = _isStarted.value
+        stopTranslation(status)
+        clearConversation()
+        _statusText.value = status
+        lifecycleGate.reopen()
+        pendingAutoStartAfterRecreate = wasListening
         initSDK()
     }
 
@@ -967,6 +1004,7 @@ class OnlineListenViewModel @Inject constructor(
         if (!lifecycleGate.tryRelease()) return
         nextPageSession()
         isPreparingChannel.set(false)
+        pendingAutoStartAfterRecreate = false
         roomCancelable?.cancel()
         roomCancelable = null
         channelCancelable?.cancel()

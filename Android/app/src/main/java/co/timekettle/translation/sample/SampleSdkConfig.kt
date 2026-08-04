@@ -1,6 +1,8 @@
 package co.timekettle.translation.sample
 
 import android.content.Context
+import co.timekettle.translation.config.TmkDiagnosisConfig
+import co.timekettle.translation.config.TmkDiagnosisLevel
 import co.timekettle.translation.config.TmkTransGlobalConfig
 import co.timekettle.translation.config.TmkTranslationNetworkEnvironment
 
@@ -14,6 +16,10 @@ object SampleSdkConfig {
         networkEnvironment: TmkTranslationNetworkEnvironment = TmkTranslationNetworkEnvironment.TEST,
         customNetworkBaseURLEnabled: Boolean = false,
         customNetworkBaseURL: String? = null,
+        diagnosisEnabled: Boolean = false,
+        diagnosisLevel: TmkDiagnosisLevel = TmkDiagnosisLevel.ESSENTIAL,
+        diagnosisAudioCaptureEnabled: Boolean = false,
+        diagnosisConsoleEnabled: Boolean = true,
     ): TmkTransGlobalConfig {
         check(BuildConfig.TMK_SAMPLE_APP_ID.isNotBlank()) {
             "Missing $ENV_APP_ID. Export it in your shell or configure it in $USER_GRADLE_PROPERTIES_PATH."
@@ -26,6 +32,15 @@ object SampleSdkConfig {
             .setAuth(BuildConfig.TMK_SAMPLE_APP_ID, BuildConfig.TMK_SAMPLE_APP_SECRET)
             .setOnlineAuthContext(tenantId = "timekettle")
             .setNetworkEnvironment(networkEnvironment)
+            .setDiagnosisConfig(
+                TmkDiagnosisConfig(
+                    enabled = diagnosisEnabled,
+                    level = diagnosisLevel,
+                    rootDirectory = null,
+                    audioCaptureEnabled = diagnosisLevel == TmkDiagnosisLevel.TRACE && diagnosisAudioCaptureEnabled,
+                )
+            )
+            .setDiagnosisConsoleEnabled(diagnosisConsoleEnabled)
         val normalizedBaseURL = DemoSettingsStore.normalizeCustomNetworkBaseURL(customNetworkBaseURL)
         if (customNetworkBaseURLEnabled && normalizedBaseURL != null) {
             builder.setNetworkBaseURL(normalizedBaseURL)
@@ -38,6 +53,10 @@ object SampleSdkConfig {
             networkEnvironment = DemoSettingsStore.loadNetworkEnvironment(context),
             customNetworkBaseURLEnabled = DemoSettingsStore.loadCustomNetworkBaseURLEnabled(context),
             customNetworkBaseURL = DemoSettingsStore.loadCustomNetworkBaseURL(context),
+            diagnosisEnabled = DemoSettingsStore.loadDiagnosisEnabled(context),
+            diagnosisLevel = DemoSettingsStore.loadDiagnosisLevel(context),
+            diagnosisAudioCaptureEnabled = DemoSettingsStore.loadDiagnosisAudioCaptureEnabled(context),
+            diagnosisConsoleEnabled = DemoSettingsStore.loadConsoleLogEnabled(context),
         )
     }
 

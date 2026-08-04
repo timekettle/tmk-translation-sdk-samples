@@ -170,23 +170,7 @@ enum DemoConversationEventAdapter {
         if text.isEmpty {
             return isFinal
         }
-        return containsMeaningfulContent(text)
-    }
-
-    private static func containsMeaningfulContent(_ text: String) -> Bool {
-        for scalar in text.unicodeScalars {
-            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
-                continue
-            }
-            if CharacterSet.punctuationCharacters.contains(scalar) {
-                continue
-            }
-            if CharacterSet.symbols.contains(scalar) {
-                continue
-            }
-            return true
-        }
-        return false
+        return true
     }
 }
 

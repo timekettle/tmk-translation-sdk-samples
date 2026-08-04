@@ -220,7 +220,7 @@ object DemoConversationEventAdapter {
 
     private fun isDisplayable(text: String, isFinal: Boolean): Boolean {
         if (text.isEmpty()) return isFinal
-        return text.any { !it.isWhitespace() && !it.isPunctuationOrSymbol() }
+        return true
     }
 }
 

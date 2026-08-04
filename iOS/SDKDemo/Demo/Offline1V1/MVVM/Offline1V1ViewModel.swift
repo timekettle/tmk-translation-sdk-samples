@@ -138,8 +138,6 @@ final class Offline1V1ViewModel: NSObject {
     private let stateLock = NSLock()
     private var isListeningActive = false
     private var playbackMode: OneToOnePlaybackMode = .left
-    private var lastSpeechStartMetadataAt: Date?
-    private let speechStartTraceMinInterval: TimeInterval = 6
 
     // 每帧音频回调的 state 发布去重基线：playbackChannels / capture 信息在整通话中几乎恒定，
     // 无守卫会导致每帧 TTS/录音帧都深拷贝含 rows 的 OneToOneViewState 并触发 @Published 全量发布 +
@@ -297,7 +295,6 @@ final class Offline1V1ViewModel: NSObject {
                                                                framesPerBuffer: 1024))
         }
         guard let voiceIO else { return }
-        voiceIO.resolveVADState = nil
         hasStoppedListening = false
         configureInterruptionHandling(for: voiceIO)
         do {
@@ -309,11 +306,8 @@ final class Offline1V1ViewModel: NSObject {
             updateStatus("音频会话配置失败：\(error.localizedDescription)")
             return
         }
-        voiceIO.onInputPCM = { [weak self, weak channel] data, format, vadState in
+        voiceIO.onInputPCM = { [weak self, weak channel] data, format, _ in
             guard let self else { return }
-            if vadState == .speechStart, let channel {
-                self.sendRightMicSpeechStartMetadataIfNeeded(channel: channel)
-            }
             let captureChannels = Int(format.mChannelsPerFrame)
             self.updateCaptureAudioInfo(sampleRate: Int(format.mSampleRate), channels: captureChannels)
             // 本地音频 -> 左声道，麦克风录音 -> 右声道。
@@ -321,9 +315,6 @@ final class Offline1V1ViewModel: NSObject {
             guard recordData.isEmpty == false else { return }
             let fileChunk = self.nextLeftFileAudioChunk(expectedLength: recordData.count)
             guard let channel else { return }
-            if fileChunk.startsNewCycle {
-                self.sendLeftFileSpeechStartMetadata(channel: channel)
-            }
             let plans = self.channelModeConfiguration.makeInputAudioPushPlan(fileData: fileChunk.data, rightMicData: recordData)
             for plan in plans {
                 switch plan.destination {
@@ -358,7 +349,6 @@ final class Offline1V1ViewModel: NSObject {
         voiceIO?.stop()
         resetLocalPCMPlaybackState()
         setListeningActive(false)
-        lastSpeechStartMetadataAt = nil
         // 复位每帧发布去重基线：下次开始收听时首帧会重新发布一次采集/回放信息。
         lastPlaybackChannels = 0
         lastCaptureSampleRate = 0
@@ -847,31 +837,6 @@ private extension Offline1V1ViewModel {
         return speakers
     }
 
-    func sendRightMicSpeechStartMetadataIfNeeded(channel: TmkTranslationChannel) {
-        guard shouldSendSpeechStartTrace(now: Date()) else { return }
-        for metadataChannel in selectedChannelModeConfiguration.speechStartMetadataChannelsForCurrentVADSource {
-            sendSpeechStartMetadata(channel: channel,
-                                    metadataChannel: metadataChannel,
-                                    label: "right mic")
-        }
-    }
-
-    func sendLeftFileSpeechStartMetadata(channel: TmkTranslationChannel) {
-        sendSpeechStartMetadata(channel: channel,
-                                metadataChannel: OneToOneSpeechMetadataRouting.channelForLeftFileLoop(),
-                                label: "left file")
-    }
-
-    func sendSpeechStartMetadata(channel: TmkTranslationChannel, metadataChannel: UInt8, label: String) {
-        let traceResult = channel.sendAudioMetadata(vadStatus: 0, channel: metadataChannel, baseTraceId: nil)
-        switch traceResult {
-        case .success(let traceId):
-            NSLog("[Offline1V1] %@ speechStart metadata channel=%d traceId=%@", label, metadataChannel, traceId)
-        case .failure(let error):
-            NSLog("[Offline1V1] %@ speechStart metadata channel=%d failed=%@", label, metadataChannel, error.localizedDescription)
-        }
-    }
-
     func stopListeningIfNeeded() {
         guard hasStoppedListening == false else { return }
         hasStoppedListening = true
@@ -880,7 +845,6 @@ private extension Offline1V1ViewModel {
         setListeningActive(false)
         voiceIO?.stop()
         resetLocalPCMPlaybackState()
-        lastSpeechStartMetadataAt = nil
         voiceIO = nil
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
@@ -893,7 +857,6 @@ private extension Offline1V1ViewModel {
         voiceIO?.stop()
         resetLocalPCMPlaybackState()
         setListeningActive(false)
-        lastSpeechStartMetadataAt = nil
         // 复位每帧发布去重基线：本方法清 playbackChannels=0，重启收听后须能重新发布一次，否则守卫误判致 UI 停在 0。
         lastPlaybackChannels = 0
         lastCaptureSampleRate = 0
@@ -927,7 +890,6 @@ private extension Offline1V1ViewModel {
         voiceIO?.stop()
         resetLocalPCMPlaybackState()
         setListeningActive(false)
-        lastSpeechStartMetadataAt = nil
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
     }
@@ -1007,17 +969,6 @@ private extension Offline1V1ViewModel {
         stateLock.lock()
         defer { stateLock.unlock() }
         return isListeningActive
-    }
-
-    func shouldSendSpeechStartTrace(now: Date) -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        if let last = lastSpeechStartMetadataAt,
-           now.timeIntervalSince(last) <= speechStartTraceMinInterval {
-            return false
-        }
-        lastSpeechStartMetadataAt = now
-        return true
     }
 
     func extractChannel(from result: TmkResult<String>) -> OneToOneRowViewData.Lane {
