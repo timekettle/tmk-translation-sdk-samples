@@ -4,6 +4,7 @@ import co.timekettle.translation.TmkTranslationSDK
 import android.content.Context
 import android.content.Intent
 import android.widget.Toast
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -57,6 +58,7 @@ private val DangerColor = Color(0xFFFF6B6B)
 
 class SettingsScreen : Screen {
 
+    @OptIn(ExperimentalFoundationApi::class)
     @Composable
     override fun Content() {
         val navigator = LocalNavigator.currentOrThrow
