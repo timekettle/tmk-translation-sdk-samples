@@ -1,3 +1,8 @@
 .DS_Store
 # CocoaPods
 Pods/
+
+.gradle-user/
+.tmp/
+
+.docs/

@@ -1,0 +1,307 @@
+require 'shellwords'
+require 'base64'
+
+# This file contains the fastlane.tools configuration
+# You can find the documentation at https://docs.fastlane.tools
+#
+# For a list of all available actions, check out
+#
+#     https://docs.fastlane.tools/actions
+#
+# For a list of all available plugins, check out
+#
+#     https://docs.fastlane.tools/plugins/available-plugins
+#
+
+# Uncomment the line if you want fastlane to automatically update itself
+# update_fastlane
+
+default_platform(:ios)
+
+# 工程固定使用共享的 Runner Scheme；Ad Hoc 和 App Store 都使用 Release 配置。
+$scheme = "Runner"
+$workspace = "Runner.xcworkspace"
+$required_env_vars = ['MATCH_GIT_TOKEN', 'MATCH_PASSWORD', 'ASC_ISSUER_ID', 'ASC_KEY_ID', 'ASC_PRIVATE_KEY']
+
+platform :ios do
+  # 获取 app identifier 的辅助方法
+  def get_app_identifier
+    CredentialsManager::AppfileConfig.try_fetch_value(:app_identifier)
+  end
+
+  # 通过 match 结果动态注入 profile，避免依赖 project.pbxproj 中写死的名称
+  def resolve_signing_overrides(app_id:, type:)
+    normalized_app_id = app_id.to_s.gsub(/[^a-zA-Z0-9]/, '_')
+    profile_uuid = ENV["sigh_#{normalized_app_id}_#{type}"]
+    profile_mapping = lane_context[SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING] || {}
+    profile_name = profile_mapping[app_id]
+
+    xcargs = []
+    xcargs << "CODE_SIGN_STYLE=Manual"
+    xcargs << "CODE_SIGN_IDENTITY=#{Shellwords.escape('Apple Distribution')}"
+    xcargs << "DEVELOPMENT_TEAM=FK9K4NGB5Q"
+
+    {
+      profile_name: profile_name,
+      profile_uuid: profile_uuid,
+      xcargs: xcargs.join(' ')
+    }
+  end
+
+  # Fastlane 从 ios/ 目录运行，Flutter 工程根目录在上一级。
+  # 这里只生成 Flutter/Xcode 配置，实际归档仍由 build_app 完成。
+  # APP_VERSION/BUILD_NUMBER 来自 CI 的 tag 解析结果，必须显式传入，
+  # 否则 Xcode 会回退到 pubspec.yaml 里的默认版本号，导致 IPA 文件名和 tag 不一致。
+  def prepare_flutter_build
+    Dir.chdir("..") do
+      sh("flutter pub get")
+      args = ["flutter", "build", "ios", "--release", "--config-only"]
+      args += ["--build-name=#{ENV['APP_VERSION']}"] if ENV["APP_VERSION"] && !ENV["APP_VERSION"].empty?
+      args += ["--build-number=#{ENV['BUILD_NUMBER']}"] if ENV["BUILD_NUMBER"] && !ENV["BUILD_NUMBER"].empty?
+      sh(args.shelljoin)
+    end
+  end
+
+  def match_signing(type:, app_id:, api_key:, readonly: true, force_for_new_devices: false)
+    options = {
+      type: type,
+      app_identifier: app_id,
+      api_key: api_key,
+      git_url: "https://github.com/timekettle/ios-certificates.git",
+      git_basic_authorization: Base64.strict_encode64("x-access-token:#{ENV['MATCH_GIT_TOKEN']}"),
+      git_branch: "main",
+      readonly: readonly,
+      verbose: false,
+    }
+    options[:force_for_new_devices] = true if force_for_new_devices
+    match(options)
+  end
+
+  def build_signed_ipa(app_id:, export_method:, signing:)
+    build_options = {
+      workspace: $workspace,
+      scheme: $scheme,
+      export_method: export_method,
+      configuration: "Release",
+      output_directory: "./build",
+      xcargs: signing[:xcargs],
+    }
+
+    unless signing[:profile_name].to_s.empty?
+      build_options[:export_options] = {
+        provisioningProfiles: {
+          app_id => signing[:profile_name]
+        }
+      }
+    end
+
+    build_app(build_options)
+  end
+
+  def apply_runner_signing(signing:)
+    update_code_signing_settings(
+      path: "Runner.xcodeproj",
+      targets: ["Runner"],
+      build_configurations: ["Release"],
+      use_automatic_signing: false,
+      team_id: "FK9K4NGB5Q",
+      code_sign_identity: "Apple Distribution",
+      profile_name: signing[:profile_name],
+      profile_uuid: signing[:profile_uuid]
+    )
+  end
+  
+  # 验证环境变量和先决条件
+  lane :verify_environment do |options|
+    match_type = options[:type] || 'adhoc'
+    
+    UI.header("🔍 验证环境配置")
+    
+    # 检查必需的环境变量
+    missing_vars = $required_env_vars.select { |var| ENV[var].nil? || ENV[var].empty? }
+    
+    if missing_vars.any?
+      UI.error("❌ 缺少以下环境变量: #{missing_vars.join(', ')}")
+      UI.error("请在 GitHub Secrets 或本地环境中设置这些变量")
+      UI.user_error!("环境变量配置不完整")
+    end
+    
+    app_id = get_app_identifier
+    UI.success("✅ 环境变量配置完整")
+    UI.message("📱 App Identifier: #{app_id}")
+    UI.message("🔐 Match Type: #{match_type}")
+    UI.message("🌿 Git Branch: main")
+    UI.message("🔒 Readonly Mode: #{ENV['CI'] ? 'true (CI environment)' : 'false (local)'}")
+    
+    if ENV['CI']
+      UI.important("⚠️  在 CI 环境中运行，证书必须预先存在于 ios-certificates 仓库")
+      UI.important("如果遇到证书未找到错误，请先运行: fastlane setup_certificates type:#{match_type} (在本地)")
+    end
+  end
+  
+  lane :pre_build do |options|
+    # 设置 CI 环境
+    setup_ci if ENV['CI']
+
+    # 从传入的选项中获取 in_house 参数
+    is_adhoc = options[:is_adhoc] || false
+    
+    # 连接 appstore 获取 api_key
+    if is_adhoc
+      api_key = app_store_connect_api_key(
+        issuer_id: ENV["ASC_ISSUER_ID"],
+        key_id: ENV["ASC_KEY_ID"],
+        key_content: ENV["ASC_PRIVATE_KEY"],
+        is_key_content_base64: true,
+        in_house: false
+      )
+    else
+      api_key = app_store_connect_api_key(
+        issuer_id: ENV["ASC_ISSUER_ID"],
+        key_id: ENV["ASC_KEY_ID"],
+        key_content: ENV["ASC_PRIVATE_KEY"],
+        is_key_content_base64: true
+      )
+    end
+  end
+
+  lane :post_build do
+    # 获取构建生成的 IPA 文件路径
+    ipa_path = lane_context[SharedValues::IPA_OUTPUT_PATH]
+    # 只在 CI 环境中设置 GITHUB_ENV
+    if ENV['CI'] && ENV['GITHUB_ENV']
+      sh("echo 'IPA_PATH=#{ipa_path}' >> $GITHUB_ENV")
+    end
+    UI.success("IPA 文件路径: #{ipa_path}")
+  end
+
+  desc "Build and Upload to Pyger"
+  lane :beta do
+    # 验证环境配置
+    verify_environment(type: 'adhoc')
+    
+    pre_build(is_adhoc: true)
+
+    prepare_flutter_build
+
+    # 匹配证书和配置文件 https://docs.fastlane.tools/actions/match/
+    api_key = lane_context[SharedValues::APP_STORE_CONNECT_API_KEY]
+    
+    # 显式指定 app_identifier 以确保 match 使用正确的标识符
+    app_id = get_app_identifier
+    UI.message("📱 App Identifier: #{app_id}")
+    UI.message("🔐 Match Type: adhoc")
+    UI.message("🌿 Git Branch: main")
+    
+    match_signing(type: 'adhoc', app_id: app_id, api_key: api_key)
+
+    signing = resolve_signing_overrides(app_id: app_id, type: 'adhoc')
+    UI.message("🔐 使用动态签名配置: #{signing[:profile_name] || 'UUID only'}")
+    apply_runner_signing(signing: signing)
+
+    # 构建应用 https://docs.fastlane.tools/actions/build_app/#build_app
+    build_signed_ipa(
+      app_id: app_id,
+      export_method: 'ad-hoc',
+      signing: signing
+    )
+
+    post_build
+  end
+
+  desc "Upload to TestFlight / ASC"
+  lane :beta_and_upload_to_testflight do
+    # 验证环境配置
+    verify_environment(type: 'appstore')
+    
+    pre_build(is_adhoc: false)
+
+    prepare_flutter_build
+
+    # 匹配证书和配置文件 https://docs.fastlane.tools/actions/match/
+    api_key = lane_context[SharedValues::APP_STORE_CONNECT_API_KEY]
+    
+    # 显式指定 app_identifier 以确保 match 使用正确的标识符
+    app_id = get_app_identifier
+    UI.message("📱 App Identifier: #{app_id}")
+    UI.message("🔐 Match Type: appstore")
+    UI.message("🌿 Git Branch: main")
+    
+    match_signing(type: 'appstore', app_id: app_id, api_key: api_key)
+
+    signing = resolve_signing_overrides(app_id: app_id, type: 'appstore')
+    UI.message("🔐 使用动态签名配置: #{signing[:profile_name] || 'UUID only'}")
+    apply_runner_signing(signing: signing)
+
+    # 构建应用 https://docs.fastlane.tools/actions/build_app/#build_app
+    build_signed_ipa(
+      app_id: app_id,
+      export_method: 'app-store',
+      signing: signing
+    )
+
+    post_build
+
+    # 上传 TestFlight；正式 App Store 提交应使用独立的 deliver lane。
+    pilot(
+        api_key: api_key,
+        skip_waiting_for_build_processing: true
+    )
+  end
+  
+  desc "设置证书 - 在本地运行以创建和上传证书到 ios-certificates 仓库"
+  desc "Setup Certificates - Run locally to create and upload certificates to ios-certificates repo"
+  lane :setup_certificates do |options|
+    cert_type = options[:type] || 'adhoc'
+    
+    UI.header("🔐 设置 #{cert_type} 证书")
+    
+    if ENV['CI']
+      UI.user_error!("❌ 此操作不能在 CI 环境中运行。请在本地 Mac 上运行。")
+    end
+    
+    # 检查必需的环境变量
+    missing_vars = $required_env_vars.select { |var| ENV[var].nil? || ENV[var].empty? }
+    
+    if missing_vars.any?
+      UI.error("❌ 缺少以下环境变量: #{missing_vars.join(', ')}")
+      UI.message("\n请设置环境变量:")
+      missing_vars.each do |var|
+        UI.message("  export #{var}='your_value_here'")
+      end
+      UI.user_error!("环境变量配置不完整")
+    end
+    
+    app_id = get_app_identifier
+    
+    UI.success("✅ 环境变量配置完整")
+    UI.message("📱 App Identifier: #{app_id}")
+    UI.message("🔐 Certificate Type: #{cert_type}")
+    UI.message("")
+    UI.important("此操作将:")
+    UI.message("  1. 在 Apple Developer Portal 创建证书和配置文件")
+    UI.message("  2. 将它们加密并存储到 ios-certificates 仓库")
+    UI.message("  3. 安装到你的本地 keychain")
+    UI.message("")
+    
+    # 连接 App Store Connect
+    api_key = app_store_connect_api_key(
+      issuer_id: ENV["ASC_ISSUER_ID"],
+      key_id: ENV["ASC_KEY_ID"],
+      key_content: ENV["ASC_PRIVATE_KEY"],
+      is_key_content_base64: true
+    )
+    
+    # 创建并上传证书
+    match_signing(
+      type: cert_type,
+      app_id: app_id,
+      api_key: api_key,
+      readonly: false,
+      force_for_new_devices: true
+    )
+    
+    UI.success("✅ 证书设置完成!")
+    UI.success("现在可以在 CI 中运行构建了")
+  end
+end
