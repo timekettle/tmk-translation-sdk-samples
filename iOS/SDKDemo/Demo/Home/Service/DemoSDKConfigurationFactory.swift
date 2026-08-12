@@ -19,6 +19,7 @@ enum DemoSDKConfigurationFactory {
             .setAuth(appId: credentials.appId, secret: credentials.appSecret)
             .setOnlineAuthContext(tenantId: defaultTenantId)
             .setLogEnabled(config.consoleLogEnabled)
+            .setDiagnosisConfig(makeDiagnosisConfig(from: config))
             .setNetworkEnvironment(config.networkEnvironment)
         if config.customNetworkBaseURLEnabled,
            let baseURLString = config.normalizedCustomNetworkBaseURL,
@@ -26,6 +27,14 @@ enum DemoSDKConfigurationFactory {
             _ = builder.setNetworkBaseURL(baseURL)
         }
         return builder.build()
+    }
+
+    static func makeDiagnosisConfig(from config: DemoSettingsConfig) -> TmkDiagnosisConfig {
+        TmkDiagnosisConfig(
+            enabled: config.diagnosisEnabled,
+            level: TmkDiagnosisLevel(rawValue: config.diagnosisLevel.rawValue) ?? .essential,
+            audioCaptureEnabled: config.diagnosisAudioCaptureEnabled
+        )
     }
 
     static func onlineAuthFailureMessage(_ error: Error) -> String {

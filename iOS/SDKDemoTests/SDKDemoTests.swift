@@ -7,8 +7,30 @@
 
 import XCTest
 @testable import SDKDemo
+import TmkTranslationSDK
 
 final class SDKDemoTests: XCTestCase {
+
+    func testDiagnosisConfigMapsEnabledLevelAndAudioCapture() {
+        let config = DemoSettingsConfig(
+            diagnosisEnabled: true,
+            diagnosisLevel: .trace,
+            diagnosisAudioCaptureEnabled: true,
+            consoleLogEnabled: false,
+            networkEnvironment: .test,
+            customNetworkBaseURLEnabled: false,
+            customNetworkBaseURL: DemoSettingsConfig.rayneoNetworkBaseURL,
+            sensitiveWordRedactionEnabled: true,
+            mockEngineEnabled: false,
+            schemaVersion: 7
+        )
+
+        let diagnosisConfig = DemoSDKConfigurationFactory.makeDiagnosisConfig(from: config)
+
+        XCTAssertTrue(diagnosisConfig.enabled)
+        XCTAssertEqual(diagnosisConfig.level, .trace)
+        XCTAssertTrue(diagnosisConfig.audioCaptureEnabled)
+    }
 
     override func setUpWithError() throws {
         // Put setup code here. This method is called before the invocation of each test method in the class.
