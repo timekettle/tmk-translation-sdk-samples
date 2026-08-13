@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -6,6 +7,7 @@ import '../tmk_translation_adapter.dart';
 
 import '../conversation_bubbles.dart';
 import '../models.dart';
+import '../one_to_one_pcm_router.dart';
 import '../sample_pcm_capture.dart';
 import '../theme.dart';
 
@@ -70,7 +72,13 @@ class _SessionScreenState extends State<SessionScreen> {
   }
 
   int get _configuredChannels {
-    return _sessionConfig.scenario == TmkScenario.oneToOne ? 2 : 1;
+    if (_sessionConfig.scenario != TmkScenario.oneToOne) {
+      return 1;
+    }
+    return _sessionConfig.oneToOneChannelMode ==
+            TmkOneToOneChannelMode.perChannel
+        ? 1
+        : 2;
   }
 
   ConversationBubbleRenderPipeline _createBubbleRenderPipeline(
@@ -196,17 +204,7 @@ class _SessionScreenState extends State<SessionScreen> {
     });
     try {
       await _pcmCapture.start(
-        onFrame: (pcm) => _sessionConfig.scenario == TmkScenario.oneToOne
-            ? TmkTranslationFlutter.pushChannelAudio(
-                sessionId,
-                pcm,
-                TmkSpeakerChannel.left,
-              )
-            : TmkTranslationFlutter.pushStreamAudio(
-                sessionId,
-                pcm,
-                channelCount: 1,
-              ),
+        onFrame: (pcm) => _pushAudioFrame(sessionId, pcm),
         onError: (error) {
           if (!mounted) return;
           setState(() {
@@ -230,6 +228,43 @@ class _SessionScreenState extends State<SessionScreen> {
         _statusText = '启动 Sample 录音失败：$error';
       });
     }
+  }
+
+  Future<void> _pushAudioFrame(String sessionId, Uint8List pcm) {
+    if (_sessionConfig.scenario != TmkScenario.oneToOne) {
+      return TmkTranslationFlutter.pushStreamAudio(
+        sessionId,
+        pcm,
+        channelCount: 1,
+      );
+    }
+
+    if (_sessionConfig.oneToOneChannelMode ==
+        TmkOneToOneChannelMode.perChannel) {
+      // The Sample microphone is the source-language side of the
+      // conversation. The native one-to-one contract maps that input to the
+      // right speaker channel; the left lane remains available for a second
+      // Sample-owned input source.
+      return TmkTranslationFlutter.pushChannelAudio(
+        sessionId,
+        pcm,
+        TmkSpeakerChannel.right,
+      );
+    }
+
+    // The standard contract requires an interleaved stereo PCM16 frame. This
+    // Sample has one microphone, so it sends that source on the right lane and
+    // explicit PCM silence on the left lane instead of asking the Plugin to
+    // infer or transform the input.
+    final stereo = TmkOneToOnePcmRouter.interleaveStereo16Le(
+      left: Uint8List(pcm.length),
+      right: pcm,
+    );
+    return TmkTranslationFlutter.pushStreamAudio(
+      sessionId,
+      stereo,
+      channelCount: 2,
+    );
   }
 
   Future<void> _stopListening() async {
@@ -620,11 +655,10 @@ class _SessionScreenState extends State<SessionScreen> {
               _buildInfoText(),
               style: const TextStyle(fontSize: 12, color: appTextMuted),
             ),
-            if (_sessionConfig.scenario == TmkScenario.oneToOne &&
-                _sessionConfig.useFixedAudio) ...[
+            if (_sessionConfig.scenario == TmkScenario.oneToOne) ...[
               const SizedBox(height: 4),
               const Text(
-                '当前右声道使用固定音源模拟 1v1 第二路输入。',
+                '当前 Sample 麦克风映射到右声道，左声道发送 PCM 静音。',
                 style: TextStyle(fontSize: 12, color: appTextMuted),
               ),
             ],

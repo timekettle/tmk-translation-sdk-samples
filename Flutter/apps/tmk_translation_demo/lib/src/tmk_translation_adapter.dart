@@ -159,7 +159,7 @@ class TmkSessionConfig {
     this.capturePcm = false,
     this.audioSource = TmkAudioSource.external,
     this.audioOutputMode = TmkAudioOutputMode.external,
-    this.oneToOneChannelMode = TmkOneToOneChannelMode.perChannel,
+    this.oneToOneChannelMode = TmkOneToOneChannelMode.interleaved,
   });
 
   final TmkScenario scenario;
@@ -467,6 +467,9 @@ final class TmkTranslationFlutter {
       (await _sdk.getDiagnosisLogDirectoryURL())?.toString();
 
   static Future<String> createSession(TmkSessionConfig config) async {
+    final usePerChannelOneToOne =
+        config.scenario == TmkScenario.oneToOne &&
+        config.oneToOneChannelMode == TmkOneToOneChannelMode.perChannel;
     final operation = _sdk.createSession(
       api.TmkTranslationSessionConfig(
         mode: config.mode,
@@ -476,9 +479,10 @@ final class TmkTranslationFlutter {
         sourceLang: config.sourceLanguage,
         targetLang: config.targetLanguage,
         audioConfig: api.TmkTranslationSessionAudioConfig(
-          pcmChannels: config.scenario == TmkScenario.oneToOne ? 2 : 1,
-          channelAudioMode:
-              config.oneToOneChannelMode == TmkOneToOneChannelMode.perChannel
+          pcmChannels: config.scenario == TmkScenario.oneToOne
+              ? (usePerChannelOneToOne ? 1 : 2)
+              : 1,
+          channelAudioMode: usePerChannelOneToOne
               ? api.TmkChannelAudioMode.lowLatency
               : api.TmkChannelAudioMode.standard,
         ),
