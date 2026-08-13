@@ -1,7 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tmk_translation_demo/src/conversation_bubbles.dart';
 import 'package:tmk_translation_demo/src/models.dart';
-import 'package:tmk_translation_flutter/tmk_translation_flutter.dart';
+import 'package:tmk_translation_demo/src/tmk_translation_adapter.dart';
 
 void main() {
   test('listen mode merges partial and final text into one bubble', () {

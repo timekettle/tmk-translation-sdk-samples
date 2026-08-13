@@ -2,10 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:tmk_translation_flutter/tmk_translation_flutter.dart';
+import '../tmk_translation_adapter.dart';
 
 import '../conversation_bubbles.dart';
 import '../models.dart';
+import '../sample_pcm_capture.dart';
 import '../theme.dart';
 
 class SessionScreen extends StatefulWidget {
@@ -23,6 +24,7 @@ class _SessionScreenState extends State<SessionScreen> {
 
   final List<ConversationBubble> _bubbles = [];
   final Map<String, int> _bubbleIndex = {};
+  final SamplePcmCapture _pcmCapture = SamplePcmCapture();
 
   StreamSubscription<TmkPluginEvent>? _eventsSubscription;
   late TmkSessionConfig _sessionConfig;
@@ -53,6 +55,7 @@ class _SessionScreenState extends State<SessionScreen> {
   @override
   void dispose() {
     _eventsSubscription?.cancel();
+    unawaited(_pcmCapture.dispose());
     final sessionId = _sessionId;
     if (sessionId != null) {
       unawaited(_disposeSession(sessionId));
@@ -92,9 +95,7 @@ class _SessionScreenState extends State<SessionScreen> {
 
   Future<void> _disposeSession(String sessionId) async {
     try {
-      await TmkTranslationFlutter.stopSession(sessionId);
-    } catch (_) {}
-    try {
+      await _pcmCapture.stop();
       await TmkTranslationFlutter.disposeSession(sessionId);
     } catch (_) {}
   }
@@ -124,12 +125,6 @@ class _SessionScreenState extends State<SessionScreen> {
       final sessionId = await TmkTranslationFlutter.createSession(
         _sessionConfig,
       );
-      if (_sessionConfig.scenario == TmkScenario.oneToOne) {
-        await TmkTranslationFlutter.setOneToOnePlaybackMode(
-          sessionId,
-          _playbackMode,
-        );
-      }
       final offlineStatus = _sessionConfig.mode == TmkTranslationMode.offline
           ? await TmkTranslationFlutter.getOfflineModelStatus(sessionId)
           : null;
@@ -197,17 +192,42 @@ class _SessionScreenState extends State<SessionScreen> {
     }
     setState(() {
       _isStarting = true;
-      _statusText = '正在启动收听...';
+      _statusText = '正在启动 Sample 麦克风采集...';
     });
     try {
-      await TmkTranslationFlutter.startSession(sessionId);
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
+      await _pcmCapture.start(
+        onFrame: (pcm) => _sessionConfig.scenario == TmkScenario.oneToOne
+            ? TmkTranslationFlutter.pushChannelAudio(
+                sessionId,
+                pcm,
+                TmkSpeakerChannel.left,
+              )
+            : TmkTranslationFlutter.pushStreamAudio(
+                sessionId,
+                pcm,
+                channelCount: 1,
+              ),
+        onError: (error) {
+          if (!mounted) return;
+          setState(() {
+            _isStarted = false;
+            _isStarting = false;
+            _statusText = '音频采集或推流失败：$error';
+          });
+        },
+      );
+      if (!mounted) return;
       setState(() {
+        _isStarted = true;
         _isStarting = false;
-        _statusText = '开始收听失败：$error';
+        _statusText = '会话已自动启动，Sample 正在推送 PCM';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isStarted = false;
+        _isStarting = false;
+        _statusText = '启动 Sample 录音失败：$error';
       });
     }
   }
@@ -218,7 +238,8 @@ class _SessionScreenState extends State<SessionScreen> {
       return;
     }
     try {
-      await TmkTranslationFlutter.stopSession(sessionId);
+      await _pcmCapture.stop();
+      await TmkTranslationFlutter.disposeSession(sessionId);
     } catch (error) {
       if (!mounted) {
         return;
@@ -232,9 +253,10 @@ class _SessionScreenState extends State<SessionScreen> {
       return;
     }
     setState(() {
+      _sessionId = null;
       _isStarted = false;
       _isStarting = false;
-      _statusText = '收听已停止';
+      _statusText = '会话已释放';
     });
   }
 
@@ -317,24 +339,12 @@ class _SessionScreenState extends State<SessionScreen> {
     if (selected == null || selected == _playbackMode) {
       return;
     }
-    final sessionId = _sessionId;
     setState(() {
       _playbackMode = selected;
       _statusText = '播放音源已切换为${selected.title}';
     });
-    if (sessionId == null) {
-      return;
-    }
-    try {
-      await TmkTranslationFlutter.setOneToOnePlaybackMode(sessionId, selected);
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _statusText = '切换播放音源失败：$error';
-      });
-    }
+    // Playback selection is Sample-owned routing state. The public Session
+    // API only carries PCM and translated-audio events.
   }
 
   Future<T?> _showPickerSheet<T>({
@@ -426,12 +436,9 @@ class _SessionScreenState extends State<SessionScreen> {
       case TmkSessionStateEvent():
         setState(() {
           _statusText = event.statusText;
-          if (event.isStarted != null) {
-            _isStarted = event.isStarted!;
-          }
-          if (event.isStarting != null) {
-            _isStarting = event.isStarting!;
-          }
+          // Native creation is already started when createSession completes.
+          // These flags belong to Sample-owned microphone capture, so native
+          // lifecycle callbacks must not disable the capture button.
           if (event.isModelReady == true) {
             _offlineModelStatus = TmkOfflineModelStatus(
               isReady: true,

@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:tmk_translation_flutter/tmk_translation_flutter.dart';
+import '../tmk_translation_adapter.dart';
 
 import '../theme.dart';
 import 'session_screen.dart';
