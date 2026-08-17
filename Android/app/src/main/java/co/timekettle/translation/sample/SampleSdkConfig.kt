@@ -26,6 +26,7 @@ object SampleSdkConfig {
             .setOnlineAuthContext(tenantId = "timekettle")
             .setDiagnosisEnabled(diagnosisEnabled)
             .setNetworkEnvironment(networkEnvironment)
+            .setNetworkTimeout(15)
             .setNetworkBaseURL("https://api-rayneo.timekettle.co")
             .build()
     }

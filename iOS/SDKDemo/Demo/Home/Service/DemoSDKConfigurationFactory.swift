@@ -22,6 +22,7 @@ enum DemoSDKConfigurationFactory {
             .setNetworkEnvironment(config.networkEnvironment)
             .setNetworkBaseURL(URL(string: "https://api-rayneo.timekettle.co")!)
             .setDiagnosisEnabled(config.diagnosisEnabled)
+            .setNetworkTimeout(15)
             .build()
     }
 
