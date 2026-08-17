@@ -1,11 +1,9 @@
-import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 import 'package:tmk_translation_flutter/tmk_translation_flutter.dart' as api;
 
-// This file is Sample-only glue. It intentionally keeps the demo's existing
-// view models compiling while the SDK's public API remains the sole package
-// boundary. No platform interface, Pigeon or channel type is imported here.
+// This file contains Sample-owned view models and small DTO/event mappers.
+// Every SDK call still goes through the public TmkTranslationSdk and every
+// active channel is held by the page that created its TmkTranslationSession.
 export 'package:tmk_translation_flutter/tmk_translation_flutter.dart'
     show TmkTranslationMode, TmkSpeakerChannel;
 
@@ -320,6 +318,21 @@ class TmkSessionMetricsEvent extends TmkPluginEvent {
   final int playbackChannels;
 }
 
+class TmkAudioDataEvent extends TmkPluginEvent {
+  TmkAudioDataEvent({
+    required super.sessionId,
+    required this.data,
+    required this.sampleRate,
+    required this.channelCount,
+    required this.route,
+  }) : super(kind: 'audio_data');
+
+  final Uint8List data;
+  final int sampleRate;
+  final int channelCount;
+  final api.TmkTranslatedAudioRoute? route;
+}
+
 class TmkDownloadEvent extends TmkPluginEvent {
   const TmkDownloadEvent({
     required super.sessionId,
@@ -364,402 +377,292 @@ class TmkActivityEvent extends TmkPluginEvent {
   final double volume;
 }
 
-final class TmkTranslationFlutter {
-  TmkTranslationFlutter._();
+api.TmkTranslationGlobalConfig sampleGlobalConfig(
+  TmkSettingsDraft settings, {
+  String? appId,
+  String? appSecret,
+}) {
+  final resolvedAppId = appId?.trim().isNotEmpty == true
+      ? appId!.trim()
+      : const String.fromEnvironment('TMK_APP_ID');
+  final resolvedAppSecret = appSecret?.trim().isNotEmpty == true
+      ? appSecret!.trim()
+      : const String.fromEnvironment('TMK_APP_SECRET');
+  return api.TmkTranslationGlobalConfig(
+    appId: resolvedAppId,
+    appSecret: resolvedAppSecret,
+    networkEnvironment: api.TmkTranslationNetworkEnvironment.fromValue(
+      settings.networkEnvironment,
+    ),
+    diagnosisConfig: api.TmkDiagnosisConfig(
+      enabled: settings.diagnosisEnabled,
+      consoleOutputEnabled: settings.consoleLogEnabled,
+    ),
+  );
+}
 
-  static final api.TmkTranslationSdk _sdk = api.TmkTranslationSdk.instance;
-  static final StreamController<TmkPluginEvent> _events =
-      StreamController<TmkPluginEvent>.broadcast();
-  static final StreamController<api.TmkTranslatedAudioFrame> _audio =
-      StreamController<api.TmkTranslatedAudioFrame>.broadcast();
-  static final Map<String, api.TmkTranslationSession> _sessions =
-      <String, api.TmkTranslationSession>{};
-  static final Map<String, api.TmkOfflineModelDownloadOperation> _downloads =
-      <String, api.TmkOfflineModelDownloadOperation>{};
-  static final Map<String, StreamSubscription<api.TmkTranslationSessionEvent>>
-  _subscriptions =
-      <String, StreamSubscription<api.TmkTranslationSessionEvent>>{};
+Future<TmkRuntimeStatus> initializeSampleSdk({
+  required TmkSettingsDraft settings,
+  String? appId,
+  String? appSecret,
+}) async {
+  final sdk = api.TmkTranslationSdk.instance;
+  await sdk.initialize(
+    sampleGlobalConfig(settings, appId: appId, appSecret: appSecret),
+  );
+  await sdk.verifyAuth();
+  return readSampleRuntimeStatus(sdk);
+}
 
-  static Stream<TmkPluginEvent> get events => _events.stream;
-  static Stream<api.TmkTranslatedAudioFrame> get translatedAudioFrames =>
-      _audio.stream;
+Future<TmkRuntimeStatus> readSampleRuntimeStatus(
+  api.TmkTranslationSdk sdk,
+) async {
+  final version = await sdk.sdkVersion();
+  final offline = await sdk.isOfflineTranslationSupported();
+  return TmkRuntimeStatus(
+    onlineEngineStatus: const TmkEngineStatus(
+      kind: TmkEngineStatusKind.available,
+      summary: '可用',
+      detail: 'SDK 已初始化',
+    ),
+    offlineEngineStatus: TmkEngineStatus(
+      kind: offline
+          ? TmkEngineStatusKind.available
+          : TmkEngineStatusKind.placeholder,
+      summary: offline ? '可用' : '依赖模型',
+      detail: offline ? '离线翻译已开通' : '当前账号未开通离线翻译能力',
+    ),
+    authInfo: const TmkAuthInfo(
+      tokenSummary: '由 SDK 管理',
+      tokenDetail: '凭据不会进入 Sample',
+      autoRefreshSummary: 'SDK',
+      autoRefreshDetail: '由原生 SDK 管理',
+    ),
+    versionText: version,
+  );
+}
 
-  static Future<TmkSettingsDraft> getCurrentSettings() async =>
-      TmkSettingsDraft.defaults();
-
-  static Future<TmkRuntimeStatus> initialize({
-    String? appId,
-    String? appSecret,
-    TmkSettingsDraft? settings,
-  }) async {
-    final draft = settings ?? TmkSettingsDraft.defaults();
-    await _sdk.initialize(
-      api.TmkTranslationGlobalConfig(
-        appId: appId?.trim().isNotEmpty == true
-            ? appId!
-            : const String.fromEnvironment('TMK_APP_ID'),
-        appSecret: appSecret?.trim().isNotEmpty == true
-            ? appSecret!
-            : const String.fromEnvironment('TMK_APP_SECRET'),
-        diagnosisConfig: api.TmkDiagnosisConfig(
-          enabled: draft.diagnosisEnabled,
-          consoleOutputEnabled: draft.consoleLogEnabled,
+Future<List<TmkLanguageOption>> loadSampleLanguages(
+  api.TmkTranslationSdk sdk,
+  TmkLanguageSource source,
+) async {
+  final operation = source == TmkLanguageSource.online
+      ? sdk.getOnlineSupportedLanguages()
+      : sdk.getOfflineSupportedLanguages();
+  final response = await operation.result;
+  return response.localeOptions
+      .map(
+        (item) => TmkLanguageOption(
+          code: item.code,
+          familyCode: item.code.split('-').first,
+          title: item.displayName,
         ),
-      ),
+      )
+      .toList(growable: false);
+}
+
+api.TmkTranslationSessionConfig toSdkSessionConfig(TmkSessionConfig config) {
+  final usePerChannelOneToOne =
+      config.scenario == TmkScenario.oneToOne &&
+      config.oneToOneChannelMode == TmkOneToOneChannelMode.perChannel;
+  return api.TmkTranslationSessionConfig(
+    mode: config.mode,
+    scenario: config.scenario == TmkScenario.oneToOne
+        ? api.TmkTranslationScenario.oneToOne
+        : api.TmkTranslationScenario.listen,
+    sourceLang: config.sourceLanguage,
+    targetLang: config.targetLanguage,
+    audioConfig: api.TmkTranslationSessionAudioConfig(
+      pcmChannels: config.scenario == TmkScenario.oneToOne
+          ? (usePerChannelOneToOne ? 1 : 2)
+          : 1,
+      channelAudioMode: usePerChannelOneToOne
+          ? api.TmkChannelAudioMode.lowLatency
+          : api.TmkChannelAudioMode.standard,
+    ),
+  );
+}
+
+Future<TmkOfflineModelStatus> readOfflineModelStatus(
+  api.TmkTranslationSdk sdk,
+  api.TmkTranslationSession session,
+) async {
+  final ready = await sdk.isOfflineModelReady(
+    srcLang: session.config.sourceLang,
+    dstLang: session.config.targetLang,
+    scenario: session.config.scenario,
+  );
+  return TmkOfflineModelStatus(
+    isReady: ready,
+    isSupported: true,
+    summary: ready ? '模型已就绪' : '需要下载模型',
+    detail: ready ? '可开始离线翻译' : '请先下载模型',
+  );
+}
+
+TmkPluginEvent adaptSessionEvent(api.TmkTranslationSessionEvent event) {
+  final sessionId = event.sessionId;
+  if (event is api.TmkRecognizedEvent) {
+    return TmkRecognizedEvent(
+      sessionId: sessionId,
+      sdkSessionId: event.result.sessionId,
+      sourceLangCode: event.result.srcCode ?? '',
+      targetLangCode: event.result.dstCode ?? '',
+      isFinal: event.isFinal,
+      text: event.result.data,
+      channel: event.result.extraData['channel'] as String?,
+      extraData: event.result.extraData,
     );
-    await _sdk.verifyAuth();
-    return getRuntimeStatus();
   }
-
-  static Future<TmkRuntimeStatus> applySettings(
-    TmkSettingsDraft settings, {
-    String? appId,
-    String? appSecret,
-  }) => initialize(appId: appId, appSecret: appSecret, settings: settings);
-
-  static Future<bool> verifyAuth() => _sdk.verifyAuth().then((_) => true);
-
-  static Future<TmkRuntimeStatus> getRuntimeStatus() async {
-    final version = await _sdk.sdkVersion();
-    final offline = await _sdk.isOfflineTranslationSupported();
-    return TmkRuntimeStatus(
-      onlineEngineStatus: const TmkEngineStatus(
-        kind: TmkEngineStatusKind.available,
-        summary: '可用',
-        detail: 'SDK 已初始化',
-      ),
-      offlineEngineStatus: TmkEngineStatus(
-        kind: offline
-            ? TmkEngineStatusKind.available
-            : TmkEngineStatusKind.placeholder,
-        summary: offline ? '可用' : '依赖模型',
-        detail: offline ? '离线翻译已开通' : '当前账号未开通离线翻译能力',
-      ),
-      authInfo: const TmkAuthInfo(
-        tokenSummary: '由 SDK 管理',
-        tokenDetail: '凭据不会进入 Sample',
-        autoRefreshSummary: 'SDK',
-        autoRefreshDetail: '由原生 SDK 管理',
-      ),
-      versionText: version,
+  if (event is api.TmkTranslatedEvent) {
+    return TmkTranslatedEvent(
+      sessionId: sessionId,
+      sdkSessionId: event.result.sessionId,
+      sourceLangCode: event.result.srcCode ?? '',
+      targetLangCode: event.result.dstCode ?? '',
+      isFinal: event.isFinal,
+      text: event.result.data,
+      channel: event.result.extraData['channel'] as String?,
+      extraData: event.result.extraData,
     );
   }
-
-  static Future<List<TmkLanguageOption>> getSupportedLanguages(
-    TmkLanguageSource source,
-  ) async {
-    final operation = source == TmkLanguageSource.online
-        ? _sdk.getOnlineSupportedLanguages()
-        : _sdk.getOfflineSupportedLanguages();
-    final response = await operation.result;
-    return response.localeOptions
-        .map(
-          (item) => TmkLanguageOption(
-            code: item.code,
-            familyCode: item.code.split('-').first,
-            title: item.displayName,
-          ),
-        )
-        .toList(growable: false);
-  }
-
-  static Future<String?> exportDiagnosisLogs() async =>
-      (await _sdk.getDiagnosisLogDirectoryURL())?.toString();
-
-  static Future<String> createSession(TmkSessionConfig config) async {
-    final usePerChannelOneToOne =
-        config.scenario == TmkScenario.oneToOne &&
-        config.oneToOneChannelMode == TmkOneToOneChannelMode.perChannel;
-    final operation = _sdk.createSession(
-      api.TmkTranslationSessionConfig(
-        mode: config.mode,
-        scenario: config.scenario == TmkScenario.oneToOne
-            ? api.TmkTranslationScenario.oneToOne
-            : api.TmkTranslationScenario.listen,
-        sourceLang: config.sourceLanguage,
-        targetLang: config.targetLanguage,
-        audioConfig: api.TmkTranslationSessionAudioConfig(
-          pcmChannels: config.scenario == TmkScenario.oneToOne
-              ? (usePerChannelOneToOne ? 1 : 2)
-              : 1,
-          channelAudioMode: usePerChannelOneToOne
-              ? api.TmkChannelAudioMode.lowLatency
-              : api.TmkChannelAudioMode.standard,
-        ),
-      ),
+  if (event is api.TmkAudioDataReceivedEvent) {
+    return TmkAudioDataEvent(
+      sessionId: sessionId,
+      data: event.data,
+      sampleRate: event.sampleRate,
+      channelCount: event.channelCount,
+      route: event.route,
     );
-    // Attach before awaiting the creation result. The frozen SDK contract
-    // shares this Streams instance with the successful Session and allows
-    // native events to arrive as soon as the channel is created.
-    final subscription = operation.streams.all.listen(_emitSessionEvent);
-    late final api.TmkTranslationSession session;
-    try {
-      session = await operation.result;
-    } catch (_) {
-      await subscription.cancel();
-      rethrow;
-    }
-    _sessions[session.id] = session;
-    _subscriptions[session.id] = subscription;
-    return session.id;
   }
+  if (event is api.TmkSessionStateChangedEvent) {
+    return TmkSessionStateEvent(
+      sessionId: sessionId,
+      statusText: event.snapshot.message,
+      isStarted: event.snapshot.state == api.TmkTranslationChannelState.running,
+      isStarting:
+          event.snapshot.state == api.TmkTranslationChannelState.starting,
+    );
+  }
+  if (event is api.TmkSessionErrorEvent) {
+    return TmkErrorEvent(
+      sessionId: sessionId,
+      code: event.error.constantName,
+      message: event.error.message,
+    );
+  }
+  if (event is api.TmkNamedEvent) {
+    return adaptNamedEvent(event);
+  }
+  return TmkLogEvent(
+    sessionId: sessionId,
+    message: '未知 SDK 事件',
+    level: TmkLogLevel.warning,
+  );
+}
 
-  static Future<TmkOfflineModelStatus> getOfflineModelStatus(
-    String sessionId,
-  ) async {
-    final session = _sessions[sessionId];
-    if (session == null) {
-      return const TmkOfflineModelStatus(
-        isReady: false,
-        isSupported: false,
-        summary: '会话不存在',
-        detail: '',
+TmkPluginEvent adaptOfflineModelDownloadEvent(
+  String sessionId,
+  api.TmkOfflineModelDownloadEvent event,
+) {
+  switch (event) {
+    case api.TmkOfflineModelDownloadProgress():
+      final progress = event.fileTotalBytes > 0
+          ? event.downloadedBytes / event.fileTotalBytes
+          : null;
+      return TmkDownloadEvent(
+        sessionId: sessionId,
+        stage: 'downloading',
+        message: '(${event.index}/${event.total}) ${event.fileName}',
+        progress: progress,
       );
-    }
-    final ready = await _sdk.isOfflineModelReady(
-      srcLang: session.config.sourceLang,
-      dstLang: session.config.targetLang,
-      scenario: session.config.scenario,
-    );
-    return TmkOfflineModelStatus(
-      isReady: ready,
-      isSupported: true,
-      summary: ready ? '模型已就绪' : '需要下载模型',
-      detail: ready ? '可开始离线翻译' : '请先下载模型',
-    );
-  }
-
-  static Future<void> downloadOfflineModels(String sessionId) async {
-    final session = _sessions[sessionId];
-    if (session == null) return;
-    await _downloads.remove(sessionId)?.cancel();
-    final operation = _sdk.downloadOfflineModels(
-      srcLang: session.config.sourceLang,
-      dstLang: session.config.targetLang,
-      scenario: session.config.scenario,
-    );
-    _downloads[sessionId] = operation;
-    final subscription = operation.events.listen(
-      (event) => _emitDownloadEvent(sessionId, event),
-    );
-    try {
-      await operation.result;
-    } catch (_) {
-      if (!operation.isCancelled) rethrow;
-    } finally {
-      await subscription.cancel();
-      if (identical(_downloads[sessionId], operation)) {
-        _downloads.remove(sessionId);
-      }
-    }
-  }
-
-  static Future<void> cancelOfflineDownload(String sessionId) async {
-    await _downloads.remove(sessionId)?.cancel();
-  }
-
-  static Future<void> pushChannelAudio(
-    String sessionId,
-    Uint8List pcm,
-    api.TmkSpeakerChannel channel,
-  ) async {
-    await _sessions[sessionId]?.pushStreamAudioData(
-      pcm,
-      speakerChannel: channel,
-    );
-  }
-
-  static Future<void> pushStreamAudio(
-    String sessionId,
-    Uint8List pcm, {
-    required int channelCount,
-  }) async {
-    await _sessions[sessionId]?.pushStreamAudioData(
-      pcm,
-      channelCount: channelCount,
-    );
-  }
-
-  static Future<void> disposeSession(String sessionId) async {
-    await _downloads.remove(sessionId)?.cancel();
-    await _subscriptions.remove(sessionId)?.cancel();
-    await _sessions.remove(sessionId)?.dispose();
-  }
-
-  static void _emitDownloadEvent(
-    String sessionId,
-    api.TmkOfflineModelDownloadEvent event,
-  ) {
-    switch (event) {
-      case api.TmkOfflineModelDownloadProgress():
-        final progress = event.fileTotalBytes > 0
-            ? event.downloadedBytes / event.fileTotalBytes
-            : null;
-        _events.add(
-          TmkDownloadEvent(
-            sessionId: sessionId,
-            stage: 'downloading',
-            message: '(${event.index}/${event.total}) ${event.fileName}',
-            progress: progress,
-          ),
-        );
-      case api.TmkOfflineModelTotalProgress():
-        final progress = event.totalBytesAll > 0
-            ? event.downloadedBytesAll / event.totalBytesAll
-            : null;
-        _events.add(
-          TmkDownloadEvent(
-            sessionId: sessionId,
-            stage: 'downloading',
-            message: '正在下载离线模型',
-            progress: progress,
-          ),
-        );
-      case api.TmkOfflineModelUnzipProgress():
-        _events.add(
-          TmkDownloadEvent(
-            sessionId: sessionId,
-            stage: 'unzipping',
-            message: '正在解压 ${event.fileName}',
-            progress: event.progress,
-          ),
-        );
-      case api.TmkOfflineModelReady():
-        _events.add(
-          TmkDownloadEvent(
-            sessionId: sessionId,
-            stage: 'completed',
-            message: '离线模型已就绪',
-            progress: 1,
-            isCompleted: true,
-          ),
-        );
-      case api.TmkOfflineModelFailed():
-        _events.add(
-          TmkErrorEvent(
-            sessionId: sessionId,
-            code: event.error.constantName,
-            message: event.error.message,
-          ),
-        );
-      case api.TmkOfflineModelNamedEvent():
-        _events.add(
-          TmkLogEvent(
-            sessionId: sessionId,
-            message: event.name,
-            level: TmkLogLevel.info,
-          ),
-        );
-    }
-  }
-
-  static void _emitSessionEvent(api.TmkTranslationSessionEvent event) {
-    final sessionId = event.sessionId;
-    if (event is api.TmkRecognizedEvent) {
-      _events.add(
-        TmkRecognizedEvent(
-          sessionId: sessionId,
-          sdkSessionId: event.result.sessionId,
-          sourceLangCode: event.result.srcCode ?? '',
-          targetLangCode: event.result.dstCode ?? '',
-          isFinal: event.isFinal,
-          text: event.result.data,
-          channel: event.result.extraData['channel'] as String?,
-          extraData: event.result.extraData,
-        ),
+    case api.TmkOfflineModelTotalProgress():
+      final progress = event.totalBytesAll > 0
+          ? event.downloadedBytesAll / event.totalBytesAll
+          : null;
+      return TmkDownloadEvent(
+        sessionId: sessionId,
+        stage: 'downloading',
+        message: '正在下载离线模型',
+        progress: progress,
       );
-    } else if (event is api.TmkTranslatedEvent) {
-      _events.add(
-        TmkTranslatedEvent(
-          sessionId: sessionId,
-          sdkSessionId: event.result.sessionId,
-          sourceLangCode: event.result.srcCode ?? '',
-          targetLangCode: event.result.dstCode ?? '',
-          isFinal: event.isFinal,
-          text: event.result.data,
-          channel: event.result.extraData['channel'] as String?,
-          extraData: event.result.extraData,
-        ),
+    case api.TmkOfflineModelUnzipProgress():
+      return TmkDownloadEvent(
+        sessionId: sessionId,
+        stage: 'unzipping',
+        message: '正在解压 ${event.fileName}',
+        progress: event.progress,
       );
-    } else if (event is api.TmkAudioDataReceivedEvent) {
-      final sampleRate =
-          _sessions[sessionId]?.config.audioConfig.pcmSampleRate ?? 16000;
-      _audio.add(
-        api.TmkTranslatedAudioFrame(
-          sessionId: sessionId,
-          data: event.data,
-          sampleRate: sampleRate,
-          channelCount: event.channelCount,
-          route: event.route ?? api.TmkTranslatedAudioRoute.unknown,
-        ),
+    case api.TmkOfflineModelReady():
+      return TmkDownloadEvent(
+        sessionId: sessionId,
+        stage: 'completed',
+        message: '离线模型已就绪',
+        progress: 1,
+        isCompleted: true,
       );
-    } else if (event is api.TmkSessionStateChangedEvent) {
-      _events.add(
-        TmkSessionStateEvent(
-          sessionId: sessionId,
-          statusText: event.snapshot.message,
-          isStarted:
-              event.snapshot.state == api.TmkTranslationChannelState.running,
-          isStarting:
-              event.snapshot.state == api.TmkTranslationChannelState.starting,
-        ),
+    case api.TmkOfflineModelFailed():
+      return TmkErrorEvent(
+        sessionId: sessionId,
+        code: event.error.constantName,
+        message: event.error.message,
       );
-    } else if (event is api.TmkSessionErrorEvent) {
-      _events.add(
-        TmkErrorEvent(
-          sessionId: sessionId,
-          code: event.error.constantName,
-          message: event.error.message,
-        ),
+    case api.TmkOfflineModelNamedEvent():
+      return TmkLogEvent(
+        sessionId: sessionId,
+        message: event.name,
+        level: TmkLogLevel.info,
       );
-    } else if (event is api.TmkNamedEvent) {
-      _events.add(_adaptNamedEvent(event));
-    }
+    case api.TmkOfflineModelDownloadEvent():
+      return TmkLogEvent(
+        sessionId: sessionId,
+        message: '未知离线模型事件',
+        level: TmkLogLevel.warning,
+      );
   }
+}
 
-  static TmkPluginEvent _adaptNamedEvent(api.TmkNamedEvent event) {
-    final args = event.args is Map<Object?, Object?>
-        ? event.args as Map<Object?, Object?>
-        : const <Object?, Object?>{};
-    switch (event.name) {
-      case 'metrics':
-        return TmkSessionMetricsEvent(
-          sessionId: event.sessionId,
-          roomNo: '${args['roomNo'] ?? '-'}',
-          scenario: '${args['scenario'] ?? ''}',
-          mode: '${args['mode'] ?? ''}',
-          configuredSampleRate:
-              (args['configuredSampleRate'] as num?)?.toInt() ?? 0,
-          configuredChannels:
-              (args['configuredChannels'] as num?)?.toInt() ?? 0,
-          captureSampleRate: (args['captureSampleRate'] as num?)?.toInt() ?? 0,
-          captureChannels: (args['captureChannels'] as num?)?.toInt() ?? 0,
-          playbackChannels: (args['playbackChannels'] as num?)?.toInt() ?? 0,
-        );
-      case 'activity':
-        return TmkActivityEvent(
-          sessionId: event.sessionId,
-          channel: args['channel'] as String?,
-          volume: (args['volume'] as num?)?.toDouble() ?? 0,
-        );
-      case 'download':
-        return TmkDownloadEvent(
-          sessionId: event.sessionId,
-          stage: '${args['stage'] ?? 'downloading'}',
-          message: '${args['message'] ?? ''}',
-          progress: (args['progress'] as num?)?.toDouble(),
-          isCompleted: args['isCompleted'] as bool? ?? false,
-        );
-      default:
-        return TmkLogEvent(
-          sessionId: event.sessionId,
-          message: '${args['message'] ?? event.name}',
-          level: switch (args['level']) {
-            'warning' => TmkLogLevel.warning,
-            'error' => TmkLogLevel.error,
-            _ => TmkLogLevel.info,
-          },
-        );
-    }
+TmkPluginEvent adaptNamedEvent(api.TmkNamedEvent event) {
+  final args = event.args is Map<Object?, Object?>
+      ? event.args as Map<Object?, Object?>
+      : const <Object?, Object?>{};
+  switch (event.name) {
+    case 'metrics':
+      return TmkSessionMetricsEvent(
+        sessionId: event.sessionId,
+        roomNo: '${args['roomNo'] ?? '-'}',
+        scenario: '${args['scenario'] ?? ''}',
+        mode: '${args['mode'] ?? ''}',
+        configuredSampleRate:
+            (args['configuredSampleRate'] as num?)?.toInt() ?? 0,
+        configuredChannels: (args['configuredChannels'] as num?)?.toInt() ?? 0,
+        captureSampleRate: (args['captureSampleRate'] as num?)?.toInt() ?? 0,
+        captureChannels: (args['captureChannels'] as num?)?.toInt() ?? 0,
+        playbackChannels: (args['playbackChannels'] as num?)?.toInt() ?? 0,
+      );
+    case 'activity':
+      return TmkActivityEvent(
+        sessionId: event.sessionId,
+        channel: args['channel'] as String?,
+        volume: (args['volume'] as num?)?.toDouble() ?? 0,
+      );
+    case 'download':
+      return TmkDownloadEvent(
+        sessionId: event.sessionId,
+        stage: '${args['stage'] ?? 'downloading'}',
+        message: '${args['message'] ?? ''}',
+        progress: (args['progress'] as num?)?.toDouble(),
+        isCompleted: args['isCompleted'] as bool? ?? false,
+      );
+    default:
+      return TmkLogEvent(
+        sessionId: event.sessionId,
+        message: '${args['message'] ?? event.name}',
+        level: switch (args['level']) {
+          'warning' => TmkLogLevel.warning,
+          'error' => TmkLogLevel.error,
+          _ => TmkLogLevel.info,
+        },
+      );
   }
 }

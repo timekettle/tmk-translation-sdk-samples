@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:tmk_translation_flutter/tmk_translation_flutter.dart' as api;
 import '../tmk_translation_adapter.dart';
 
 import '../theme.dart';
@@ -19,7 +20,14 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  static const _networkOptions = ['dev', 'test', 'uat', 'pre', 'pre_jp', 'pre_us'];
+  static const _networkOptions = [
+    'dev',
+    'test',
+    'uat',
+    'pre',
+    'pre_jp',
+    'pre_us',
+  ];
 
   late TmkSettingsDraft _draft;
   TmkRuntimeStatus? _runtimeStatus;
@@ -35,21 +43,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _apply() async {
     setState(() => _isApplying = true);
     try {
-      final runtimeStatus = await TmkTranslationFlutter.applySettings(_draft);
+      final sdk = api.TmkTranslationSdk.instance;
+      await sdk.initialize(sampleGlobalConfig(_draft));
+      await sdk.verifyAuth();
+      final runtimeStatus = await readSampleRuntimeStatus(sdk);
       if (!mounted) {
         return;
       }
       setState(() => _runtimeStatus = runtimeStatus);
-      Navigator.of(context).pop(
-        SettingsResult(settings: _draft, runtimeStatus: runtimeStatus),
-      );
+      Navigator.of(
+        context,
+      ).pop(SettingsResult(settings: _draft, runtimeStatus: runtimeStatus));
     } catch (error) {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('设置应用失败：$error')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('设置应用失败：$error')));
     } finally {
       if (mounted) {
         setState(() => _isApplying = false);
@@ -58,15 +69,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _exportLogs() async {
-    final path = await TmkTranslationFlutter.exportDiagnosisLogs();
+    final path = await api.TmkTranslationSdk.instance
+        .getDiagnosisLogDirectoryURL();
     if (!mounted) {
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(
-          path == null || path.isEmpty ? '当前平台暂未提供可导出的诊断目录。' : '诊断目录：$path',
-        ),
+        content: Text(path == null ? '当前平台暂未提供可导出的诊断目录。' : '诊断目录：$path'),
       ),
     );
   }
@@ -136,7 +146,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 hint: 'LingCast + Agora RTC',
                 summary: runtimeStatus?.onlineEngineStatus.summary ?? '暂无数据',
                 detail: runtimeStatus?.onlineEngineStatus.detail ?? '尚未获取状态',
-                accent: runtimeStatus?.onlineEngineStatus.kind == TmkEngineStatusKind.available
+                accent:
+                    runtimeStatus?.onlineEngineStatus.kind ==
+                        TmkEngineStatusKind.available
                     ? appAccent
                     : appDanger,
               ),
@@ -145,7 +157,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 hint: '离线模型与本地引擎',
                 summary: runtimeStatus?.offlineEngineStatus.summary ?? '暂无数据',
                 detail: runtimeStatus?.offlineEngineStatus.detail ?? '尚未获取状态',
-                accent: runtimeStatus?.offlineEngineStatus.kind == TmkEngineStatusKind.available
+                accent:
+                    runtimeStatus?.offlineEngineStatus.kind ==
+                        TmkEngineStatusKind.available
                     ? appAccent
                     : appWarning,
               ),
@@ -160,7 +174,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 hint: '当前鉴权结果',
                 summary: runtimeStatus?.authInfo.tokenSummary ?? '暂无数据',
                 detail: runtimeStatus?.authInfo.tokenDetail ?? '等待鉴权结果',
-                accent: runtimeStatus?.authInfo.tokenSummary == '有效' ? appAccent : appDanger,
+                accent: runtimeStatus?.authInfo.tokenSummary == '有效'
+                    ? appAccent
+                    : appDanger,
               ),
               _StatusTile(
                 title: '自动刷新',
@@ -199,7 +215,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               style: FilledButton.styleFrom(
                 backgroundColor: appPrimary,
                 foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(18),
+                ),
               ),
               child: _isApplying
                   ? const SizedBox(
@@ -217,10 +235,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 }
 
 class _SettingsSection extends StatelessWidget {
-  const _SettingsSection({
-    required this.title,
-    required this.children,
-  });
+  const _SettingsSection({required this.title, required this.children});
 
   final String title;
   final List<Widget> children;
@@ -278,7 +293,10 @@ class _StatusTile extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.end,
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text(summary, style: TextStyle(color: accent, fontWeight: FontWeight.w700)),
+            Text(
+              summary,
+              style: TextStyle(color: accent, fontWeight: FontWeight.w700),
+            ),
             const SizedBox(height: 4),
             Text(
               detail,

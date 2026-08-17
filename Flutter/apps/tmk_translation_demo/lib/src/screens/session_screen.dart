@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:tmk_translation_flutter/tmk_translation_flutter.dart' as api;
 import '../tmk_translation_adapter.dart';
 
 import '../conversation_bubbles.dart';
@@ -28,7 +29,10 @@ class _SessionScreenState extends State<SessionScreen> {
   final Map<String, int> _bubbleIndex = {};
   final SamplePcmCapture _pcmCapture = SamplePcmCapture();
 
-  StreamSubscription<TmkPluginEvent>? _eventsSubscription;
+  final api.TmkTranslationSdk _sdk = api.TmkTranslationSdk.instance;
+  StreamSubscription<api.TmkTranslationSessionEvent>? _eventsSubscription;
+  api.TmkTranslationSession? _session;
+  api.TmkOfflineModelDownloadOperation? _downloadOperation;
   late TmkSessionConfig _sessionConfig;
   late ConversationBubbleRenderPipeline _bubbleRenderPipeline;
   String? _sessionId;
@@ -49,7 +53,6 @@ class _SessionScreenState extends State<SessionScreen> {
     super.initState();
     _sessionConfig = widget.config;
     _bubbleRenderPipeline = _createBubbleRenderPipeline(_sessionConfig);
-    _eventsSubscription = TmkTranslationFlutter.events.listen(_handleEvent);
     unawaited(_loadSupportedLanguages());
     unawaited(_createSession());
   }
@@ -58,10 +61,7 @@ class _SessionScreenState extends State<SessionScreen> {
   void dispose() {
     _eventsSubscription?.cancel();
     unawaited(_pcmCapture.dispose());
-    final sessionId = _sessionId;
-    if (sessionId != null) {
-      unawaited(_disposeSession(sessionId));
-    }
+    unawaited(_disposeSession());
     super.dispose();
   }
 
@@ -101,18 +101,23 @@ class _SessionScreenState extends State<SessionScreen> {
             (_offlineModelStatus?.isReady ?? false));
   }
 
-  Future<void> _disposeSession(String sessionId) async {
+  Future<void> _disposeSession() async {
+    final session = _session;
+    _session = null;
+    final download = _downloadOperation;
+    _downloadOperation = null;
+    final eventsSubscription = _eventsSubscription;
+    _eventsSubscription = null;
     try {
       await _pcmCapture.stop();
-      await TmkTranslationFlutter.disposeSession(sessionId);
+      await download?.cancel();
+      await eventsSubscription?.cancel();
+      await session?.dispose();
     } catch (_) {}
   }
 
   Future<void> _createSession() async {
-    final previousSessionId = _sessionId;
-    if (previousSessionId != null) {
-      await _disposeSession(previousSessionId);
-    }
+    await _disposeSession();
     if (!mounted) {
       return;
     }
@@ -130,17 +135,33 @@ class _SessionScreenState extends State<SessionScreen> {
       _bubbleIndex.clear();
     });
     try {
-      final sessionId = await TmkTranslationFlutter.createSession(
-        _sessionConfig,
-      );
+      final operation = _sdk.createSession(toSdkSessionConfig(_sessionConfig));
+      // Subscribe before awaiting creation: native events may be emitted as
+      // soon as the Pigeon create operation has allocated its session.
+      final subscription = operation.streams.all.listen(_handleSdkEvent);
+      late final api.TmkTranslationSession session;
+      try {
+        session = await operation.result;
+      } catch (_) {
+        await subscription.cancel();
+        rethrow;
+      }
+      if (!mounted) {
+        await subscription.cancel();
+        await session.dispose();
+        return;
+      }
+      _session = session;
+      _eventsSubscription = subscription;
       final offlineStatus = _sessionConfig.mode == TmkTranslationMode.offline
-          ? await TmkTranslationFlutter.getOfflineModelStatus(sessionId)
+          ? await readOfflineModelStatus(_sdk, session)
           : null;
       if (!mounted) {
+        await _disposeSession();
         return;
       }
       setState(() {
-        _sessionId = sessionId;
+        _sessionId = session.id;
         _offlineModelStatus = offlineStatus;
         _isCreating = false;
         _statusText = _initialStatusText(offlineStatus);
@@ -172,9 +193,7 @@ class _SessionScreenState extends State<SessionScreen> {
     }
     setState(() => _isLoadingLanguageOptions = true);
     try {
-      final languages = await TmkTranslationFlutter.getSupportedLanguages(
-        _languageSource,
-      );
+      final languages = await loadSampleLanguages(_sdk, _languageSource);
       if (!mounted) {
         return;
       }
@@ -194,8 +213,8 @@ class _SessionScreenState extends State<SessionScreen> {
   }
 
   Future<void> _startListening() async {
-    final sessionId = _sessionId;
-    if (sessionId == null) {
+    final session = _session;
+    if (session == null) {
       return;
     }
     setState(() {
@@ -204,7 +223,7 @@ class _SessionScreenState extends State<SessionScreen> {
     });
     try {
       await _pcmCapture.start(
-        onFrame: (pcm) => _pushAudioFrame(sessionId, pcm),
+        onFrame: (pcm) => _pushAudioFrame(session, pcm),
         onError: (error) {
           if (!mounted) return;
           setState(() {
@@ -230,13 +249,15 @@ class _SessionScreenState extends State<SessionScreen> {
     }
   }
 
-  Future<void> _pushAudioFrame(String sessionId, Uint8List pcm) {
+  Future<void> _pushAudioFrame(
+    api.TmkTranslationSession session,
+    Uint8List pcm,
+  ) {
+    if (!identical(_session, session)) {
+      return Future<void>.value();
+    }
     if (_sessionConfig.scenario != TmkScenario.oneToOne) {
-      return TmkTranslationFlutter.pushStreamAudio(
-        sessionId,
-        pcm,
-        channelCount: 1,
-      );
+      return session.pushStreamAudioData(pcm, channelCount: 1);
     }
 
     if (_sessionConfig.oneToOneChannelMode ==
@@ -245,10 +266,9 @@ class _SessionScreenState extends State<SessionScreen> {
       // conversation. The native one-to-one contract maps that input to the
       // right speaker channel; the left lane remains available for a second
       // Sample-owned input source.
-      return TmkTranslationFlutter.pushChannelAudio(
-        sessionId,
+      return session.pushStreamAudioData(
         pcm,
-        TmkSpeakerChannel.right,
+        speakerChannel: api.TmkSpeakerChannel.right,
       );
     }
 
@@ -260,21 +280,16 @@ class _SessionScreenState extends State<SessionScreen> {
       left: Uint8List(pcm.length),
       right: pcm,
     );
-    return TmkTranslationFlutter.pushStreamAudio(
-      sessionId,
-      stereo,
-      channelCount: 2,
-    );
+    return session.pushStreamAudioData(stereo, channelCount: 2);
   }
 
   Future<void> _stopListening() async {
-    final sessionId = _sessionId;
-    if (sessionId == null) {
+    if (_session == null) {
       return;
     }
     try {
       await _pcmCapture.stop();
-      await TmkTranslationFlutter.disposeSession(sessionId);
+      await _disposeSession();
     } catch (error) {
       if (!mounted) {
         return;
@@ -296,8 +311,8 @@ class _SessionScreenState extends State<SessionScreen> {
   }
 
   Future<void> _downloadModels() async {
-    final sessionId = _sessionId;
-    if (sessionId == null) {
+    final session = _session;
+    if (session == null) {
       return;
     }
     setState(() {
@@ -305,7 +320,25 @@ class _SessionScreenState extends State<SessionScreen> {
       _statusText = '开始下载离线模型...';
     });
     try {
-      await TmkTranslationFlutter.downloadOfflineModels(sessionId);
+      await _downloadOperation?.cancel();
+      final operation = _sdk.downloadOfflineModels(
+        srcLang: session.config.sourceLang,
+        dstLang: session.config.targetLang,
+        scenario: session.config.scenario,
+      );
+      _downloadOperation = operation;
+      final subscription = operation.events.listen(
+        (event) =>
+            _handleEvent(adaptOfflineModelDownloadEvent(session.id, event)),
+      );
+      try {
+        await operation.result;
+      } finally {
+        await subscription.cancel();
+        if (identical(_downloadOperation, operation)) {
+          _downloadOperation = null;
+        }
+      }
     } catch (error) {
       if (!mounted) {
         return;
@@ -318,11 +351,11 @@ class _SessionScreenState extends State<SessionScreen> {
   }
 
   Future<void> _cancelDownload() async {
-    final sessionId = _sessionId;
-    if (sessionId == null) {
+    if (_session == null) {
       return;
     }
-    await TmkTranslationFlutter.cancelOfflineDownload(sessionId);
+    await _downloadOperation?.cancel();
+    _downloadOperation = null;
     if (!mounted) {
       return;
     }
@@ -463,6 +496,10 @@ class _SessionScreenState extends State<SessionScreen> {
     );
   }
 
+  void _handleSdkEvent(api.TmkTranslationSessionEvent event) {
+    _handleEvent(adaptSessionEvent(event));
+  }
+
   void _handleEvent(TmkPluginEvent event) {
     if (event.sessionId != _sessionId || !mounted) {
       return;
@@ -504,6 +541,11 @@ class _SessionScreenState extends State<SessionScreen> {
         setState(() {
           _metrics = event;
         });
+      case TmkAudioDataEvent():
+        // The Sample does not own a platform playback sink. Keep the typed
+        // downlink event visible in the status channel without transforming
+        // or dropping its PCM payload at the SDK boundary.
+        break;
       case TmkDownloadEvent():
         setState(() {
           _isDownloading = !event.isCompleted;
