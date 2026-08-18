@@ -157,7 +157,7 @@ class TmkSessionConfig {
     this.capturePcm = false,
     this.audioSource = TmkAudioSource.external,
     this.audioOutputMode = TmkAudioOutputMode.external,
-    this.oneToOneChannelMode = TmkOneToOneChannelMode.interleaved,
+    this.oneToOneChannelMode = TmkOneToOneChannelMode.perChannel,
   });
 
   final TmkScenario scenario;
@@ -462,9 +462,10 @@ Future<List<TmkLanguageOption>> loadSampleLanguages(
 }
 
 api.TmkTranslationSessionConfig toSdkSessionConfig(TmkSessionConfig config) {
-  final usePerChannelOneToOne =
-      config.scenario == TmkScenario.oneToOne &&
-      config.oneToOneChannelMode == TmkOneToOneChannelMode.perChannel;
+  // The one-to-one per-channel normalization now lives in the SDK layer:
+  // TmkTranslationSessionConfig normalizes one-to-one sessions to the
+  // per-channel (low-latency) contract, so the Sample no longer decides the
+  // channel routing itself.
   return api.TmkTranslationSessionConfig(
     mode: config.mode,
     scenario: config.scenario == TmkScenario.oneToOne
@@ -472,14 +473,6 @@ api.TmkTranslationSessionConfig toSdkSessionConfig(TmkSessionConfig config) {
         : api.TmkTranslationScenario.listen,
     sourceLang: config.sourceLanguage,
     targetLang: config.targetLanguage,
-    audioConfig: api.TmkTranslationSessionAudioConfig(
-      pcmChannels: config.scenario == TmkScenario.oneToOne
-          ? (usePerChannelOneToOne ? 1 : 2)
-          : 1,
-      channelAudioMode: usePerChannelOneToOne
-          ? api.TmkChannelAudioMode.lowLatency
-          : api.TmkChannelAudioMode.standard,
-    ),
   );
 }
 
