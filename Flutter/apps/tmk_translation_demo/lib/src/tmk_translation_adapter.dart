@@ -40,14 +40,6 @@ enum TmkAudioOutputMode {
   final String value;
 }
 
-enum TmkOneToOneChannelMode {
-  interleaved('interleaved'),
-  perChannel('per_channel');
-
-  const TmkOneToOneChannelMode(this.value);
-  final String value;
-}
-
 enum TmkLanguageSource {
   online('online'),
   offline('offline');
@@ -157,7 +149,6 @@ class TmkSessionConfig {
     this.capturePcm = false,
     this.audioSource = TmkAudioSource.external,
     this.audioOutputMode = TmkAudioOutputMode.external,
-    this.oneToOneChannelMode = TmkOneToOneChannelMode.perChannel,
   });
 
   final TmkScenario scenario;
@@ -168,7 +159,6 @@ class TmkSessionConfig {
   final bool capturePcm;
   final TmkAudioSource audioSource;
   final TmkAudioOutputMode audioOutputMode;
-  final TmkOneToOneChannelMode oneToOneChannelMode;
 
   TmkSessionConfig copyWith({
     TmkScenario? scenario,
@@ -179,7 +169,6 @@ class TmkSessionConfig {
     bool? capturePcm,
     TmkAudioSource? audioSource,
     TmkAudioOutputMode? audioOutputMode,
-    TmkOneToOneChannelMode? oneToOneChannelMode,
   }) => TmkSessionConfig(
     scenario: scenario ?? this.scenario,
     mode: mode ?? this.mode,
@@ -189,7 +178,6 @@ class TmkSessionConfig {
     capturePcm: capturePcm ?? this.capturePcm,
     audioSource: audioSource ?? this.audioSource,
     audioOutputMode: audioOutputMode ?? this.audioOutputMode,
-    oneToOneChannelMode: oneToOneChannelMode ?? this.oneToOneChannelMode,
   );
 }
 

@@ -8,7 +8,6 @@ import '../tmk_translation_adapter.dart';
 
 import '../conversation_bubbles.dart';
 import '../models.dart';
-import '../one_to_one_pcm_router.dart';
 import '../sample_pcm_capture.dart';
 import '../theme.dart';
 
@@ -71,15 +70,7 @@ class _SessionScreenState extends State<SessionScreen> {
         : TmkLanguageSource.online;
   }
 
-  int get _configuredChannels {
-    if (_sessionConfig.scenario != TmkScenario.oneToOne) {
-      return 1;
-    }
-    return _sessionConfig.oneToOneChannelMode ==
-            TmkOneToOneChannelMode.perChannel
-        ? 1
-        : 2;
-  }
+  int get _configuredChannels => 1;
 
   ConversationBubbleRenderPipeline _createBubbleRenderPipeline(
     TmkSessionConfig config,
@@ -260,27 +251,14 @@ class _SessionScreenState extends State<SessionScreen> {
       return session.pushStreamAudioData(pcm, channelCount: 1);
     }
 
-    if (_sessionConfig.oneToOneChannelMode ==
-        TmkOneToOneChannelMode.perChannel) {
-      // The Sample microphone is the source-language side of the
-      // conversation. The native one-to-one contract maps that input to the
-      // right speaker channel; the left lane remains available for a second
-      // Sample-owned input source.
-      return session.pushStreamAudioData(
-        pcm,
-        speakerChannel: api.TmkSpeakerChannel.right,
-      );
-    }
-
-    // The standard contract requires an interleaved stereo PCM16 frame. This
-    // Sample has one microphone, so it sends that source on the right lane and
-    // explicit PCM silence on the left lane instead of asking the Plugin to
-    // infer or transform the input.
-    final stereo = TmkOneToOnePcmRouter.interleaveStereo16Le(
-      left: Uint8List(pcm.length),
-      right: pcm,
+    // The one-to-one session is normalized by the SDK to the per-channel
+    // contract. The Sample microphone is the source-language side of the
+    // conversation, so it pushes to the right speaker channel; the left lane
+    // stays available for a second Sample-owned input source.
+    return session.pushStreamAudioData(
+      pcm,
+      speakerChannel: api.TmkSpeakerChannel.right,
     );
-    return session.pushStreamAudioData(stereo, channelCount: 2);
   }
 
   Future<void> _stopListening() async {
