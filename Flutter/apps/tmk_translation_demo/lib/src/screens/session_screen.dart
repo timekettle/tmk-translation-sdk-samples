@@ -8,7 +8,10 @@ import '../tmk_translation_adapter.dart';
 
 import '../conversation_bubbles.dart';
 import '../models.dart';
+import '../sample_fixed_pcm_source.dart';
 import '../sample_pcm_capture.dart';
+import '../sample_pcm_player.dart';
+import '../sample_session_audio_input.dart';
 import '../theme.dart';
 
 class SessionScreen extends StatefulWidget {
@@ -27,6 +30,8 @@ class _SessionScreenState extends State<SessionScreen> {
   final List<ConversationBubble> _bubbles = [];
   final Map<String, int> _bubbleIndex = {};
   final SamplePcmCapture _pcmCapture = SamplePcmCapture();
+  final SampleFixedPcmSource _fixedPcmSource = SampleFixedPcmSource();
+  late final SamplePcmPlayer _pcmPlayer;
 
   final api.TmkTranslationSdk _sdk = api.TmkTranslationSdk.instance;
   StreamSubscription<api.TmkTranslationSessionEvent>? _eventsSubscription;
@@ -46,10 +51,14 @@ class _SessionScreenState extends State<SessionScreen> {
   TmkOfflineModelStatus? _offlineModelStatus;
   List<TmkLanguageOption> _supportedLanguageOptions = const [];
   TmkOneToOnePlaybackMode _playbackMode = TmkOneToOnePlaybackMode.left;
+  int _sessionGeneration = 0;
 
   @override
   void initState() {
     super.initState();
+    _pcmPlayer = SamplePcmPlayer(
+      onFormatSetup: _pcmCapture.restoreDuplexAudioSession,
+    );
     _sessionConfig = widget.config;
     _bubbleRenderPipeline = _createBubbleRenderPipeline(_sessionConfig);
     unawaited(_loadSupportedLanguages());
@@ -58,10 +67,15 @@ class _SessionScreenState extends State<SessionScreen> {
 
   @override
   void dispose() {
-    _eventsSubscription?.cancel();
-    unawaited(_pcmCapture.dispose());
-    unawaited(_disposeSession());
+    _sessionGeneration++;
+    unawaited(_disposeResources());
     super.dispose();
+  }
+
+  Future<void> _disposeResources() async {
+    await _disposeSession(invalidateGeneration: false);
+    await _pcmCapture.dispose();
+    await _pcmPlayer.dispose();
   }
 
   TmkLanguageSource get _languageSource {
@@ -70,7 +84,8 @@ class _SessionScreenState extends State<SessionScreen> {
         : TmkLanguageSource.online;
   }
 
-  int get _configuredChannels => 1;
+  int get _configuredChannels =>
+      _sessionConfig.scenario == TmkScenario.oneToOne ? 2 : 1;
 
   ConversationBubbleRenderPipeline _createBubbleRenderPipeline(
     TmkSessionConfig config,
@@ -92,24 +107,35 @@ class _SessionScreenState extends State<SessionScreen> {
             (_offlineModelStatus?.isReady ?? false));
   }
 
-  Future<void> _disposeSession() async {
+  Future<void> _disposeSession({bool invalidateGeneration = true}) async {
+    if (invalidateGeneration) {
+      _sessionGeneration++;
+    }
     final session = _session;
     _session = null;
+    // Invalidate event routing before the first await. Native audio/text may
+    // still be in flight while capture is stopping; those events must not
+    // repopulate playback or bubbles after this session starts disposing.
+    _sessionId = null;
     final download = _downloadOperation;
     _downloadOperation = null;
     final eventsSubscription = _eventsSubscription;
     _eventsSubscription = null;
-    try {
-      await _pcmCapture.stop();
-      await download?.cancel();
-      await eventsSubscription?.cancel();
-      await session?.dispose();
-    } catch (_) {}
+    await _pcmCapture.stop().catchError((_) {});
+    _fixedPcmSource.reset();
+    await download?.cancel().catchError((_) {});
+    await eventsSubscription?.cancel().catchError((_) {});
+    await _pcmPlayer.clear().catchError((_) {});
+    await session?.dispose().catchError((_) {});
   }
 
-  Future<void> _createSession() async {
-    await _disposeSession();
-    if (!mounted) {
+  Future<void> _createSession({
+    bool clearConversation = true,
+    String? readyStatus,
+  }) async {
+    final generation = ++_sessionGeneration;
+    await _disposeSession(invalidateGeneration: false);
+    if (!mounted || generation != _sessionGeneration) {
       return;
     }
     setState(() {
@@ -122,14 +148,24 @@ class _SessionScreenState extends State<SessionScreen> {
       _offlineModelStatus = null;
       _statusText = '准备会话中...';
       _bubbleRenderPipeline = _createBubbleRenderPipeline(_sessionConfig);
-      _bubbles.clear();
-      _bubbleIndex.clear();
+      if (clearConversation) {
+        _bubbles.clear();
+        _bubbleIndex.clear();
+      }
     });
     try {
       final operation = _sdk.createSession(toSdkSessionConfig(_sessionConfig));
       // Subscribe before awaiting creation: native events may be emitted as
       // soon as the Pigeon create operation has allocated its session.
-      final subscription = operation.streams.all.listen(_handleSdkEvent);
+      final pendingEvents = <api.TmkTranslationSessionEvent>[];
+      var sessionReady = false;
+      final subscription = operation.streams.all.listen((event) {
+        if (sessionReady) {
+          _handleSdkEvent(event);
+        } else {
+          pendingEvents.add(event);
+        }
+      });
       late final api.TmkTranslationSession session;
       try {
         session = await operation.result;
@@ -137,7 +173,7 @@ class _SessionScreenState extends State<SessionScreen> {
         await subscription.cancel();
         rethrow;
       }
-      if (!mounted) {
+      if (!mounted || generation != _sessionGeneration) {
         await subscription.cancel();
         await session.dispose();
         return;
@@ -147,8 +183,9 @@ class _SessionScreenState extends State<SessionScreen> {
       final offlineStatus = _sessionConfig.mode == TmkTranslationMode.offline
           ? await readOfflineModelStatus(_sdk, session)
           : null;
-      if (!mounted) {
-        await _disposeSession();
+      if (!mounted || generation != _sessionGeneration) {
+        await subscription.cancel();
+        await session.dispose();
         return;
       }
       setState(() {
@@ -157,11 +194,26 @@ class _SessionScreenState extends State<SessionScreen> {
         _isCreating = false;
         _statusText = _initialStatusText(offlineStatus);
       });
+      sessionReady = true;
+      for (final event in pendingEvents) {
+        _handleSdkEvent(event);
+      }
+      pendingEvents.clear();
+      if (readyStatus != null && mounted && generation == _sessionGeneration) {
+        setState(() {
+          _statusText = readyStatus;
+        });
+      }
     } catch (error) {
-      if (!mounted) {
+      if (!mounted || generation != _sessionGeneration) {
+        return;
+      }
+      await _disposeSession(invalidateGeneration: false);
+      if (!mounted || generation != _sessionGeneration) {
         return;
       }
       setState(() {
+        _sessionId = null;
         _isCreating = false;
         _statusText = '创建会话失败：$error';
       });
@@ -210,32 +262,47 @@ class _SessionScreenState extends State<SessionScreen> {
     }
     setState(() {
       _isStarting = true;
-      _statusText = '正在启动 Sample 麦克风采集...';
+      _statusText = '正在启动收听...';
     });
     try {
+      if (_sessionConfig.scenario == TmkScenario.oneToOne &&
+          _sessionConfig.useFixedAudio) {
+        if (!_fixedPcmSource.isLoaded) {
+          await _fixedPcmSource.load();
+        }
+        _fixedPcmSource.reset();
+      }
+      // flutter_pcm_sound activates its iOS output AudioUnit during setup.
+      // Prepare it before record starts its AVAudioEngine to avoid '!pla'
+      // (CannotStartPlaying) when the first translated PCM arrives.
+      await _pcmPlayer.prepare(
+        sampleRate: session.config.audioConfig.pcmSampleRate,
+        channelCount: 1,
+      );
       await _pcmCapture.start(
         onFrame: (pcm) => _pushAudioFrame(session, pcm),
         onError: (error) {
-          if (!mounted) return;
+          if (!mounted || !identical(_session, session)) return;
           setState(() {
             _isStarted = false;
             _isStarting = false;
-            _statusText = '音频采集或推流失败：$error';
+            _statusText = '开始收听失败：$error';
           });
         },
       );
+      await _pcmCapture.restoreDuplexAudioSession();
       if (!mounted) return;
       setState(() {
         _isStarted = true;
         _isStarting = false;
-        _statusText = '会话已自动启动，Sample 正在推送 PCM';
+        _statusText = '翻译中...';
       });
     } catch (error) {
       if (!mounted) return;
       setState(() {
         _isStarted = false;
         _isStarting = false;
-        _statusText = '启动 Sample 录音失败：$error';
+        _statusText = '开始收听失败：$error';
       });
     }
   }
@@ -243,21 +310,25 @@ class _SessionScreenState extends State<SessionScreen> {
   Future<void> _pushAudioFrame(
     api.TmkTranslationSession session,
     Uint8List pcm,
-  ) {
+  ) async {
     if (!identical(_session, session)) {
-      return Future<void>.value();
+      return;
     }
-    if (_sessionConfig.scenario != TmkScenario.oneToOne) {
-      return session.pushStreamAudioData(pcm, channelCount: 1);
-    }
-
-    // The one-to-one session is normalized by the SDK to the per-channel
-    // contract. The Sample microphone is the source-language side of the
-    // conversation, so it pushes to the right speaker channel; the left lane
-    // stays available for a second Sample-owned input source.
-    return session.pushStreamAudioData(
-      pcm,
-      speakerChannel: api.TmkSpeakerChannel.right,
+    await pushSampleAudioFrame(
+      microphonePcm: pcm,
+      scenario: _sessionConfig.scenario,
+      useFixedAudio: _sessionConfig.useFixedAudio,
+      nextFixedFrame: _fixedPcmSource.nextFrame,
+      push: (data, {channelCount, speakerChannel}) {
+        if (!identical(_session, session)) {
+          return Future<void>.value();
+        }
+        return session.pushStreamAudioData(
+          data,
+          channelCount: channelCount,
+          speakerChannel: speakerChannel,
+        );
+      },
     );
   }
 
@@ -266,7 +337,6 @@ class _SessionScreenState extends State<SessionScreen> {
       return;
     }
     try {
-      await _pcmCapture.stop();
       await _disposeSession();
     } catch (error) {
       if (!mounted) {
@@ -284,8 +354,9 @@ class _SessionScreenState extends State<SessionScreen> {
       _sessionId = null;
       _isStarted = false;
       _isStarting = false;
-      _statusText = '会话已释放';
+      _statusText = '正在重新准备会话...';
     });
+    await _createSession(clearConversation: false, readyStatus: '收听已停止');
   }
 
   Future<void> _downloadModels() async {
@@ -305,10 +376,19 @@ class _SessionScreenState extends State<SessionScreen> {
         scenario: session.config.scenario,
       );
       _downloadOperation = operation;
-      final subscription = operation.events.listen(
-        (event) =>
-            _handleEvent(adaptOfflineModelDownloadEvent(session.id, event)),
-      );
+      final subscription = operation.events.listen((event) {
+        if (!identical(_downloadOperation, operation)) return;
+        final adapted = adaptOfflineModelDownloadEvent(session.id, event);
+        if (adapted is TmkErrorEvent) {
+          if (!mounted) return;
+          setState(() {
+            _isDownloading = false;
+            _statusText = adapted.message;
+          });
+          return;
+        }
+        _handleEvent(adapted);
+      });
       try {
         await operation.result;
       } finally {
@@ -318,6 +398,10 @@ class _SessionScreenState extends State<SessionScreen> {
         }
       }
     } catch (error) {
+      if (error is api.TmkTranslationError &&
+          error.constantName == api.TmkTranslationError.requestCancelledName) {
+        return;
+      }
       if (!mounted) {
         return;
       }
@@ -389,6 +473,10 @@ class _SessionScreenState extends State<SessionScreen> {
       _playbackMode = selected;
       _statusText = '播放音源已切换为${selected.title}';
     });
+    // Publish the new filter before clearing. Frames already queued with the
+    // previous selection are released; frames arriving during the clear use
+    // the new selection and are queued after it.
+    await _pcmPlayer.clear();
     // Playback selection is Sample-owned routing state. The public Session
     // API only carries PCM and translated-audio events.
   }
@@ -478,6 +566,41 @@ class _SessionScreenState extends State<SessionScreen> {
     _handleEvent(adaptSessionEvent(event));
   }
 
+  Future<void> _playTranslatedAudio(TmkAudioDataEvent event) async {
+    try {
+      final frame = selectSamplePlaybackFrame(
+        event: event,
+        scenario: _sessionConfig.scenario,
+        playbackMode: _playbackMode,
+      );
+      if (frame != null) {
+        await _pcmPlayer.enqueue(frame);
+      }
+    } catch (error) {
+      if (!mounted || event.sessionId != _sessionId) return;
+      setState(() {
+        _statusText = '翻译音频播放失败：$error';
+      });
+    }
+  }
+
+  Future<void> _recoverSessionAfterError(
+    String? failedSessionId,
+    String message,
+  ) async {
+    if (failedSessionId != _sessionId) return;
+    await _disposeSession();
+    if (!mounted) return;
+    setState(() {
+      _sessionId = null;
+      _statusText = '正在恢复会话...';
+    });
+    await _createSession(
+      clearConversation: false,
+      readyStatus: '翻译错误：$message，请重新开始收听',
+    );
+  }
+
   void _handleEvent(TmkPluginEvent event) {
     if (event.sessionId != _sessionId || !mounted) {
       return;
@@ -485,7 +608,11 @@ class _SessionScreenState extends State<SessionScreen> {
     switch (event) {
       case TmkSessionStateEvent():
         setState(() {
-          _statusText = event.statusText;
+          // The public Session is already native-running after creation, but
+          // the Sample must keep its original capture-owned start/stop UI.
+          if (_isStarted && event.statusText.isNotEmpty) {
+            _statusText = event.statusText;
+          }
           // Native creation is already started when createSession completes.
           // These flags belong to Sample-owned microphone capture, so native
           // lifecycle callbacks must not disable the capture button.
@@ -520,10 +647,7 @@ class _SessionScreenState extends State<SessionScreen> {
           _metrics = event;
         });
       case TmkAudioDataEvent():
-        // The Sample does not own a platform playback sink. Keep the typed
-        // downlink event visible in the status channel without transforming
-        // or dropping its PCM payload at the SDK boundary.
-        break;
+        unawaited(_playTranslatedAudio(event));
       case TmkDownloadEvent():
         setState(() {
           _isDownloading = !event.isCompleted;
@@ -546,6 +670,7 @@ class _SessionScreenState extends State<SessionScreen> {
           _isDownloading = false;
           _statusText = event.message;
         });
+        unawaited(_recoverSessionAfterError(event.sessionId, event.message));
       case TmkLogEvent():
         break;
     }
@@ -675,10 +800,11 @@ class _SessionScreenState extends State<SessionScreen> {
               _buildInfoText(),
               style: const TextStyle(fontSize: 12, color: appTextMuted),
             ),
-            if (_sessionConfig.scenario == TmkScenario.oneToOne) ...[
+            if (_sessionConfig.scenario == TmkScenario.oneToOne &&
+                _sessionConfig.useFixedAudio) ...[
               const SizedBox(height: 4),
               const Text(
-                '当前 Sample 麦克风映射到右声道，左声道发送 PCM 静音。',
+                '当前 Sample 麦克风映射到右声道，左声道循环发送固定英文 PCM。',
                 style: TextStyle(fontSize: 12, color: appTextMuted),
               ),
             ],
