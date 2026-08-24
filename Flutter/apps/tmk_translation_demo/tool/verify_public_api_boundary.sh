@@ -17,6 +17,7 @@ if rg -n --glob '*.dart' \
   -e 'package:tmk_translation_platform_interface' \
   -e 'package:tmk_translation_flutter/(src|pigeon)' \
   -e 'import .*tmk_translation_api\.g\.dart' \
+  -e '\bTmkTranslationFlutter\b' \
   "${source_roots[@]}"; then
   printf '%s\n' 'Sample imports an internal platform, Pigeon, or generated path.' >&2
   failures=1
