@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:tmk_translation_flutter/tmk_translation_flutter.dart' as api;
 import '../tmk_translation_adapter.dart';
 
+import '../sample_settings_store.dart';
 import '../theme.dart';
 import 'home_screen.dart';
 
@@ -30,6 +31,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   ];
 
   late TmkSettingsDraft _draft;
+  final SampleSettingsStore _settingsStore = SampleSettingsStore();
   TmkRuntimeStatus? _runtimeStatus;
   bool _isApplying = false;
 
@@ -43,10 +45,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _apply() async {
     setState(() => _isApplying = true);
     try {
-      final sdk = api.TmkTranslationSdk.instance;
-      await sdk.initialize(sampleGlobalConfig(_draft));
-      await sdk.verifyAuth();
-      final runtimeStatus = await readSampleRuntimeStatus(sdk);
+      await _settingsStore.save(_draft);
+      final runtimeStatus = await initializeSampleSdk(
+        settings: _draft,
+        destroyExisting: true,
+      );
       if (!mounted) {
         return;
       }
@@ -254,11 +257,12 @@ class _SettingsSection extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 10),
-        Container(
-          decoration: BoxDecoration(
-            color: appCard,
+        Material(
+          color: appCard,
+          clipBehavior: Clip.antiAlias,
+          shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: appBorder),
+            side: const BorderSide(color: appBorder),
           ),
           child: Column(children: children),
         ),

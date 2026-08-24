@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:tmk_translation_flutter/tmk_translation_flutter.dart' as api;
 import '../tmk_translation_adapter.dart';
 
+import '../sample_settings_store.dart';
 import '../theme.dart';
 import 'session_screen.dart';
 import 'settings_screen.dart';
@@ -14,6 +17,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+  final SampleSettingsStore _settingsStore = SampleSettingsStore();
   TmkScenario _scenario = TmkScenario.listen;
   TmkTranslationMode _mode = TmkTranslationMode.online;
   List<TmkLanguageOption> _languages = const [];
@@ -40,6 +44,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    unawaited(api.TmkTranslationSdk.instance.destroy());
     super.dispose();
   }
 
@@ -75,7 +80,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _bootstrapError = null;
     });
     try {
-      final settings = TmkSettingsDraft.defaults();
+      final settings = await _settingsStore.load();
       final runtimeStatus = await initializeSampleSdk(settings: settings);
       if (!mounted) {
         return;
@@ -410,11 +415,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         children: const [
                           _SectionLabel('② 翻译模式'),
                           SizedBox(width: 8),
-                          Text(
-                            '智能切换和双引擎竞速暂不支持，已保留入口样式',
-                            style: TextStyle(
-                              color: appPrimarySoft,
-                              fontSize: 12,
+                          Expanded(
+                            child: Text(
+                              '智能切换和双引擎竞速暂不支持，已保留入口样式',
+                              style: TextStyle(
+                                color: appPrimarySoft,
+                                fontSize: 12,
+                              ),
                             ),
                           ),
                         ],
