@@ -22,7 +22,7 @@ Sample 只使用高层 SDK 能力：初始化、鉴权、语言、模型、诊�
 
 ## 依赖与验收
 
-正式验收依赖目标制品 `tmk_translation_flutter: 1.3.1-rc.2`，Sample 的正式 `pubspec.lock` 保持 hosted RC2 及其校验和。开发联调可在本机创建未跟踪的 `pubspec_overrides.yaml` 使用相对 path 依赖，但不得提交该文件或绝对路径。
+正式验收依赖目标制品 `tmk_translation_flutter: 1.3.1-rc.3`，Sample 的正式 `pubspec.lock` 保持 hosted RC3 及其校验和。开发联调可在本机创建未跟踪的 `pubspec_overrides.yaml` 使用相对 path 依赖，但不得提交该文件或绝对路径。
 
 执行公开边界门禁：
 
