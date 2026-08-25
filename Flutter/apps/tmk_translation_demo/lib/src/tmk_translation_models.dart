@@ -239,14 +239,15 @@ class TmkBubbleEvent extends TmkPluginEvent {
 class TmkSessionStateEvent extends TmkPluginEvent {
   const TmkSessionStateEvent({
     required super.sessionId,
-    required this.statusText,
-    this.isStarted,
-    this.isStarting,
+    required this.snapshot,
     this.isModelReady,
   }) : super(kind: 'session_state');
-  final String statusText;
-  final bool? isStarted;
-  final bool? isStarting;
+  final api.TmkTranslationChannelStateSnapshot snapshot;
+  String get statusText => snapshot.message;
+  bool get isStarted =>
+      snapshot.state == api.TmkTranslationChannelState.running;
+  bool get isStarting =>
+      snapshot.state == api.TmkTranslationChannelState.starting;
   final bool? isModelReady;
 }
 
@@ -301,13 +302,11 @@ class TmkDownloadEvent extends TmkPluginEvent {
 }
 
 class TmkErrorEvent extends TmkPluginEvent {
-  const TmkErrorEvent({
-    required super.sessionId,
-    required this.code,
-    required this.message,
-  }) : super(kind: 'error');
-  final String code;
-  final String message;
+  const TmkErrorEvent({required super.sessionId, required this.error})
+    : super(kind: 'error');
+  final api.TmkTranslationError error;
+  String get code => error.constantName;
+  String get message => error.message;
 }
 
 class TmkLogEvent extends TmkPluginEvent {

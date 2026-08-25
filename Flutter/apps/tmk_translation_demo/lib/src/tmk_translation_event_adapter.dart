@@ -2,6 +2,10 @@ import 'package:tmk_translation_flutter/tmk_translation_flutter.dart' as api;
 
 import 'tmk_translation_models.dart';
 
+bool shouldRecoverFromError(api.TmkTranslationError error) =>
+    error.severity == api.TmkTranslationErrorSeverity.failed &&
+    !error.isRecoverable;
+
 TmkPluginEvent adaptSessionEvent(api.TmkTranslationSessionEvent event) {
   final sessionId = event.sessionId;
   if (event is api.TmkRecognizedEvent) {
@@ -38,20 +42,10 @@ TmkPluginEvent adaptSessionEvent(api.TmkTranslationSessionEvent event) {
     );
   }
   if (event is api.TmkSessionStateChangedEvent) {
-    return TmkSessionStateEvent(
-      sessionId: sessionId,
-      statusText: event.snapshot.message,
-      isStarted: event.snapshot.state == api.TmkTranslationChannelState.running,
-      isStarting:
-          event.snapshot.state == api.TmkTranslationChannelState.starting,
-    );
+    return TmkSessionStateEvent(sessionId: sessionId, snapshot: event.snapshot);
   }
   if (event is api.TmkSessionErrorEvent) {
-    return TmkErrorEvent(
-      sessionId: sessionId,
-      code: event.error.constantName,
-      message: event.error.message,
-    );
+    return TmkErrorEvent(sessionId: sessionId, error: event.error);
   }
   if (event is api.TmkNamedEvent) {
     return adaptNamedEvent(event);
@@ -104,11 +98,7 @@ TmkPluginEvent adaptOfflineModelDownloadEvent(
         isCompleted: true,
       );
     case api.TmkOfflineModelFailed():
-      return TmkErrorEvent(
-        sessionId: sessionId,
-        code: event.error.constantName,
-        message: event.error.message,
-      );
+      return TmkErrorEvent(sessionId: sessionId, error: event.error);
     case api.TmkOfflineModelNamedEvent():
       return TmkLogEvent(
         sessionId: sessionId,

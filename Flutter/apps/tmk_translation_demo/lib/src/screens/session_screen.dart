@@ -664,13 +664,21 @@ class _SessionScreenState extends State<SessionScreen> {
           );
         });
       case TmkErrorEvent():
+        if (event.error.severity == api.TmkTranslationErrorSeverity.ignored) {
+          break;
+        }
+        final shouldRecover = shouldRecoverFromError(event.error);
         setState(() {
-          _isStarting = false;
-          _isStarted = false;
-          _isDownloading = false;
           _statusText = event.message;
+          if (shouldRecover) {
+            _isStarting = false;
+            _isStarted = false;
+            _isDownloading = false;
+          }
         });
-        unawaited(_recoverSessionAfterError(event.sessionId, event.message));
+        if (shouldRecover) {
+          unawaited(_recoverSessionAfterError(event.sessionId, event.message));
+        }
       case TmkLogEvent():
         break;
     }
