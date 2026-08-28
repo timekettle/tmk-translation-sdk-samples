@@ -13,8 +13,8 @@ import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 
 data class DualChannelScreen(
-    val sourceLang: String,
-    val targetLang: String,
+    val leftLang: String,
+    val rightLang: String,
 ) : Screen {
 
     @Composable
@@ -36,12 +36,13 @@ data class DualChannelScreen(
         val captureSampleRate by viewModel.captureSampleRate.collectAsState()
         val captureChannels by viewModel.captureChannels.collectAsState()
         val playbackChannels by viewModel.playbackChannels.collectAsState()
-        val lockedSourceLang by viewModel.sourceLang.collectAsState()
-        val lockedTargetLang by viewModel.targetLang.collectAsState()
+        val lockedLeftLang by viewModel.leftLang.collectAsState()
+        val lockedRightLang by viewModel.rightLang.collectAsState()
         val leftSpeakerGender by viewModel.leftSpeakerGender.collectAsState()
         val rightSpeakerGender by viewModel.rightSpeakerGender.collectAsState()
         val onlineTranslateEngine by viewModel.onlineTranslateEngine.collectAsState()
         val onlineRecognizeEngine by viewModel.onlineRecognizeEngine.collectAsState()
+        val translateMode by viewModel.translateMode.collectAsState()
         val roomScenarioOption by viewModel.roomScenarioOption.collectAsState()
         val audioMode by viewModel.audioMode.collectAsState()
         val playbackMode by viewModel.playbackMode.collectAsState()
@@ -50,6 +51,7 @@ data class DualChannelScreen(
         var showSpeakerDialog by remember { mutableStateOf(false) }
         var showTranslateEngineDialog by remember { mutableStateOf(false) }
         var showRecognizeEngineDialog by remember { mutableStateOf(false) }
+        var showTranslateModeDialog by remember { mutableStateOf(false) }
         var showRoomScenarioDialog by remember { mutableStateOf(false) }
         var showChannelAudioModeDialog by remember { mutableStateOf(false) }
         var showPlaybackModeDialog by remember { mutableStateOf(false) }
@@ -57,8 +59,8 @@ data class DualChannelScreen(
         val onlineLanguageOptions = (rememberOnlineLanguageOptions().state
             as? LanguageOptionsState.Ready)?.options ?: emptyMap()
 
-        LaunchedEffect(viewModel, sourceLang, targetLang) {
-            viewModel.setLanguagesIfNeeded(sourceLang, targetLang)
+        LaunchedEffect(viewModel, leftLang, rightLang) {
+            viewModel.setLanguagesIfNeeded(leftLang, rightLang)
             viewModel.initSDK()
         }
         BackHandler(enabled = true) { navigator.pop() }
@@ -146,6 +148,13 @@ data class DualChannelScreen(
                             },
                         )
                         DropdownMenuItem(
+                            text = { Text("翻译下发模式") },
+                            onClick = {
+                                settingsExpanded = false
+                                showTranslateModeDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
                             text = { Text(if (isScenarioUpdating) "房间能力切换中..." else "房间能力设置") },
                             enabled = !isScenarioUpdating,
                             onClick = {
@@ -181,8 +190,9 @@ data class DualChannelScreen(
             }
             TranslationStatusLine(statusText)
             TranslationLanguageLine(
-                sourceLang = lockedSourceLang,
-                targetLang = lockedTargetLang,
+                // 通用语言行仍按 source→target 展示；一对一内部字段明确为右路→左路。
+                sourceLang = lockedRightLang,
+                targetLang = lockedLeftLang,
                 showDetailInfo = showDetailInfo,
                 onToggleDetail = { showDetailInfo = !showDetailInfo },
                 displayNames = onlineLanguageOptions,
@@ -194,6 +204,7 @@ data class DualChannelScreen(
                         "连接：$connectionState",
                         "房间：$currentRoomNo",
                         "能力：${roomScenarioOption.title}",
+                        "下发：${OnlineTranslateModeOption.from(translateMode).title}",
                         "通道：one_to_one/online",
                         "模式：${OnlineChannelAudioModeOption.from(audioMode).title}",
                         "播放：${playbackMode.title}",
@@ -234,13 +245,13 @@ data class DualChannelScreen(
                 title = "切换 1v1 语言",
                 sourceLabel = "源语言（右声道）",
                 targetLabel = "目标语言（左声道）",
-                initialSourceLang = lockedSourceLang,
-                initialTargetLang = lockedTargetLang,
+                initialSourceLang = lockedRightLang,
+                initialTargetLang = lockedLeftLang,
                 languageOptions = onlineLanguageOptions,
                 onDismiss = { showLocaleDialog = false },
                 onConfirm = { source, target ->
                     showLocaleDialog = false
-                    viewModel.updateRoomLocale(source, target)
+                    viewModel.updateRoomLocale(leftLang = target, rightLang = source)
                 },
             )
         }
@@ -275,6 +286,17 @@ data class DualChannelScreen(
                 onConfirm = {
                     showRecognizeEngineDialog = false
                     viewModel.setOnlineRecognizeEngine(it)
+                },
+            )
+        }
+
+        if (showTranslateModeDialog) {
+            OnlineTranslateModeDialog(
+                initialMode = translateMode,
+                onDismiss = { showTranslateModeDialog = false },
+                onConfirm = {
+                    showTranslateModeDialog = false
+                    viewModel.setTranslateMode(it)
                 },
             )
         }

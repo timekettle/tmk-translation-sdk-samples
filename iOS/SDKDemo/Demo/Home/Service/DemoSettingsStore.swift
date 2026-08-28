@@ -37,7 +37,7 @@ struct DemoSettingsStore {
             ?? DemoSettingsConfig.rayneoNetworkBaseURL
         let storedConfig = DemoSettingsConfig(
             diagnosisEnabled: userDefaults.bool(forKey: Key.diagnosisEnabled),
-            diagnosisLevel: DemoDiagnosisLevel(rawValue: userDefaults.string(forKey: Key.diagnosisLevel) ?? "") ?? .essential,
+            diagnosisLevel: TmkDiagnosisLevel(rawValue: userDefaults.string(forKey: Key.diagnosisLevel) ?? "") ?? .essential,
             diagnosisAudioCaptureEnabled: userDefaults.bool(forKey: Key.diagnosisAudioCaptureEnabled),
             consoleLogEnabled: userDefaults.bool(forKey: Key.consoleLogEnabled),
             networkEnvironment: environment,

@@ -72,13 +72,12 @@ struct OneToOneViewState: Equatable {
     var statusText: String = "初始化中..."
     var sourceLanguage: String = "zh-CN"
     var targetLanguage: String = "en-US"
-    var translateEngine: TmkOnlineTranslateEngine = .fast
-    var recognizeEngine: TmkOnlineRecognizeEngine = .default
+    var translateEngine: TmkOnlineTranslateEngine = OneToOneDemoDefaults.online.translateEngine
+    var recognizeEngine: TmkOnlineRecognizeEngine = OneToOneDemoDefaults.online.recognizeEngine
+    var translateMode: TmkTranslateDeliveryMode = OneToOneDemoDefaults.online.translateMode
     var scenarioOption: OneToOneScenarioOption = .defaultOption
     var canStartListening: Bool = false
     var canStopListening: Bool = false
-    var canSharePCM: Bool = false
-    var isCaptureEnabled: Bool = false
 
     var rows: [OneToOneRowViewData] = []
     var currentRoomNo: String = "-"
@@ -91,9 +90,7 @@ struct OneToOneViewState: Equatable {
     var captureChannels: Int = 0
     var playbackChannels: Int = 0
     var playbackMode: OneToOnePlaybackMode = .left
-    var dialogConversationAudioMode: TmkDialogConversationAudioMode = .standard
-
-    var pcmFileURL: URL?
+    var dialogConversationAudioMode: TmkDialogConversationAudioMode = OneToOneDemoDefaults.online.audioMode
 }
 
 extension TmkDialogConversationAudioMode {

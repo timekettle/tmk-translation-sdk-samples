@@ -56,11 +56,10 @@ struct NowListeningViewState: Equatable {
     var targetLanguage: String = "en-US"
     var translateEngine: TmkOnlineTranslateEngine = .accurate
     var recognizeEngine: TmkOnlineRecognizeEngine = .default
+    var translateMode: TmkTranslateDeliveryMode = .default
     var scenarioOption: NowListeningScenarioOption = .defaultOption
     var canStartListening: Bool = false
     var canStopListening: Bool = false
-    var canSharePCM: Bool = false
-    var isCaptureEnabled: Bool = false
 
     var rows: [NowListeningRowViewData] = []
     var currentRoomNo: String = "-"
@@ -72,6 +71,17 @@ struct NowListeningViewState: Equatable {
     var captureSampleRate: Int = 0
     var captureChannels: Int = 0
     var playbackChannels: Int = 0
+}
 
-    var pcmFileURL: URL?
+extension TmkTranslateDeliveryMode {
+    var onlineDemoTitle: String {
+        switch self {
+        case .default:
+            return "默认 default"
+        case .partial:
+            return "中间态 partial"
+        case .stable:
+            return "稳定 stable"
+        }
+    }
 }

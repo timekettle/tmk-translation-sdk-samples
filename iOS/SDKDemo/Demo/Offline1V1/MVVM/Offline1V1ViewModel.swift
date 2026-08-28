@@ -107,6 +107,17 @@ final class Offline1V1ViewModel: NSObject {
     private var channel: TmkTranslationChannel?
     private var voiceIO: TmkVoiceProcessingIO?
     private var hasStoppedListening = false
+    private lazy var ttsCoordinator = DemoTtsPlaybackCoordinator(
+        scene: .oneToOne,
+        sourceLaneResolver: { [weak self] result, _ in
+            self?.extractChannel(from: result)
+        },
+        onPlaybackChannelsChanged: { [weak self] channels in
+            guard let self, self.lastPlaybackChannels != channels else { return }
+            self.lastPlaybackChannels = channels
+            self.updateStateOnMain { $0.playbackChannels = channels }
+        }
+    )
     /// 当前待下载信息(引导下载场景):点"下载"时按此下差量包,点"取消"时清空。
     private var pendingDownloadInfo: OfflinePendingDownloadPrompt?
     /// 标记本次下载是否由"切语言/升档引导"触发:true 则下载完成只提示手动重试,不自动继续。
@@ -124,8 +135,8 @@ final class Offline1V1ViewModel: NSObject {
     private var selectedTargetLang = "en"
     private var selectedRightLang: String { selectedSourceLang }
     private var selectedLeftLang: String { selectedTargetLang }
-    private var selectedLeftSpeakerGender: TmkSpeakerGender? = .male
-    private var selectedRightSpeakerGender: TmkSpeakerGender? = .female
+    private var selectedLeftSpeakerGender: TmkSpeakerGender? = OneToOneDemoDefaults.offline.leftSpeaker
+    private var selectedRightSpeakerGender: TmkSpeakerGender? = OneToOneDemoDefaults.offline.rightSpeaker
     @Published private(set) var channelAudioMode: TmkChannelAudioMode = .standard
     /// 翻译下发模式：离线 Demo 默认 partial（展示中间态翻译）。
     @Published private(set) var selectedTranslateMode: TmkTranslateDeliveryMode = .partial
@@ -137,7 +148,6 @@ final class Offline1V1ViewModel: NSObject {
 
     private let stateLock = NSLock()
     private var isListeningActive = false
-    private var playbackMode: OneToOnePlaybackMode = .left
 
     // 每帧音频回调的 state 发布去重基线：playbackChannels / capture 信息在整通话中几乎恒定，
     // 无守卫会导致每帧 TTS/录音帧都深拷贝含 rows 的 OneToOneViewState 并触发 @Published 全量发布 +
@@ -148,8 +158,7 @@ final class Offline1V1ViewModel: NSObject {
 
     /// 模型根目录（App Documents/tmkOfflineModel/）。
     private var modelRootDirectory: String {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        return docs.appendingPathComponent("tmkOfflineModel").path
+        OneToOneDemoDefaults.offlineModelRootDirectory()
     }
 
     var currentLeftSpeakerGender: TmkSpeakerGender {
@@ -295,6 +304,7 @@ final class Offline1V1ViewModel: NSObject {
                                                                framesPerBuffer: 1024))
         }
         guard let voiceIO else { return }
+        ttsCoordinator.attach(voiceIO: voiceIO)
         hasStoppedListening = false
         configureInterruptionHandling(for: voiceIO)
         do {
@@ -334,6 +344,7 @@ final class Offline1V1ViewModel: NSObject {
             do {
                 try voiceIO.start()
                 self.setListeningActive(true)
+                self.ttsCoordinator.setActive(true)
                 self.updateStateOnMain {
                     $0.canStopListening = true
                     $0.canStartListening = false
@@ -347,6 +358,7 @@ final class Offline1V1ViewModel: NSObject {
 
     func stopListening() {
         voiceIO?.stop()
+        ttsCoordinator.setActive(false)
         resetLocalPCMPlaybackState()
         setListeningActive(false)
         // 复位每帧发布去重基线：下次开始收听时首帧会重新发布一次采集/回放信息。
@@ -381,9 +393,7 @@ final class Offline1V1ViewModel: NSObject {
     }
 
     func setPlaybackMode(_ mode: OneToOnePlaybackMode) {
-        playbackMode = mode
-        // 切换播放音源时清空历史播放缓存，避免旧声道残留音频影响新声道体验。
-        voiceIO?.clearPlaybackBuffer()
+        ttsCoordinator.setPlaybackMode(mode)
         updateStateOnMain { $0.playbackMode = mode }
     }
 
@@ -698,7 +708,7 @@ private extension Offline1V1ViewModel {
                 self.downloadButtonState = .notDownloaded
                 self.showCancelButton = false
                 self.updateDownloadPackageListStatusText(header: "鉴权失败，无法使用离线翻译")
-                self.updateStatus("鉴权失败：\(error.message)")
+                self.updateStatus("鉴权失败：\(DemoConversationRuntimePolicy.diagnosticMessage(for: error))")
                 self.stopCurrentChannelForMissingModels()
                 self.updateStateOnMain {
                     $0.canStartListening = false
@@ -1053,50 +1063,52 @@ private extension Offline1V1ViewModel {
         String(selectedTargetLang.split(separator: "-").first ?? "").lowercased()
     }
 
-    func audioRoute(from result: TmkResult<String>) -> TmkTranslatedAudioRoute? {
-        let routeValue = result.extraData["audio_route"]
-        if let route = routeValue as? TmkTranslatedAudioRoute { return route }
-        if let route = routeValue as? String { return TmkTranslatedAudioRoute(rawValue: route) }
-        return nil
-    }
-
     func bubbleKey(_ bubbleId: String, _ lane: OneToOneRowViewData.Lane) -> String {
         let mapped: DemoConversationLane = lane == .right ? .right : .left
         return DemoConversationBubbleAssembler.rowKey(bubbleId: bubbleId, lane: mapped)
     }
 
     func applyBubbleSnapshot(_ snapshot: DemoConversationBubbleSnapshot) {
-        DispatchQueue.main.async {
-            let lane: OneToOneRowViewData.Lane = snapshot.lane == .right ? .right : .left
-            let key = self.bubbleKey(snapshot.bubbleId, lane)
-            if let rowIndex = self.bubbleIndexMap[key], self.rows.indices.contains(rowIndex) {
-                var row = self.rows[rowIndex]
-                row.sessionId = snapshot.sessionId
-                row.sourceLangCode = snapshot.sourceLangCode
-                row.targetLangCode = snapshot.targetLangCode
-                row.sourceText = snapshot.sourceText
-                row.translatedText = snapshot.translatedText
-                row.isBubbleEnded = snapshot.isBubbleEnded
-                self.rows[rowIndex] = row
-                self.rowMutation.send(.update(row: row, index: rowIndex, heightMayChange: true))
-                self.publishRows()
-                return
+        if Thread.isMainThread {
+            applyBubbleSnapshotOnMain(snapshot)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.applyBubbleSnapshotOnMain(snapshot)
             }
-            let row = OneToOneRowViewData(sessionId: snapshot.sessionId,
-                                          bubbleId: snapshot.bubbleId,
-                                          lane: lane,
-                                          sourceLangCode: snapshot.sourceLangCode,
-                                          targetLangCode: snapshot.targetLangCode,
-                                          sourceText: snapshot.sourceText,
-                                          translatedText: snapshot.translatedText,
-                                          isBubbleEnded: snapshot.isBubbleEnded)
-            self.rows.append(row)
-            let newIndex = self.rows.count - 1
-            self.bubbleIndexMap[key] = newIndex
-            self.rowMutation.send(.insert(row: row, index: newIndex))
-            self.trimRowsIfNeeded()
-            self.publishRows()
         }
+    }
+
+    private func applyBubbleSnapshotOnMain(_ snapshot: DemoConversationBubbleSnapshot) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        let lane: OneToOneRowViewData.Lane = snapshot.lane == .right ? .right : .left
+        let key = bubbleKey(snapshot.bubbleId, lane)
+        if let rowIndex = bubbleIndexMap[key], rows.indices.contains(rowIndex) {
+            var row = rows[rowIndex]
+            row.sessionId = snapshot.sessionId
+            row.sourceLangCode = snapshot.sourceLangCode
+            row.targetLangCode = snapshot.targetLangCode
+            row.sourceText = snapshot.sourceText
+            row.translatedText = snapshot.translatedText
+            row.isBubbleEnded = snapshot.isBubbleEnded
+            rows[rowIndex] = row
+            rowMutation.send(.update(row: row, index: rowIndex, heightMayChange: true))
+            publishRows()
+            return
+        }
+        let row = OneToOneRowViewData(sessionId: snapshot.sessionId,
+                                      bubbleId: snapshot.bubbleId,
+                                      lane: lane,
+                                      sourceLangCode: snapshot.sourceLangCode,
+                                      targetLangCode: snapshot.targetLangCode,
+                                      sourceText: snapshot.sourceText,
+                                      translatedText: snapshot.translatedText,
+                                      isBubbleEnded: snapshot.isBubbleEnded)
+        rows.append(row)
+        let newIndex = rows.count - 1
+        bubbleIndexMap[key] = newIndex
+        rowMutation.send(.insert(row: row, index: newIndex))
+        trimRowsIfNeeded()
+        publishRows()
     }
 
     func trimRowsIfNeeded() {
@@ -1161,22 +1173,7 @@ extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadLi
 
     func onAudioDataReceive(from engine: AbstractChannelEngine, result: TmkResult<String>, data: Data, channelCount: Int) {
         _ = engine
-        guard result.data == "translated_audio", data.isEmpty == false else { return }
-        guard getListeningActive() else { return }
-        // channelCount 恒定 → 仅值变时发布，避免每帧 TTS 音频全量拷贝+发布 state（对齐 OfflineListen）。
-        if lastPlaybackChannels != channelCount {
-            lastPlaybackChannels = channelCount
-            updateStateOnMain { $0.playbackChannels = channelCount }
-        }
-        guard let playbackData = OneToOneTranslatedAudioPlaybackSelector.selectPlaybackData(
-            data: data,
-            channelCount: channelCount,
-            playbackMode: playbackMode,
-            audioRoute: audioRoute(from: result),
-            sourceLane: extractChannel(from: result),
-            extraData: result.extraData
-        ) else { return }
-        voiceIO?.enqueuePlaybackPCM(playbackData)
+        ttsCoordinator.handleAudioData(result: result, data: data, channelCount: channelCount)
     }
 
     func onError(_ error: TmkTranslationError) {

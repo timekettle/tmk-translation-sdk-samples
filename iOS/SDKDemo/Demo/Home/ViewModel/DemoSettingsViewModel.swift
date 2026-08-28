@@ -36,7 +36,7 @@ final class DemoSettingsViewModel {
         publishState()
     }
 
-    func setDiagnosisLevel(_ level: DemoDiagnosisLevel) {
+    func setDiagnosisLevel(_ level: TmkDiagnosisLevel) {
         state.draftConfig.diagnosisLevel = level
         publishState()
     }

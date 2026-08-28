@@ -16,7 +16,6 @@ class TranslationApp : Application() {
         if (SampleSdkConfig.hasCredentials()) {
             runCatching {
                 TmkTranslationSDK.sdkInit(this, SampleSdkConfig.globalConfig(this))
-                TmkTranslationSDK.lingCastTelemetrySetTraceReportingEnabled(true)
             }.onFailure { e ->
                 Log.e(TAG, "应用启动初始化 SDK 失败", e)
             }

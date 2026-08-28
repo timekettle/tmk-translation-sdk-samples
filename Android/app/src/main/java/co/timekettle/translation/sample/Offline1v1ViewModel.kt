@@ -1,8 +1,5 @@
 package co.timekettle.translation.sample
 
-import co.timekettle.translation.TmkTranslationSDK
-import co.timekettle.translation.TmkTranslationChannel
-import co.timekettle.translation.TmkTranslationException
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
@@ -13,6 +10,9 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import co.timekettle.translation.Cancelable
+import co.timekettle.translation.TmkTranslationChannel
+import co.timekettle.translation.TmkTranslationException
+import co.timekettle.translation.TmkTranslationSDK
 import co.timekettle.offlinesdk.vad.VadDetector
 import co.timekettle.translation.config.TmkTransChannelConfig
 import co.timekettle.translation.core.AbstractChannelEngine
@@ -53,7 +53,7 @@ class Offline1v1ViewModel @Inject constructor(
 
     companion object {
         private const val TAG = "Offline1v1VM"
-        private const val SAMPLE_RATE = 16000
+        private const val SAMPLE_RATE = OneToOneDemoDefaults.sampleRate
 
         /** 气泡快照重算去抖窗口(毫秒):合并高频 partial,兼顾流畅与实时。对齐 OfflineListenViewModel。 */
         private const val BUBBLE_REFRESH_THROTTLE_MS = 100L
@@ -71,23 +71,14 @@ class Offline1v1ViewModel @Inject constructor(
     // 因切换通道模式重建通道的场景:若切换前正在收听,重建就绪后自动恢复收听(对齐在线一对一)。
     @Volatile private var pendingAutoStartAfterRecreate = false
 
-    // 左声道 traceId
-    private var leftTraceId: String? = null
-    private var leftVadStartMs: Long = 0
-    private var leftFirstAsrMs: Long = 0
-    private var leftFirstMtMs: Long = 0
-    private var leftFirstTtsMs: Long = 0
 
-    // 右声道 traceId
-    private var rightTraceId: String? = null
-    @Volatile private var pendingRightMetadata: ByteArray? = null
-    private var rightVadStartMs: Long = 0
-    private var rightFirstAsrMs: Long = 0
-    private var rightFirstMtMs: Long = 0
-    private var rightFirstTtsMs: Long = 0
-
-    // 下行 TTS 队列式播放器(与在线一对一共用同一实现):按播放音源只播一路,对齐 iOS。
-    private val ttsPlayer = OneToOneTtsQueuePlayer(tag = TAG, sampleRate = SAMPLE_RATE)
+    // 下行 TTS 播放由统一封装类驱动:按播放音源只播一路,对齐 iOS。
+    private val ttsCoordinator = DemoTtsPlaybackCoordinator(
+        tag = TAG,
+        scene = DemoTtsScene.ONE_TO_ONE,
+        runtime = DemoTtsRuntime.OFFLINE,
+        sampleRate = SAMPLE_RATE,
+    )
 
     private val _isModelReady = MutableStateFlow(false)
     val isModelReady: StateFlow<Boolean> = _isModelReady.asStateFlow()
@@ -157,7 +148,7 @@ class Offline1v1ViewModel @Inject constructor(
     val targetLang: StateFlow<String> = _targetLang.asStateFlow()
 
     /** 翻译下发模式(离线中间态开关)。Demo 默认 PARTIAL 展示中间态;可运行时切换验证 D6。 */
-    private val _translateMode = MutableStateFlow(TmkTranslateDeliveryMode.PARTIAL)
+    private val _translateMode = MutableStateFlow(OneToOneDemoDefaults.offline.translateMode)
     val translateMode: StateFlow<TmkTranslateDeliveryMode> = _translateMode.asStateFlow()
 
     /**
@@ -226,11 +217,11 @@ class Offline1v1ViewModel @Inject constructor(
             }
         )
     }
-    private val _leftSpeakerGender = MutableStateFlow(SpeakerGender.FEMALE)
+    private val _leftSpeakerGender = MutableStateFlow(OneToOneDemoDefaults.offline.leftSpeaker)
     val leftSpeakerGender: StateFlow<SpeakerGender> = _leftSpeakerGender.asStateFlow()
-    private val _rightSpeakerGender = MutableStateFlow(SpeakerGender.MALE)
+    private val _rightSpeakerGender = MutableStateFlow(OneToOneDemoDefaults.offline.rightSpeaker)
     val rightSpeakerGender: StateFlow<SpeakerGender> = _rightSpeakerGender.asStateFlow()
-    private val _offlineAudioChannelMode = MutableStateFlow(TmkOfflineAudioChannelMode.STEREO)
+    private val _offlineAudioChannelMode = MutableStateFlow(OneToOneDemoDefaults.offline.audioMode)
     val offlineAudioChannelMode: StateFlow<TmkOfflineAudioChannelMode> = _offlineAudioChannelMode.asStateFlow()
     // 本机播放音源(左路/右路翻译),默认左路。立体声按此拆一路;低延迟(MONO)单路帧仅播选中那一路。
     private val _playbackMode = MutableStateFlow(OneToOnePlaybackMode.LEFT)
@@ -484,16 +475,6 @@ class Offline1v1ViewModel @Inject constructor(
         }
     }
 
-    private fun buildTraceMetadata(channel: Int): Pair<ByteArray, String> {
-        val now = java.util.Calendar.getInstance()
-        val hour = now.get(java.util.Calendar.HOUR_OF_DAY)
-        val minute = now.get(java.util.Calendar.MINUTE)
-        val second = now.get(java.util.Calendar.SECOND)
-        val metadata = byteArrayOf(channel.toByte(), hour.toByte(), minute.toByte(), second.toByte())
-        val traceId = String.format(java.util.Locale.US, "%d%02d%02d%02d", channel, hour, minute, second)
-        return metadata to traceId
-    }
-
     fun downloadModels(
         scenarioForPackages: OfflineScenarioOption = _scenarioOption.value,
         srcForPackages: String = _sourceLang.value,
@@ -637,7 +618,6 @@ class Offline1v1ViewModel @Inject constructor(
         return try {
             if (!_isInitialized.value) {
                 TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig(application))
-                TmkTranslationSDK.lingCastTelemetrySetTraceReportingEnabled(true)
                 _isInitialized.value = true
                 _initErrorMessage.value = null
                 addLog("SDK 初始化完成")
@@ -695,9 +675,9 @@ class Offline1v1ViewModel @Inject constructor(
                     _offlineModelPackages.value = emptyList()
                     addLog("鉴权失败: [$errorId] ${e.message}")
                     showConversationErrorPrompt(
-                        OnlineConversationErrorPrompts.fromCode(
+                        OnlineConversationErrorPrompts.fromException(
                             errorId,
-                            e.message ?: "offline auth failed",
+                            e,
                             mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
                         )
                     )
@@ -741,12 +721,13 @@ class Offline1v1ViewModel @Inject constructor(
             return
         }
         if (_isStarted.value) return
-        startTtsPlaybackThread()
+        ttsCoordinator.clear()
         if (!startDualChannelStreaming()) {
-            stopTtsPlayback()
+            ttsCoordinator.setActive(false)
             return
         }
         _isStarted.value = true
+        ttsCoordinator.setActive(true)
         addLog("离线一对一已开始采集")
     }
 
@@ -827,9 +808,9 @@ class Offline1v1ViewModel @Inject constructor(
                             addLog("创建 Channel 失败: [$errorId] ${e.message}")
                             _isStarting.value = false
                             showConversationErrorPrompt(
-                                OnlineConversationErrorPrompts.fromCode(
+                                OnlineConversationErrorPrompts.fromException(
                                     errorId,
-                                    e.message ?: "create offline one-to-one channel failed",
+                                    e,
                                     mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
                                 )
                             )
@@ -847,7 +828,8 @@ class Offline1v1ViewModel @Inject constructor(
 
     fun stopListening() {
         stopRecording()
-        stopTtsPlayback()
+        ttsCoordinator.setActive(false)
+        ttsCoordinator.release()
         _isStarted.value = false
         addLog("离线一对一已停止采集")
     }
@@ -913,7 +895,7 @@ class Offline1v1ViewModel @Inject constructor(
         val wasListening = _isStarted.value
         // 释放旧通道与采集/播放,但保留已鉴权/模型就绪状态,不走 stop() 的 released=true 全量收尾。
         stopRecording()
-        stopTtsPlayback()
+        ttsCoordinator.setActive(false)
         speakerCancelable?.cancel()
         speakerCancelable = null
         TmkTranslationSDK.releaseChannel()
@@ -937,18 +919,15 @@ class Offline1v1ViewModel @Inject constructor(
     private fun clearConversation() {
         bubbleAssembler.clear()
         _bubbles.value = emptyList()
-        leftTraceId = null; leftVadStartMs = 0; leftFirstAsrMs = 0; leftFirstMtMs = 0; leftFirstTtsMs = 0
-        rightTraceId = null; pendingRightMetadata = null
-        rightVadStartMs = 0; rightFirstAsrMs = 0; rightFirstMtMs = 0; rightFirstTtsMs = 0
     }
 
     /**
-     * 切换本机播放音源(左路/右路翻译)。改字段 + 清空播放缓冲(避免残留反声道数据),不重建通道。对齐在线一对一。
+     * 切换本机播放音源(左路/右路翻译)。改字段 + 停止当前帧/播放线程(避免残留反声道数据),不重建通道。对齐在线一对一。
      */
     fun setPlaybackMode(mode: OneToOnePlaybackMode) {
         if (_playbackMode.value == mode) return
         _playbackMode.value = mode
-        ttsPlayer.clearQueue()
+        ttsCoordinator.setPlaybackMode(mode)
         addLog("播放音源切换为 ${mode.title}")
     }
 
@@ -1004,12 +983,7 @@ class Offline1v1ViewModel @Inject constructor(
             DemoConversationEventAdapter.makeRecognizedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
             if (!isFinal) return
-            val now = System.currentTimeMillis()
-            if (ch == "left" && leftTraceId != null && leftFirstAsrMs == 0L) {
-                leftFirstAsrMs = now; addLog("ASR [final]:L $text | traceId=$leftTraceId ASR=${now - leftVadStartMs}ms")
-            } else if (ch == "right" && rightTraceId != null && rightFirstAsrMs == 0L) {
-                rightFirstAsrMs = now; addLog("ASR [final]:R $text | traceId=$rightTraceId ASR=${now - rightVadStartMs}ms")
-            } else addLog("ASR [ch=$ch final=$isFinal]: $text")
+            addLog("ASR [ch=$ch final=$isFinal]: $text")
         }
 
         override fun onTranslate(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
@@ -1021,35 +995,11 @@ class Offline1v1ViewModel @Inject constructor(
             DemoConversationEventAdapter.makeTranslatedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
             if (!isFinal) return
-            val now = System.currentTimeMillis()
-            if (ch == "left" && leftTraceId != null && leftFirstMtMs == 0L) {
-                leftFirstMtMs = now; addLog("MT [final]:L $text | traceId=$leftTraceId MT=${now - leftVadStartMs}ms")
-            } else if (ch == "right" && rightTraceId != null && rightFirstMtMs == 0L) {
-                rightFirstMtMs = now; addLog("MT [final]:R $text | traceId=$rightTraceId MT=${now - rightVadStartMs}ms")
-            } else addLog("MT [ch=$ch final=$isFinal]: $text")
+            addLog("MT [ch=$ch final=$isFinal]: $text")
         }
 
         override fun onAudioDataReceive(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, data: ByteArray, channelCount: Int) {
-            val ch = normalizeChannel(r?.extraData?.get("channel"))
-            val now = System.currentTimeMillis()
-            if (ch == "left" && leftTraceId != null && leftFirstTtsMs == 0L && data.isNotEmpty()) {
-                leftFirstTtsMs = now; val t = now - leftVadStartMs
-                addLog("TTS L 首包 | traceId=$leftTraceId 总=${t}ms ASR=${leftFirstAsrMs - leftVadStartMs}ms MT=${leftFirstMtMs - leftVadStartMs}ms")
-            } else if (ch == "right" && rightTraceId != null && rightFirstTtsMs == 0L && data.isNotEmpty()) {
-                rightFirstTtsMs = now; val t = now - rightVadStartMs
-                addLog("TTS R 首包 | traceId=$rightTraceId 总=${t}ms ASR=${rightFirstAsrMs - rightVadStartMs}ms MT=${rightFirstMtMs - rightVadStartMs}ms")
-            }
-            // 与在线一对一共用选路:标准(STEREO)帧按播放音源拆一路;低延迟(MONO)单路帧仅播选中音源那一路,对侧丢弃。
-            val audioRoute = OneToOnePlaybackSelector.AudioRoute.from(r?.extraData?.get("audio_route"))
-            val output = OneToOnePlaybackSelector.selectPlaybackData(
-                data = data,
-                channelCount = channelCount,
-                playbackMode = _playbackMode.value,
-                audioRoute = audioRoute,
-                leftActive = r?.extraData?.get("left_active") as? Boolean,
-                rightActive = r?.extraData?.get("right_active") as? Boolean,
-            ) ?: return
-            ttsPlayer.play(output.data, output.channelCount)
+            ttsCoordinator.handleAudioData(r, data, channelCount)
         }
 
         override fun onError(code: Int, msg: String) {
@@ -1082,18 +1032,6 @@ class Offline1v1ViewModel @Inject constructor(
     }
 
     /**
-     * 启动下行 TTS 播放。播放由 [ttsPlayer] 队列驱动,按声道数动态创建 AudioTrack;
-     * 帧的选路(听哪一路)在 onAudioDataReceive 里按 [_playbackMode] 完成。
-     */
-    private fun startTtsPlaybackThread() {
-        ttsPlayer.clearQueue()
-    }
-
-    private fun stopTtsPlayback() {
-        ttsPlayer.stop()
-    }
-
-    /**
      * 双声道推流：左声道固定资产 PCM，右声道麦克风。
      */
     private fun startDualChannelStreaming(): Boolean {
@@ -1119,18 +1057,9 @@ class Offline1v1ViewModel @Inject constructor(
         rightVadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
             setCallback(object : VadDetector.Callback {
                 override fun onVadStart() {
-                    val (metadata, traceId) = buildTraceMetadata(channel = 2)
-                    pendingRightMetadata = metadata
-                    rightTraceId = traceId
-                    TmkTranslationSDK.lingCastTelemetryStartTrace(traceId)
-                    rightVadStartMs = System.currentTimeMillis() - (rightVadDetector?.getVadBeginDurationMs() ?: 0)
-                    rightFirstAsrMs = 0; rightFirstMtMs = 0; rightFirstTtsMs = 0
-                    addLog("VAD R → 开始说话 traceId=$rightTraceId")
+                    addLog("VAD R → 开始说话")
                 }
-                override fun onVadEnd() {
-                    val tid = rightTraceId ?: return
-                    addLog("VAD R → 停止说话 traceId=$tid 持续${System.currentTimeMillis() - rightVadStartMs}ms")
-                }
+                override fun onVadEnd() { addLog("VAD R → 停止说话") }
             }); init()
         }
 
@@ -1151,25 +1080,17 @@ class Offline1v1ViewModel @Inject constructor(
                 }
 
                 // 对齐 iOS Demo：左声道资产 PCM 播完后先推 3 秒静音，再从头循环。
-                val startsNewLeftCycle = leftLoopBuffer.fillNextLoopChunk(pcmBuf)
+                leftLoopBuffer.fillNextLoopChunk(pcmBuf)
 
                 val leftBuf = pcmBuf
                 val rightBuf = micBuf
 
-                val leftCycleMetadata = if (startsNewLeftCycle) {
-                    buildLeftFileCycleMetadata()
-                } else {
-                    null
-                }
                 rightVadDetector?.pushAudioBytes(rightBuf)
 
                 if (_offlineAudioChannelMode.value == TmkOfflineAudioChannelMode.MONO) {
                     // 低延迟:左右各推单声道,分别送入各自离线管道(对齐 iOS pushStreamAudioData(_:speakerChannel:))。
-                    // metadata 各归各通道:左声道循环起点 metadata 走左,右声道 VAD traceId metadata 走右。
-                    channel?.pushStreamAudioData(leftBuf, SpeakerChannel.LEFT, leftCycleMetadata)
-                    val rightMeta = pendingRightMetadata
-                    pendingRightMetadata = null
-                    channel?.pushStreamAudioData(rightBuf, SpeakerChannel.RIGHT, rightMeta)
+                    channel?.pushStreamAudioData(leftBuf, SpeakerChannel.LEFT, null)
+                    channel?.pushStreamAudioData(rightBuf, SpeakerChannel.RIGHT, null)
                 } else {
                     // 标准:交织成立体声整块推流,SDK 内部拆分 + 混音器合成立体声返回。
                     var si = 0
@@ -1181,11 +1102,7 @@ class Offline1v1ViewModel @Inject constructor(
                         stereoBuf[si + 3] = rightBuf[bi + 1]
                         si += 4
                     }
-                    val metadata = leftCycleMetadata ?: pendingRightMetadata
-                    if (leftCycleMetadata == null && pendingRightMetadata != null) {
-                        pendingRightMetadata = null
-                    }
-                    channel?.pushStreamAudioData(stereoBuf, 2, metadata)
+                    channel?.pushStreamAudioData(stereoBuf, 2, null)
                 }
             }
         }.start()
@@ -1201,22 +1118,9 @@ class Offline1v1ViewModel @Inject constructor(
         }
     }
 
-    private fun buildLeftFileCycleMetadata(): ByteArray {
-        val (metadata, traceId) = buildTraceMetadata(channel = 1)
-        leftTraceId = traceId
-        leftVadStartMs = System.currentTimeMillis()
-        leftFirstAsrMs = 0
-        leftFirstMtMs = 0
-        leftFirstTtsMs = 0
-        TmkTranslationSDK.lingCastTelemetryStartTrace(traceId)
-        addLog("左路PCM新一轮开始 traceId=$traceId")
-        return metadata
-    }
-
     private fun stopRecording() {
         isRecording = false
         rightVadDetector?.release(); rightVadDetector = null
-        pendingRightMetadata = null
         try {
             audioRecord?.stop()
             audioRecord?.release()

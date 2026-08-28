@@ -14,6 +14,7 @@ struct OneToOneChannelAudioPushPlan {
 protocol OneToOneChannelModeConfiguration {
     var audioMode: TmkDialogConversationAudioMode { get }
     var pcmChannels: Int { get }
+    var speechStartMetadataChannelsForCurrentVADSource: [UInt8] { get }
     var fillsMissingFileAudioWithSilence: Bool { get }
 
     func makeInputAudioPushPlan(fileData: Data, rightMicData: Data) -> [OneToOneChannelAudioPushPlan]
@@ -24,6 +25,10 @@ extension OneToOneChannelModeConfiguration {
         audioMode == .standard
     }
 
+    var speechStartMetadataChannelsForCurrentVADSource: [UInt8] {
+        // 当前 Demo 的 VAD 只来自右侧麦克风，不能复用一次 speechStart 同时触发左右两路。
+        [OneToOneChannelModeConstants.rightMicMetadataChannel]
+    }
 }
 
 enum OneToOneChannelModeConfigurationFactory {
@@ -34,6 +39,18 @@ enum OneToOneChannelModeConfigurationFactory {
         case .lowLatency:
             return OneToOneLowLatencyChannelModeConfiguration()
         }
+    }
+}
+
+enum OneToOneSpeechMetadataRouting {
+    static func channelsForCurrentVADSource(_ audioMode: TmkDialogConversationAudioMode) -> [UInt8] {
+        OneToOneChannelModeConfigurationFactory
+            .make(mode: audioMode)
+            .speechStartMetadataChannelsForCurrentVADSource
+    }
+
+    static func channelForLeftFileLoop() -> UInt8 {
+        OneToOneChannelModeConstants.leftFileMetadataChannel
     }
 }
 
@@ -106,6 +123,11 @@ struct OneToOneLocalAudioLoopBuffer {
     }
 }
 
+private enum OneToOneChannelModeConstants {
+    static let leftFileMetadataChannel: UInt8 = 1
+    static let rightMicMetadataChannel: UInt8 = 2
+}
+
 enum OneToOneTranslatedAudioSourceRouting {
     /// 在线低延迟帧优先使用 SDK 明确给出的原始说话侧；旧 SDK 缺字段时由最终播放目标取对侧兜底。
     static func sourceLane(audioRoute: TmkTranslatedAudioRoute?,
@@ -147,10 +169,12 @@ enum OneToOneTranslatedAudioPlaybackSelector {
             return stereoPlaybackData(data: data,
                                       playbackMode: playbackMode,
                                       extraData: extraData)
-        case .left, .right:
-            if playbackMode == .left, sourceLane != .left { return nil }
-            if playbackMode == .right, sourceLane != .right { return nil }
-            return data
+        case .left:
+            // 低延迟模式下 SDK 分别回调左右两路单声道译音；直接按回调路由选择，
+            // 不再用说话人来源推导，以免一侧回调误入另一侧播放器。
+            return playbackMode == .left ? data : nil
+        case .right:
+            return playbackMode == .right ? data : nil
         case .none:
             return legacyPlaybackData(data: data,
                                       channelCount: channelCount,

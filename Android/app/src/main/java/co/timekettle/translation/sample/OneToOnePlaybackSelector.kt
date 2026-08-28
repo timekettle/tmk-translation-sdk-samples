@@ -1,53 +1,15 @@
 package co.timekettle.translation.sample
 
-
 /**
  * 一对一下行 TTS 播放音源选择器(纯逻辑,可单测)。在线与离线一对一 Demo 共用同一套选路规则,
  * 对齐 iOS 在线/离线共用的 `OneToOneTranslatedAudioPlaybackSelector`。
  *
  * 规则(输出恒为可直接播放的 PCM,并带上其真实声道数):
- * 1. 低延迟单声道帧(`audio_route`=left/right):在线 Demo 按原始说话侧 `speaker_channel` 选择，
- *    使“左路/右路翻译”与标准模式保持同一语义；对侧丢弃(返回 null)。
+ * 1. 低延迟单声道帧(`audio_route`=left/right):按 SDK 明确给出的播放路由选择，
+ *    `speaker_channel` 仅表示原始说话侧，不参与播放选路；对侧丢弃(返回 null)。
  * 2. 立体声(`audio_route`=stereo 或 channelCount>=2 的交织数据):按播放音源拆出对应一路,**输出单声道**。
  * 3. 其余非立体声:直接播放(原样返回,声道数不变)。
  */
-/**
- * PCM 帧处理工具（内联实现，对齐 SDK 内部 `PcmFrameToolkit`）。
- */
-private object PcmFrameToolkit {
-    private const val BYTES_PER_SAMPLE_16LE = 2
-    private const val STEREO_FRAME_BYTES = BYTES_PER_SAMPLE_16LE * 2
-
-    fun splitStereoInterleaved16LE(data: ByteArray, channelCount: Int): StereoSplit? {
-        if (channelCount != 2 || data.size < STEREO_FRAME_BYTES || data.size % STEREO_FRAME_BYTES != 0) {
-            return null
-        }
-        val halfSize = data.size / 2
-        val left = ByteArray(halfSize)
-        val right = ByteArray(halfSize)
-        var sourceIndex = 0
-        var targetIndex = 0
-        while (sourceIndex + 3 < data.size) {
-            left[targetIndex] = data[sourceIndex]
-            left[targetIndex + 1] = data[sourceIndex + 1]
-            right[targetIndex] = data[sourceIndex + 2]
-            right[targetIndex + 1] = data[sourceIndex + 3]
-            sourceIndex += STEREO_FRAME_BYTES
-            targetIndex += BYTES_PER_SAMPLE_16LE
-        }
-        return StereoSplit(left = left, right = right)
-    }
-
-    data class StereoSplit(val left: ByteArray, val right: ByteArray) {
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (other !is StereoSplit) return false
-            return left.contentEquals(other.left) && right.contentEquals(other.right)
-        }
-        override fun hashCode(): Int = 31 * left.contentHashCode() + right.contentHashCode()
-    }
-}
-
 object OneToOnePlaybackSelector {
 
     /**
@@ -63,18 +25,38 @@ object OneToOnePlaybackSelector {
         companion object {
             fun from(raw: Any?): AudioRoute? {
                 val value = raw?.toString()?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
-                return entries.firstOrNull { it.rawValue == value }
+                return when (value) {
+                    "1" -> LEFT
+                    "2" -> RIGHT
+                    else -> entries.firstOrNull { it.rawValue == value }
+                }
             }
         }
     }
 
     /**
+     * 解析离线一对一 TTS 路由。
+     *
+     * 低延迟单声道结果的旧版本可能只携带 `channel`，而标准模式的立体声结果也会
+     * 携带一个代表 canonical lane 的 `channel`。因此只有在确认帧为单声道时才允许
+     * 用 `channel` 兜底，避免把标准立体声帧误判成单路而不再拆声道。
+     */
+    fun resolveOfflineAudioRoute(channelCount: Int, rawAudioRoute: Any?, rawChannel: Any?): AudioRoute? {
+        AudioRoute.from(rawAudioRoute)?.let { return it }
+        return if (channelCount < 2) AudioRoute.from(rawChannel) else null
+    }
+
+    /**
      * 解析在线低延迟帧的原始说话侧。
      *
-     * 新版 SDK 直接提供 `speaker_channel`;旧版缺失时由最终播放目标 [audioRoute] 取对侧兜底。
+     * 新版 SDK 直接提供 `speaker_channel`;它用于诊断/追踪，播放选路仍以 `audio_route` 为准。
+     * 旧版缺失时由最终播放目标 [audioRoute] 取对侧兜底，仅供兼容调用方。
      * `audio_route=stereo` 不代表单一说话侧，返回 null。
      */
     fun resolveOnlineSpeakerChannel(audioRoute: AudioRoute?, rawSpeakerChannel: Any?): AudioRoute? {
+        // `stereo` 表示一帧同时包含左右两路，不能把可能附带的 speaker_channel
+        // 当成整帧播放路由，否则标准模式会绕过声道拆分并同时播放两路。
+        if (audioRoute == AudioRoute.STEREO) return null
         AudioRoute.from(rawSpeakerChannel)?.let { explicit ->
             if (explicit == AudioRoute.LEFT || explicit == AudioRoute.RIGHT) return explicit
         }
@@ -115,15 +97,8 @@ object OneToOnePlaybackSelector {
         rightActive: Boolean? = null,
     ): PlaybackOutput? {
         if (data.isEmpty()) return null
-        // 在线低延迟优先按原始说话侧选择，保持与标准 stereo 的左右路语义一致。
-        when (speakerChannel) {
-            AudioRoute.LEFT ->
-                return if (playbackMode == OneToOnePlaybackMode.LEFT) PlaybackOutput(data, channelCount) else null
-            AudioRoute.RIGHT ->
-                return if (playbackMode == OneToOnePlaybackMode.RIGHT) PlaybackOutput(data, channelCount) else null
-            AudioRoute.STEREO, null -> Unit
-        }
-        // 未提供说话侧时保留原有 route 行为，供离线和旧调用方使用。
+        // SDK 的 audio_route 是最终播放目标；它优先于 speaker_channel。
+        // 在线双 UID 服务端已把对侧译音交叉下发到该目标连接，不能再次按 speaker_channel 取反。
         when (audioRoute) {
             AudioRoute.LEFT ->
                 return if (playbackMode == OneToOnePlaybackMode.LEFT) PlaybackOutput(data, channelCount) else null
@@ -131,22 +106,49 @@ object OneToOnePlaybackSelector {
                 return if (playbackMode == OneToOnePlaybackMode.RIGHT) PlaybackOutput(data, channelCount) else null
             AudioRoute.STEREO, null -> Unit
         }
-        // 立体声:按播放音源拆一路,输出单声道。
-        val split = PcmFrameToolkit.splitStereoInterleaved16LE(data, channelCount)
-        if (split != null) {
-            val effectiveMode = when {
-                playbackMode == OneToOnePlaybackMode.LEFT && leftActive == false && rightActive == true ->
-                    OneToOnePlaybackMode.RIGHT
-                playbackMode == OneToOnePlaybackMode.RIGHT && rightActive == false && leftActive == true ->
-                    OneToOnePlaybackMode.LEFT
-                else -> playbackMode
+        // 旧版 SDK 未提供 audio_route 时，仅对确认的单声道帧保留 speaker_channel 兼容兜底。
+        // channelCount>=2 表示交织立体声，即使附带 speaker_channel 也必须继续拆分，
+        // 否则会把整帧左右声道一起送入播放器。
+        if (channelCount < 2) {
+            when (speakerChannel) {
+                AudioRoute.LEFT ->
+                    return if (playbackMode == OneToOnePlaybackMode.LEFT) PlaybackOutput(data, channelCount) else null
+                AudioRoute.RIGHT ->
+                    return if (playbackMode == OneToOnePlaybackMode.RIGHT) PlaybackOutput(data, channelCount) else null
+                AudioRoute.STEREO, null -> Unit
             }
-            val lane = if (effectiveMode == OneToOnePlaybackMode.LEFT) split.left else split.right
+        }
+        // 立体声:按用户选择的播放音源拆一路,输出单声道。
+        // left_active/right_active 只描述服务端本帧是否有内容，不能改变用户选择；
+        // 否则连续收到“仅右路有内容”的帧时，左路选择也会被偷偷切到右路。
+        val split = splitStereoInterleaved16LE(data, channelCount)
+        if (split != null) {
+            val lane = if (playbackMode == OneToOnePlaybackMode.LEFT) split.left else split.right
             return PlaybackOutput(lane, channelCount = 1)
         }
         // 非立体声:直接播放。
         return PlaybackOutput(data, channelCount)
     }
+
+    /** Samples 内部的 PCM16LE 立体声拆分，避免依赖 SDK 未公开的实现类。 */
+    private fun splitStereoInterleaved16LE(data: ByteArray, channelCount: Int): StereoSplit? {
+        if (channelCount != 2 || data.size < 4 || data.size % 4 != 0) return null
+        val left = ByteArray(data.size / 2)
+        val right = ByteArray(data.size / 2)
+        var source = 0
+        var target = 0
+        while (source < data.size) {
+            left[target] = data[source]
+            left[target + 1] = data[source + 1]
+            right[target] = data[source + 2]
+            right[target + 1] = data[source + 3]
+            source += 4
+            target += 2
+        }
+        return StereoSplit(left, right)
+    }
+
+    private data class StereoSplit(val left: ByteArray, val right: ByteArray)
 }
 
 /**

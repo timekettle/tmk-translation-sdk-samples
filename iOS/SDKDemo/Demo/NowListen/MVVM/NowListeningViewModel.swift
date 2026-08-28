@@ -14,6 +14,13 @@ final class NowListeningViewModel: NSObject {
     private var channel: TmkTranslationChannel?
     private var voiceIO: TmkVoiceProcessingIO?
     private var hasStoppedListening = false
+    private lazy var ttsCoordinator = DemoTtsPlaybackCoordinator(
+        scene: .listen,
+        targetLanguageProvider: { [weak self] in self?.selectedTargetLang },
+        onPlaybackChannelsChanged: { [weak self] channels in
+            self?.updatePlaybackChannel(channels)
+        }
+    )
 
     private var rows: [NowListeningRowViewData] = []
     private var bubbleIndexMap: [String: Int] = [:]
@@ -35,22 +42,19 @@ final class NowListeningViewModel: NSObject {
     private var selectedSpeakerGender: TmkSpeakerGender = .female
     private var selectedTranslateEngine: TmkOnlineTranslateEngine = .accurate
     private var selectedRecognizeEngine: TmkOnlineRecognizeEngine = .default
+    private var selectedTranslateMode: TmkTranslateDeliveryMode = .default
     private var selectedScenarioOption: NowListeningScenarioOption = .defaultOption
     private var supportedLanguages: Set<String> = []
     private var isAuthVerified = false
 
-    private let audioProcessQueue = DispatchQueue(label: "co.timekettle.demo.nowlistening.audio")
     private let stateLock = NSLock()
     private var isListeningActive = false
-    private var isCaptureEnabled = false
+    private var pendingAutoStartAfterRecreate = false
     private var cachedCaptureSampleRate: Int = -1
     private var cachedCaptureChannels: Int = -1
     private var cachedPlaybackChannels: Int = -1
     private let maxDisplayedRows = 200
 
-    private var pcmFileHandle: FileHandle?
-    private var hasPCMData = false
-    private var isPCMRecordingEnabled = false
     private let networkEventPolicy = DemoOnlineNetworkEventPolicy()
 
     func configureInitialLanguages(source: String?, target: String?) {
@@ -68,8 +72,8 @@ final class NowListeningViewModel: NSObject {
             $0.targetLanguage = self.selectedTargetLang
             $0.translateEngine = self.selectedTranslateEngine
             $0.recognizeEngine = self.selectedRecognizeEngine
+            $0.translateMode = self.selectedTranslateMode
             $0.scenarioOption = self.selectedScenarioOption
-            $0.isCaptureEnabled = self.isCaptureEnabled
         }
         startOnlineListening()
     }
@@ -95,6 +99,7 @@ final class NowListeningViewModel: NSObject {
                                                                framesPerBuffer: 1024))
         }
         guard let voiceIO else { return }
+        ttsCoordinator.attach(voiceIO: voiceIO)
 
         configureInterruptionHandling(for: voiceIO)
 
@@ -125,15 +130,12 @@ final class NowListeningViewModel: NSObject {
             }
             let ioStartAt = Date()
             do {
-                if self.isPCMRecordingEnabled {
-                    self.preparePCMFileForWriting()
-                }
                 try voiceIO.start()
                 self.setListeningActive(true)
+                self.ttsCoordinator.setActive(true)
                 self.updateStateOnMain {
                     $0.canStopListening = true
                     $0.canStartListening = false
-                    $0.canSharePCM = false
                 }
                 self.updateStatus("正在收听中...")
                 Self.logger.info("startListening ioStartDurationMs=\(self.durationMs(since: ioStartAt), privacy: .public) result=success")
@@ -145,14 +147,14 @@ final class NowListeningViewModel: NSObject {
     }
 
     func stopListening() {
+        clearPendingAutoStartAfterRecreate()
         voiceIO?.stop()
-        closePCMFile()
+        ttsCoordinator.setActive(false)
         setListeningActive(false)
         activePlaybackUID = nil
         updateStateOnMain {
             $0.canStopListening = false
             $0.canStartListening = self.channel != nil
-            $0.canSharePCM = self.hasPCMData
         }
         updateStatus("收听已停止")
     }
@@ -175,21 +177,6 @@ final class NowListeningViewModel: NSObject {
                 }
             }
         }
-    }
-
-    var currentPCMURL: URL? {
-        state.pcmFileURL
-    }
-
-    @discardableResult
-    func enablePCMRecordingIfNeeded() -> Bool {
-        if isPCMRecordingEnabled { return false }
-        isPCMRecordingEnabled = true
-        if getListeningActive(), pcmFileHandle == nil {
-            preparePCMFileForWriting()
-        }
-        updateStatus("已开启PCM录制，请先进行对话后再分享")
-        return true
     }
 
     func fetchSupportedLanguages(
@@ -223,20 +210,6 @@ final class NowListeningViewModel: NSObject {
         }
         guard source != selectedSourceLang || target != selectedTargetLang else { return }
         updateListeningLanguages(source: source, target: target)
-    }
-
-    func setCaptureEnabled(_ enabled: Bool) {
-        stateLock.lock()
-        isCaptureEnabled = enabled
-        stateLock.unlock()
-        isPCMRecordingEnabled = enabled
-        if enabled, getListeningActive(), pcmFileHandle == nil {
-            preparePCMFileForWriting()
-        }
-        if enabled == false {
-            closePCMFile()
-        }
-        updateStateOnMain { $0.isCaptureEnabled = enabled }
     }
 
     func updateSpeaker(gender: TmkSpeakerGender) {
@@ -285,6 +258,16 @@ final class NowListeningViewModel: NSObject {
             $0.recognizeEngine = recognizeEngine
         }
         recreateRoomAndChannel(statusText: "在线收听识别引擎已切换，重新创建通道中...")
+    }
+
+    /// 翻译下发模式在创建房间时下发，切换后沿用通道模式的释放并重建流程使新模式生效。
+    func updateTranslateMode(_ translateMode: TmkTranslateDeliveryMode) {
+        guard selectedTranslateMode != translateMode else { return }
+        selectedTranslateMode = translateMode
+        updateStateOnMain {
+            $0.translateMode = translateMode
+        }
+        recreateRoomAndChannel(statusText: "在线收听翻译下发模式已切换，重新创建通道中...")
     }
 
     func updateScenarioOption(_ option: NowListeningScenarioOption) {
@@ -345,7 +328,9 @@ private extension NowListeningViewModel {
             channelScenario: .listen,
             speakers: configuredSpeakers(),
             translateEngine: selectedTranslateEngine,
-            recognizeEngine: selectedRecognizeEngine
+            recognizeEngine: selectedRecognizeEngine,
+            translateMode: selectedTranslateMode,
+            enableSensitiveWordRedaction: settings.sensitiveWordRedactionEnabled ? .enabled : .disabled
         )
         TmkTranslationSDK.shared.createTmkTranslationRoom(config: roomConfig) { [weak self] roomResult in
             guard let self else { return }
@@ -390,8 +375,15 @@ private extension NowListeningViewModel {
             switch channelResult {
             case .success(let channel):
                 self.channel = channel
+                let shouldResumeListening = self.consumePendingAutoStartAfterRecreate()
                 self.updateStateOnMain {
                     $0.canStartListening = true
+                    if shouldResumeListening {
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self, self.hasStoppedListening == false else { return }
+                            self.startListening()
+                        }
+                    }
                 }
                 Self.logger.info("启动翻译耗时 加入通道耗时 channelDurationMs=\(channelDurationMs, privacy: .public) totalDurationMs=\(totalDurationMs, privacy: .public) result=success")
                 self.updateStatus("在线通道已就绪，点击“开始收听”开始采集")
@@ -405,13 +397,13 @@ private extension NowListeningViewModel {
     func stopListeningIfNeeded() {
         guard hasStoppedListening == false else { return }
         hasStoppedListening = true
+        clearPendingAutoStartAfterRecreate()
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
         voiceIO?.stop()
-        closePCMFile()
+        ttsCoordinator.setActive(false)
         voiceIO = nil
-        isPCMRecordingEnabled = false
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         room = nil
@@ -421,11 +413,11 @@ private extension NowListeningViewModel {
     }
 
     func recreateRoomAndChannel(statusText: String) {
+        setPendingAutoStartAfterRecreate(getListeningActive())
         voiceIO?.stop()
-        closePCMFile()
+        ttsCoordinator.setActive(false)
         setListeningActive(false)
         voiceIO = nil
-        isPCMRecordingEnabled = false
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         room = nil
@@ -440,7 +432,6 @@ private extension NowListeningViewModel {
             $0.rows = []
             $0.canStartListening = false
             $0.canStopListening = false
-            $0.canSharePCM = false
             $0.currentRoomNo = "-"
             $0.captureSampleRate = 0
             $0.captureChannels = 0
@@ -712,58 +703,34 @@ private extension NowListeningViewModel {
         Int(Date().timeIntervalSince(startAt) * 1000)
     }
 
-    func preparePCMFileForWriting() {
-        closePCMFile()
-        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let filename = "NowListening_\(formatter.string(from: Date())).pcm"
-        let url = dir.appendingPathComponent(filename)
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        hasPCMData = false
-        do {
-            pcmFileHandle = try FileHandle(forWritingTo: url)
-            updateStateOnMain { $0.pcmFileURL = url }
-        } catch {
-            pcmFileHandle = nil
-            updateStateOnMain { $0.pcmFileURL = nil }
-            updateStatus("PCM文件创建失败：\(error.localizedDescription)")
-        }
-    }
-
-    func writePCMDataToFile(_ data: Data) {
-        guard data.isEmpty == false else { return }
-        guard let handle = pcmFileHandle else { return }
-        do {
-            try handle.write(contentsOf: data)
-            hasPCMData = true
-        } catch {
-            updateStatus("PCM写入失败：\(error.localizedDescription)")
-        }
-    }
-
-    func closePCMFile() {
-        try? pcmFileHandle?.close()
-        pcmFileHandle = nil
-    }
-
     func setListeningActive(_ active: Bool) {
         stateLock.lock()
         isListeningActive = active
         stateLock.unlock()
     }
 
+    func setPendingAutoStartAfterRecreate(_ pending: Bool) {
+        stateLock.lock()
+        pendingAutoStartAfterRecreate = pending
+        stateLock.unlock()
+    }
+
+    func consumePendingAutoStartAfterRecreate() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let pending = pendingAutoStartAfterRecreate
+        pendingAutoStartAfterRecreate = false
+        return pending
+    }
+
+    func clearPendingAutoStartAfterRecreate() {
+        setPendingAutoStartAfterRecreate(false)
+    }
+
     func getListeningActive() -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
         return isListeningActive
-    }
-
-    func getCaptureEnabled() -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return isCaptureEnabled
     }
 
     func applyRuntimeAction(_ action: DemoConversationRuntimeAction) {
@@ -788,13 +755,13 @@ private extension NowListeningViewModel {
             return
         }
         hasStoppedListening = true
+        clearPendingAutoStartAfterRecreate()
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
         voiceIO?.stop()
-        closePCMFile()
+        ttsCoordinator.setActive(false)
         voiceIO = nil
-        isPCMRecordingEnabled = false
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         room = nil
@@ -806,7 +773,6 @@ private extension NowListeningViewModel {
         updateStateOnMain {
             $0.canStartListening = false
             $0.canStopListening = false
-            $0.canSharePCM = self.hasPCMData
             $0.currentRoomNo = "-"
             $0.captureSampleRate = 0
             $0.captureChannels = 0
@@ -857,37 +823,7 @@ extension NowListeningViewModel: TmkTranslationListener {
 
     func onAudioDataReceive(from engine: AbstractChannelEngine, result: TmkResult<String>, data: Data, channelCount: Int) {
         _ = engine
-        guard result.data == "translated_audio" else { return }
-        audioProcessQueue.async { [weak self] in
-            autoreleasepool {
-                guard let self else { return }
-                guard self.getListeningActive() else { return }
-                self.updatePlaybackChannel(channelCount)
-                
-                if result.dstCode.lowercased().hasPrefix(self.selectedTargetLang.lowercased()) == false { return }
-                
-//                let uidValue = result.extraData["uid"]
-//                let uid: Int? = {
-//                    if let intValue = uidValue as? Int { return intValue }
-//                    if let uintValue = uidValue as? UInt { return Int(uintValue) }
-//                    if let strValue = uidValue as? String { return Int(strValue) }
-//                    return nil
-//                }()
-//                guard let uid else { return }
-//                if self.targetPlaybackUIDs.isEmpty { self.targetPlaybackUIDs.insert(uid) }
-//                guard self.targetPlaybackUIDs.contains(uid) else { return }
-//                if self.activePlaybackUID == nil { self.activePlaybackUID = uid }
-//                guard self.activePlaybackUID == uid else { return }
-                
-                if self.isPCMRecordingEnabled {
-                    if self.pcmFileHandle == nil {
-                        self.preparePCMFileForWriting()
-                    }
-                    self.writePCMDataToFile(data)
-                }
-                self.voiceIO?.enqueuePlaybackPCM(data)
-            }
-        }
+        ttsCoordinator.handleAudioData(result: result, data: data, channelCount: channelCount)
     }
 
     func onError(_ error: TmkTranslationError) {
@@ -938,13 +874,13 @@ extension NowListeningViewModel: TmkTranslationListener {
     private func handleRemoteCloseRoom() {
         guard hasStoppedListening == false else { return }
         hasStoppedListening = true
+        clearPendingAutoStartAfterRecreate()
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
         voiceIO?.stop()
-        closePCMFile()
+        ttsCoordinator.setActive(false)
         voiceIO = nil
-        isPCMRecordingEnabled = false
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         room = nil
@@ -956,7 +892,6 @@ extension NowListeningViewModel: TmkTranslationListener {
         updateStateOnMain {
             $0.canStartListening = false
             $0.canStopListening = false
-            $0.canSharePCM = self.hasPCMData
             $0.currentRoomNo = "-"
             $0.captureSampleRate = 0
             $0.captureChannels = 0

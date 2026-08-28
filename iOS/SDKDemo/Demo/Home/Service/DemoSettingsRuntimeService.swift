@@ -58,7 +58,7 @@ final class DemoSettingsRuntimeService {
                                        offlineEngineStatus: offlineStatus,
                                        authInfo: authInfo)
         case .failure(let error):
-            let detail = error.localizedDescription
+            let detail = DemoConversationRuntimePolicy.diagnosticMessage(for: error)
             let unavailable = DemoSettingsEngineStatus(kind: .unavailable,
                                                        summary: "不可用",
                                                        detail: detail)

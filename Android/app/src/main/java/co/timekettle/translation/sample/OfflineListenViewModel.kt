@@ -1,20 +1,19 @@
 package co.timekettle.translation.sample
 
-import co.timekettle.translation.TmkTranslationSDK
-import co.timekettle.translation.TmkTranslationChannel
-import co.timekettle.translation.TmkTranslationException
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
-import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import co.timekettle.translation.Cancelable
+import co.timekettle.translation.TmkTranslationChannel
+import co.timekettle.translation.TmkTranslationException
+import co.timekettle.translation.TmkTranslationSDK
 import co.timekettle.offlinesdk.vad.VadDetector
 import co.timekettle.translation.config.TmkTransChannelConfig
 import co.timekettle.translation.core.AbstractChannelEngine
@@ -55,9 +54,6 @@ class OfflineListenViewModel @Inject constructor(
     companion object {
         private const val TAG = "OfflineListenVM"
         private const val SAMPLE_RATE = 16000
-        private const val PCM_16BIT_BYTES = 2
-        private const val TTS_QUEUE_MAX_MS = 1_000
-        private const val TTS_QUEUE_TARGET_MS = 300
 
         /** 气泡快照重算去抖窗口(毫秒):合并高频 partial,兼顾流畅与实时。 */
         private const val BUBBLE_REFRESH_THROTTLE_MS = 100L
@@ -66,34 +62,21 @@ class OfflineListenViewModel @Inject constructor(
         val SUPPORTED_LANGUAGES = TranslationLanguages.offline
     }
 
-    private data class TtsFrame(val data: ByteArray, val sampleRate: Int, val channelCount: Int)
-
     private var channel: TmkTranslationChannel? = null
     private var speakerCancelable: Cancelable? = null
     private var localeCancelable: Cancelable? = null
     private var audioRecord: AudioRecord? = null
-    private var audioTrack: AudioTrack? = null
-    private var audioTrackSampleRate: Int = 0
-    private var audioTrackChannelCount: Int = 0
-    private val ttsQueueLock = Object()
-    private val ttsQueue = java.util.ArrayDeque<TtsFrame>()
-    private var ttsQueuedBytes: Int = 0
-    private var queuedTtsSampleRate: Int = 0
-    private var queuedTtsChannelCount: Int = 0
-    private var ttsPlayerThread: Thread? = null
-    @Volatile private var isTtsPlayerRunning = false
+    private val ttsCoordinator = DemoTtsPlaybackCoordinator(
+        tag = TAG,
+        scene = DemoTtsScene.LISTEN,
+        runtime = DemoTtsRuntime.OFFLINE,
+        sampleRate = SAMPLE_RATE,
+    )
     private var vadDetector: VadDetector? = null
     @Volatile private var isRecording = false
     @Volatile private var released = false
     @Volatile private var userCancelledDownload = false
 
-    // traceId 计时
-    private var currentTraceId: String? = null
-    @Volatile private var pendingMetadata: ByteArray? = null
-    private var vadStartMs: Long = 0
-    private var firstAsrMs: Long = 0
-    private var firstMtMs: Long = 0
-    private var firstTtsMs: Long = 0
 
     private val _isModelReady = MutableStateFlow(false)
     val isModelReady: StateFlow<Boolean> = _isModelReady.asStateFlow()
@@ -344,20 +327,6 @@ class OfflineListenViewModel @Inject constructor(
         }
     }
 
-    private fun buildTraceMetadata(channel: Int): Pair<ByteArray, String> {
-        val now = java.util.Calendar.getInstance()
-        val hour = now.get(java.util.Calendar.HOUR_OF_DAY)
-        val minute = now.get(java.util.Calendar.MINUTE)
-        val second = now.get(java.util.Calendar.SECOND)
-        val metadata = byteArrayOf(channel.toByte(), hour.toByte(), minute.toByte(), second.toByte())
-        val traceId = String.format(java.util.Locale.US, "%d%02d%02d%02d", channel, hour, minute, second)
-        return metadata to traceId
-    }
-
-    private fun resetTrace() {
-        currentTraceId = null; pendingMetadata = null; vadStartMs = 0; firstAsrMs = 0; firstMtMs = 0; firstTtsMs = 0
-    }
-
     fun downloadModels(
         scenarioForPackages: OfflineScenarioOption = _scenarioOption.value,
         srcForPackages: String = _sourceLang.value,
@@ -501,7 +470,6 @@ class OfflineListenViewModel @Inject constructor(
         return try {
             if (!_isInitialized.value) {
                 TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig(application))
-                TmkTranslationSDK.lingCastTelemetrySetTraceReportingEnabled(true)
                 _isInitialized.value = true
                 _initErrorMessage.value = null
                 addLog("SDK 初始化完成")
@@ -559,9 +527,9 @@ class OfflineListenViewModel @Inject constructor(
                     _offlineModelPackages.value = emptyList()
                     addLog("鉴权失败: [$errorId] ${e.message}")
                     showConversationErrorPrompt(
-                        OnlineConversationErrorPrompts.fromCode(
+                        OnlineConversationErrorPrompts.fromException(
                             errorId,
-                            e.message ?: "offline auth failed",
+                            e,
                             mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
                         )
                     )
@@ -607,6 +575,7 @@ class OfflineListenViewModel @Inject constructor(
         if (_isStarted.value) return
         if (!startRecording()) return
         _isStarted.value = true
+        ttsCoordinator.setActive(true)
         addLog("离线收听已开始采集")
     }
 
@@ -691,9 +660,9 @@ class OfflineListenViewModel @Inject constructor(
                                     addLog("创建 Channel 失败: [$errorId] ${e.message}")
                                     _isStarting.value = false
                                     showConversationErrorPrompt(
-                                        OnlineConversationErrorPrompts.fromCode(
+                                        OnlineConversationErrorPrompts.fromException(
                                             errorId,
-                                            e.message ?: "create offline channel failed",
+                                            e,
                                             mode = OnlineConversationErrorPrompts.RuntimeMode.OFFLINE,
                                         )
                                     )
@@ -721,7 +690,8 @@ class OfflineListenViewModel @Inject constructor(
 
     fun stopListening() {
         stopRecording()
-        stopTtsPlayback()
+        ttsCoordinator.setActive(false)
+        ttsCoordinator.release()
         _isStarted.value = false
         addLog("离线收听已停止采集")
     }
@@ -947,13 +917,7 @@ class OfflineListenViewModel @Inject constructor(
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
             DemoConversationEventAdapter.makeRecognizedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
-            val tid = currentTraceId
-            if (isFinal && tid != null && firstAsrMs == 0L) {
-                firstAsrMs = System.currentTimeMillis()
-                addLog("ASR [final]: $text | traceId=$tid ASR=${firstAsrMs - vadStartMs}ms")
-            } else {
-                addLog("ASR [final=$isFinal]: $text")
-            }
+            addLog("ASR [final=$isFinal]: $text")
         }
 
         override fun onTranslate(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
@@ -963,25 +927,11 @@ class OfflineListenViewModel @Inject constructor(
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
             DemoConversationEventAdapter.makeTranslatedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
-            val tid = currentTraceId
-            if (isFinal && tid != null && firstMtMs == 0L) {
-                firstMtMs = System.currentTimeMillis()
-                addLog("MT [final]: $text | traceId=$tid MT=${firstMtMs - vadStartMs}ms")
-            } else {
-                addLog("MT [final=$isFinal]: $text")
-            }
+            addLog("MT [final=$isFinal]: $text")
         }
 
         override fun onAudioDataReceive(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, data: ByteArray, channelCount: Int) {
-            val tid = currentTraceId
-            if (tid != null && firstTtsMs == 0L && data.isNotEmpty()) {
-                firstTtsMs = System.currentTimeMillis()
-                val total = firstTtsMs - vadStartMs
-                val asr = if (firstAsrMs > 0) firstAsrMs - vadStartMs else -1
-                val mt = if (firstMtMs > 0) firstMtMs - vadStartMs else -1
-                addLog("TTS 首包 | traceId=$tid 总=${total}ms ASR=${asr}ms MT=${mt}ms")
-            }
-            playTtsAudio(data, resolveTtsSampleRate(r), channelCount)
+            ttsCoordinator.handleAudioData(r, data, channelCount)
         }
 
         override fun onError(code: Int, msg: String) {
@@ -1035,17 +985,10 @@ class OfflineListenViewModel @Inject constructor(
         vadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
             setCallback(object : VadDetector.Callback {
                 override fun onVadStart() {
-                    resetTrace()
-                    val (metadata, traceId) = buildTraceMetadata(channel = 1)
-                    pendingMetadata = metadata
-                    currentTraceId = traceId
-                    TmkTranslationSDK.lingCastTelemetryStartTrace(traceId)
-                    vadStartMs = System.currentTimeMillis() - (vadDetector?.getVadBeginDurationMs() ?: 0)
-                    addLog("VAD → 开始说话 traceId=$currentTraceId")
+                    addLog("VAD → 开始说话")
                 }
                 override fun onVadEnd() {
-                    val tid = currentTraceId ?: return
-                    addLog("VAD → 停止说话 traceId=$tid 持续${System.currentTimeMillis() - vadStartMs}ms")
+                    addLog("VAD → 停止说话")
                 }
             })
             init()
@@ -1058,9 +1001,7 @@ class OfflineListenViewModel @Inject constructor(
                 if (read > 0) {
                     val data = buffer.copyOf(read)
                     vadDetector?.pushAudioBytes(data)
-                    val metadata = pendingMetadata
-                    pendingMetadata = null
-                    channel?.pushStreamAudioData(data, 1, metadata)
+                    channel?.pushStreamAudioData(data, 1, null)
                 }
             }
         }.start()
@@ -1075,179 +1016,6 @@ class OfflineListenViewModel @Inject constructor(
             audioRecord?.release()
         } catch (_: Exception) {}
         audioRecord = null
-    }
-
-    private fun playTtsAudio(data: ByteArray, sampleRate: Int, channelCount: Int) {
-        if (data.isEmpty()) return
-        val safeSampleRate = sampleRate.takeIf { it > 0 } ?: SAMPLE_RATE
-        val safeChannelCount = if (channelCount == 2) 2 else 1
-        synchronized(ttsQueueLock) {
-            if ((queuedTtsSampleRate != 0 && queuedTtsSampleRate != safeSampleRate) ||
-                (queuedTtsChannelCount != 0 && queuedTtsChannelCount != safeChannelCount)
-            ) {
-                clearTtsQueueLocked()
-            }
-            queuedTtsSampleRate = safeSampleRate
-            queuedTtsChannelCount = safeChannelCount
-            ensureTtsPlayerThreadLocked()
-            ttsQueue.addLast(TtsFrame(data.copyOf(), safeSampleRate, safeChannelCount))
-            ttsQueuedBytes += data.size
-            trimTtsQueueLocked(safeSampleRate, safeChannelCount)
-            ttsQueueLock.notifyAll()
-        }
-    }
-
-    private fun ensureTtsPlayerThreadLocked() {
-        if (isTtsPlayerRunning && ttsPlayerThread?.isAlive == true) return
-        isTtsPlayerRunning = true
-        ttsPlayerThread = Thread({ runTtsPlaybackLoop() }, "$TAG-TtsPlayer").apply { start() }
-    }
-
-    private fun runTtsPlaybackLoop() {
-        while (isTtsPlayerRunning) {
-            val frame = synchronized(ttsQueueLock) {
-                while (ttsQueue.isEmpty() && isTtsPlayerRunning) {
-                    try {
-                        ttsQueueLock.wait()
-                    } catch (_: InterruptedException) {
-                    }
-                }
-                if (!isTtsPlayerRunning) {
-                    null
-                } else {
-                    val next = ttsQueue.removeFirst()
-                    ttsQueuedBytes -= next.data.size
-                    if (ttsQueue.isEmpty()) {
-                        queuedTtsSampleRate = 0
-                        queuedTtsChannelCount = 0
-                    }
-                    next
-                }
-            } ?: break
-            writeTtsFrame(frame)
-        }
-    }
-
-    private fun writeTtsFrame(frame: TtsFrame) {
-        try {
-            val track = ensureTtsAudioTrack(frame.sampleRate, frame.channelCount) ?: return
-            var offset = 0
-            while (offset < frame.data.size && isTtsPlayerRunning) {
-                val written = track.write(frame.data, offset, frame.data.size - offset)
-                if (written > 0) {
-                    offset += written
-                } else if (written < 0) {
-                    // bug 7051627151: AudioTrack 进入错误状态时（written < 0），
-                    // 强制释放后退出，让下一帧 ensureTtsAudioTrack 重建一个干净的实例，
-                    // 避免 track 一直处于 ERROR 状态导致 TTS 静默或潜在阻塞。
-                    Log.e(TAG, "播放 TTS 写入失败 error=$written，强制重建 AudioTrack")
-                    releaseTtsAudioTrack()
-                    break
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "播放 TTS 异常", e)
-        }
-    }
-
-    private fun ensureTtsAudioTrack(sampleRate: Int, channelCount: Int): AudioTrack? {
-        val safeChannelCount = if (channelCount == 2) 2 else 1
-        val existing = audioTrack
-        if (existing != null &&
-            audioTrackSampleRate == sampleRate &&
-            audioTrackChannelCount == safeChannelCount &&
-            existing.state != AudioTrack.STATE_UNINITIALIZED
-        ) {
-            return existing
-        }
-
-        releaseTtsAudioTrack()
-        val outCh = if (safeChannelCount == 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
-        val minBuf = AudioTrack.getMinBufferSize(sampleRate, outCh, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(0)
-        audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(
-                android.media.AudioAttributes.Builder()
-                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setSampleRate(sampleRate)
-                    .setChannelMask(outCh)
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .build()
-            )
-            .setBufferSizeInBytes(minBuf.coerceAtLeast(ttsBytesForMs(sampleRate, safeChannelCount, 200)))
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
-        audioTrackSampleRate = sampleRate
-        audioTrackChannelCount = safeChannelCount
-        audioTrack?.play()
-        return audioTrack
-    }
-
-    private fun stopTtsPlayback() {
-        val player = synchronized(ttsQueueLock) {
-            clearTtsQueueLocked()
-            isTtsPlayerRunning = false
-            ttsQueueLock.notifyAll()
-            ttsPlayerThread.also { ttsPlayerThread = null }
-        }
-        player?.interrupt()
-        releaseTtsAudioTrack()
-    }
-
-    private fun resolveTtsSampleRate(r: co.timekettle.translation.model.Result<String>?): Int {
-        val raw = r?.extraData?.get("sample_rate") ?: return SAMPLE_RATE
-        return when (raw) {
-            is Number -> raw.toInt()
-            is String -> raw.toIntOrNull()
-            else -> null
-        }?.takeIf { it > 0 } ?: SAMPLE_RATE
-    }
-
-    private fun releaseTtsAudioTrack() {
-        try {
-            audioTrack?.pause()
-            audioTrack?.flush()
-            audioTrack?.stop()
-            audioTrack?.release()
-        } catch (_: Exception) {
-        }
-        audioTrack = null
-        audioTrackSampleRate = 0
-        audioTrackChannelCount = 0
-    }
-
-    private fun trimTtsQueueLocked(sampleRate: Int, channelCount: Int) {
-        val maxBytes = ttsBytesForMs(sampleRate, channelCount, TTS_QUEUE_MAX_MS)
-        if (ttsQueuedBytes <= maxBytes) return
-        val targetBytes = ttsBytesForMs(sampleRate, channelCount, TTS_QUEUE_TARGET_MS)
-        var droppedBytes = 0
-        while (ttsQueue.size > 1 && ttsQueuedBytes > targetBytes) {
-            val dropped = ttsQueue.removeFirst()
-            ttsQueuedBytes -= dropped.data.size
-            droppedBytes += dropped.data.size
-        }
-        if (droppedBytes > 0) {
-            Log.w(TAG, "TTS 队列过长，丢弃旧音频约 ${ttsDurationMs(droppedBytes, sampleRate, channelCount)}ms")
-        }
-    }
-
-    private fun clearTtsQueueLocked() {
-        ttsQueue.clear()
-        ttsQueuedBytes = 0
-        queuedTtsSampleRate = 0
-        queuedTtsChannelCount = 0
-    }
-
-    private fun ttsBytesForMs(sampleRate: Int, channelCount: Int, ms: Int): Int =
-        sampleRate * channelCount * PCM_16BIT_BYTES * ms / 1_000
-
-    private fun ttsDurationMs(bytes: Int, sampleRate: Int, channelCount: Int): Long {
-        val bytesPerSecond = sampleRate * channelCount * PCM_16BIT_BYTES
-        return if (bytesPerSecond > 0) bytes * 1_000L / bytesPerSecond else 0L
     }
 
     override fun onCleared() {

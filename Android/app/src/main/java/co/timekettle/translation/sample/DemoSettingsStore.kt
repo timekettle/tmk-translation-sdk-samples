@@ -75,7 +75,7 @@ object DemoSettingsStore {
     fun loadDiagnosisEnabled(context: Context): Boolean {
         return context.applicationContext
             .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_DIAGNOSIS_ENABLED, false)
+            .getBoolean(KEY_DIAGNOSIS_ENABLED, true)
     }
 
     fun saveDiagnosisEnabled(context: Context, enabled: Boolean) {
@@ -150,7 +150,7 @@ object DemoSettingsStore {
     }
 
     fun parseDiagnosisLevel(raw: String?): TmkDiagnosisLevel {
-        val normalized = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return TmkDiagnosisLevel.ESSENTIAL
+        val normalized = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return TmkDiagnosisLevel.TRACE
         return TmkDiagnosisLevel.entries.firstOrNull { it.name.equals(normalized, ignoreCase = true) }
             ?: TmkDiagnosisLevel.ESSENTIAL
     }
