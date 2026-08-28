@@ -30,6 +30,14 @@ final class OfflineListenViewModel: NSObject {
     private var channel: TmkTranslationChannel?
     private var voiceIO: TmkVoiceProcessingIO?
     private var hasStoppedListening = false
+    private lazy var ttsCoordinator = DemoTtsPlaybackCoordinator(
+        scene: .listen,
+        onPlaybackChannelsChanged: { [weak self] channels in
+            guard let self, self.lastPlaybackChannels != channels else { return }
+            self.lastPlaybackChannels = channels
+            self.updateStateOnMain { $0.playbackChannels = channels }
+        }
+    )
     /// 当前待下载信息(引导下载场景):点"下载"时按此下差量包,点"取消"时清空。
     private var pendingDownloadInfo: OfflinePendingDownloadPrompt?
     /// 标记本次下载是否由"切语言/升档引导"触发:true 则下载完成只提示手动重试,不自动继续。
@@ -190,6 +198,7 @@ final class OfflineListenViewModel: NSObject {
                                                                framesPerBuffer: 512))
         }
         guard let voiceIO else { return }
+        ttsCoordinator.attach(voiceIO: voiceIO)
         configureInterruptionHandling(for: voiceIO)
         do {
             try voiceIO.activateAudioSession(sampleRate: 16000,
@@ -215,6 +224,7 @@ final class OfflineListenViewModel: NSObject {
             do {
                 try voiceIO.start()
                 self.setListeningActive(true)
+                self.ttsCoordinator.setActive(true)
                 self.updateStateOnMain {
                     $0.canStopListening = true
                     $0.canStartListening = false
@@ -228,6 +238,7 @@ final class OfflineListenViewModel: NSObject {
 
     func stopListening() {
         voiceIO?.stop()
+        ttsCoordinator.setActive(false)
         setListeningActive(false)
         updateStateOnMain {
             $0.canStopListening = false
@@ -521,7 +532,7 @@ private extension OfflineListenViewModel {
                 self.downloadButtonState = .notDownloaded
                 self.showCancelButton = false
                 self.updateDownloadPackageListStatusText(header: "鉴权失败，无法使用离线翻译")
-                self.updateStatus("鉴权失败：\(error.message)")
+                self.updateStatus("鉴权失败：\(DemoConversationRuntimePolicy.diagnosticMessage(for: error))")
                 self.stopCurrentChannelForMissingModels()
                 self.updateStateOnMain {
                     $0.canStartListening = false
@@ -847,13 +858,7 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
     }
 
     func onAudioDataReceive(from engine: AbstractChannelEngine, result: TmkResult<String>, data: Data, channelCount: Int) {
-        guard result.data == "translated_audio" else { return }
-        guard getListeningActive() else { return }
-        if lastPlaybackChannels != channelCount {
-            lastPlaybackChannels = channelCount
-            updateStateOnMain { $0.playbackChannels = channelCount }
-        }
-        voiceIO?.enqueuePlaybackPCM(data)
+        ttsCoordinator.handleAudioData(result: result, data: data, channelCount: channelCount)
     }
 
     func onError(_ error: TmkTranslationError) {

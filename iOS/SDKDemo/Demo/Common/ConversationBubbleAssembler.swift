@@ -134,23 +134,34 @@ enum DemoConversationEventAdapter {
     }
 
     private static func bubbleId(from result: TmkResult<String>) -> String {
-        if let bubble = result.extraData["bubble_id"] as? String, bubble.isEmpty == false { return bubble }
-        if let bubble = result.extraData["bubbleId"] as? String, bubble.isEmpty == false { return bubble }
-        return "sid_\(result.sessionId)"
+        if let bubble = stringValue(result.extraData["bubble_id"]) { return bubble }
+        if let bubble = stringValue(result.extraData["bubbleId"]) { return bubble }
+        // 在线收听/旧服务结果可能不带显式 bubble_id。SDK 的 TmkResult 会提供
+        // sid_<sessionId> 兼容标识；保留该回退，避免把合法 ASR/MT 结果静默丢弃。
+        return stringValue(result.bubbleId) ?? "sid_\(result.sessionId)"
     }
 
     private static func lane(from result: TmkResult<String>) -> DemoConversationLane {
-        if let ch = (result.extraData["channel"] as? String)?.lowercased(), ch == DemoConversationLane.right.rawValue {
+        let channel = stringValue(result.extraData["channel"])?.lowercased()
+        if channel == DemoConversationLane.right.rawValue || channel == "2" {
             return .right
         }
         return .left
     }
 
     private static func chunkId(from result: TmkResult<String>) -> String? {
-        if let chunkId = result.extraData["chunk_id"] as? String, chunkId.isEmpty == false { return chunkId }
-        if let chunkId = result.extraData["chunkId"] as? String, chunkId.isEmpty == false { return chunkId }
-        if let chunkId = result.extraData["chunk_id"] as? Int { return String(chunkId) }
-        if let chunkId = result.extraData["chunkId"] as? Int { return String(chunkId) }
+        if let chunkId = stringValue(result.extraData["chunk_id"]) { return chunkId }
+        if let chunkId = stringValue(result.extraData["chunkId"]) { return chunkId }
+        return nil
+    }
+
+    private static func stringValue(_ value: Any?) -> String? {
+        if let value = value as? String {
+            return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+        }
+        if let value = value as? NSNumber {
+            return value.stringValue
+        }
         return nil
     }
 
@@ -175,6 +186,9 @@ enum DemoConversationEventAdapter {
 }
 
 final class DemoConversationBubbleAssembler {
+    /// 单个气泡保留的服务端 session 别名上限；超出后只影响已过期 partial 的高亮映射，不影响文本或 final 语义。
+    private static let maxSessionAliasesPerBubble = 64
+
     private struct SessionSegment {
         var text: String
         var isFinal: Bool
@@ -189,8 +203,12 @@ final class DemoConversationBubbleAssembler {
         var translatedBySession: [Int: SessionSegment] = [:]
         var sourceSessionAlias: [Int: Int] = [:]
         var translatedSessionAlias: [Int: Int] = [:]
+        var sourceSessionAliasOrder: [Int] = []
+        var translatedSessionAliasOrder: [Int] = []
         var sourceChunkAlias: [String: Int] = [:]
         var translatedChunkAlias: [String: Int] = [:]
+        /// 同一气泡内未携带 chunkId 的 ASR partial 可能轮换 sessionId；始终覆盖该活动分段。
+        var activeSourcePartialSegmentID: Int?
         /// effectiveSessionId -> 贡献它的原始服务端 session_id 集合（用于按 session 着色）。
         var sourceRawIdsByEffective: [Int: Set<Int>] = [:]
         var translatedRawIdsByEffective: [Int: Set<Int>] = [:]
@@ -281,20 +299,27 @@ final class DemoConversationBubbleAssembler {
                    isFinal: event.isFinal,
                    sessionId: event.sessionId,
                    chunkId: event.chunkId,
+                   coalesceUnchunkedPartials: true,
+                   activePartialSegmentID: &aggregate.activeSourcePartialSegmentID,
                    sessionOrder: &aggregate.sourceSessionOrder,
                    segments: &aggregate.sourceBySession,
                    sessionAliases: &aggregate.sourceSessionAlias,
+                   sessionAliasOrder: &aggregate.sourceSessionAliasOrder,
                    chunkAliases: &aggregate.sourceChunkAlias,
                    rawIdsByEffective: &aggregate.sourceRawIdsByEffective,
                    rawChunkByEffective: &aggregate.sourceRawChunkByEffective)
         case .mt:
+            var ignoredActivePartialSegmentID: Int?
             update(segmentText: event.text,
                    isFinal: event.isFinal,
                    sessionId: event.sessionId,
                    chunkId: event.chunkId,
+                   coalesceUnchunkedPartials: false,
+                   activePartialSegmentID: &ignoredActivePartialSegmentID,
                    sessionOrder: &aggregate.translatedSessionOrder,
                    segments: &aggregate.translatedBySession,
                    sessionAliases: &aggregate.translatedSessionAlias,
+                   sessionAliasOrder: &aggregate.translatedSessionAliasOrder,
                    chunkAliases: &aggregate.translatedChunkAlias,
                    rawIdsByEffective: &aggregate.translatedRawIdsByEffective,
                    rawChunkByEffective: &aggregate.translatedRawChunkByEffective)
@@ -326,6 +351,23 @@ final class DemoConversationBubbleAssembler {
         }
         trimIfNeeded()
         return snapshots
+    }
+
+    /// 返回当前聚合器内的完整快照，供 Concurrent 页面在独立 Runtime 间刷新展示列表。
+    /// 结果仍由本聚合器自己的 bubble/session/chunk 状态生成，不接受外部 trace 关联。
+    func snapshots() -> [DemoConversationBubbleSnapshot] {
+        aggregateOrder.compactMap { key in
+            guard let lane = DemoConversationBubbleAssembler.lane(fromRowKey: key),
+                  var aggregate = aggregates[key] else { return nil }
+            let bubbleId = DemoConversationBubbleAssembler.bubbleId(fromRowKey: key)
+            let snapshot = makeSnapshot(bubbleId: bubbleId,
+                                        lane: lane,
+                                        aggregate: &aggregate,
+                                        isActiveBubble: activeBubbleIdByLane[lane] == bubbleId)
+            // makeSnapshot 可能更新缓存，写回避免下一次快照重复计算。
+            aggregates[key] = aggregate
+            return snapshot
+        }
     }
 
     func markBubbleEnded(bubbleId: String) -> [DemoConversationBubbleSnapshot] {
@@ -415,6 +457,12 @@ final class DemoConversationBubbleAssembler {
         return key
     }
 
+    private static func lane(fromRowKey key: String) -> DemoConversationLane? {
+        if key.hasSuffix("_\(DemoConversationLane.left.rawValue)") { return .left }
+        if key.hasSuffix("_\(DemoConversationLane.right.rawValue)") { return .right }
+        return nil
+    }
+
     private func makeSnapshot(bubbleId: String,
                               lane: DemoConversationLane,
                               aggregate: inout BubbleAggregate,
@@ -446,9 +494,12 @@ final class DemoConversationBubbleAssembler {
                         isFinal: Bool,
                         sessionId: Int,
                         chunkId: String?,
+                        coalesceUnchunkedPartials: Bool,
+                        activePartialSegmentID: inout Int?,
                         sessionOrder: inout [Int],
                         segments: inout [Int: SessionSegment],
                         sessionAliases: inout [Int: Int],
+                        sessionAliasOrder: inout [Int],
                         chunkAliases: inout [String: Int],
                         rawIdsByEffective: inout [Int: Set<Int>],
                         rawChunkByEffective: inout [Int: Set<String>]) {
@@ -464,6 +515,10 @@ final class DemoConversationBubbleAssembler {
                 chunkAliases[chunkKey] = newSessionId
                 effectiveSessionId = newSessionId
             }
+        } else if coalesceUnchunkedPartials,
+                  let activeSegmentID = activePartialSegmentID,
+                  segments[activeSegmentID]?.isFinal == false {
+            effectiveSessionId = activeSegmentID
         } else {
             effectiveSessionId = sessionAliases[sessionId] ?? sessionId
         }
@@ -475,17 +530,65 @@ final class DemoConversationBubbleAssembler {
             let newSessionId = nextSyntheticSessionId(segments)
             sessionOrder.append(newSessionId)
             segments[newSessionId] = SessionSegment(text: text, isFinal: isFinal)
-            sessionAliases[sessionId] = newSessionId
-            rawIdsByEffective[newSessionId, default: []].insert(sessionId)
+            setSessionAlias(sessionId,
+                            effectiveSessionId: newSessionId,
+                            aliases: &sessionAliases,
+                            aliasOrder: &sessionAliasOrder)
+            updateRawSessionIDs(sessionId,
+                                effectiveSessionId: newSessionId,
+                                coalesceUnchunkedPartials: coalesceUnchunkedPartials,
+                                normalizedChunk: normalizedChunk,
+                                storage: &rawIdsByEffective)
             if let normalizedChunk { rawChunkByEffective[newSessionId, default: []].insert(normalizedChunk) }
+            if coalesceUnchunkedPartials, normalizedChunk == nil {
+                activePartialSegmentID = isFinal ? nil : newSessionId
+            }
             return
         }
         let mergedText = resolveIncrementalText(old: old?.text ?? "", new: text)
         let finalValue = (old?.isFinal ?? false) || isFinal
         segments[effectiveSessionId] = SessionSegment(text: mergedText, isFinal: finalValue)
-        sessionAliases[sessionId] = effectiveSessionId
-        rawIdsByEffective[effectiveSessionId, default: []].insert(sessionId)
+        setSessionAlias(sessionId,
+                        effectiveSessionId: effectiveSessionId,
+                        aliases: &sessionAliases,
+                        aliasOrder: &sessionAliasOrder)
+        updateRawSessionIDs(sessionId,
+                            effectiveSessionId: effectiveSessionId,
+                            coalesceUnchunkedPartials: coalesceUnchunkedPartials,
+                            normalizedChunk: normalizedChunk,
+                            storage: &rawIdsByEffective)
         if let normalizedChunk { rawChunkByEffective[effectiveSessionId, default: []].insert(normalizedChunk) }
+        if coalesceUnchunkedPartials, normalizedChunk == nil {
+            activePartialSegmentID = finalValue ? nil : effectiveSessionId
+        }
+    }
+
+    /// 更新服务端 session 到展示分段的别名，并以固定窗口限制长跑 partial 的历史引用。
+    private func setSessionAlias(_ sessionId: Int,
+                                 effectiveSessionId: Int,
+                                 aliases: inout [Int: Int],
+                                 aliasOrder: inout [Int]) {
+        if aliases[sessionId] == nil {
+            aliasOrder.append(sessionId)
+        }
+        aliases[sessionId] = effectiveSessionId
+        while aliasOrder.count > Self.maxSessionAliasesPerBubble {
+            let expiredSessionId = aliasOrder.removeFirst()
+            aliases.removeValue(forKey: expiredSessionId)
+        }
+    }
+
+    /// 无 chunkId 的 ASR partial 仅需当前 session 用于高亮；保留历史 ID 会造成单气泡内存线性增长。
+    private func updateRawSessionIDs(_ sessionId: Int,
+                                     effectiveSessionId: Int,
+                                     coalesceUnchunkedPartials: Bool,
+                                     normalizedChunk: String?,
+                                     storage: inout [Int: Set<Int>]) {
+        if coalesceUnchunkedPartials, normalizedChunk == nil {
+            storage[effectiveSessionId] = [sessionId]
+        } else {
+            storage[effectiveSessionId, default: []].insert(sessionId)
+        }
     }
 
     private func normalizedChunkId(_ chunkId: String?) -> String? {

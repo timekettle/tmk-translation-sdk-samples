@@ -16,8 +16,8 @@ object SampleSdkConfig {
         networkEnvironment: TmkTranslationNetworkEnvironment = TmkTranslationNetworkEnvironment.TEST,
         customNetworkBaseURLEnabled: Boolean = false,
         customNetworkBaseURL: String? = null,
-        diagnosisEnabled: Boolean = false,
-        diagnosisLevel: TmkDiagnosisLevel = TmkDiagnosisLevel.ESSENTIAL,
+        diagnosisEnabled: Boolean = true,
+        diagnosisLevel: TmkDiagnosisLevel = TmkDiagnosisLevel.TRACE,
         diagnosisAudioCaptureEnabled: Boolean = false,
         diagnosisConsoleEnabled: Boolean = true,
     ): TmkTransGlobalConfig {

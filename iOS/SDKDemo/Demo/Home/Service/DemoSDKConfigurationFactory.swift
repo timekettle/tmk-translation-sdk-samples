@@ -19,8 +19,15 @@ enum DemoSDKConfigurationFactory {
             .setAuth(appId: credentials.appId, secret: credentials.appSecret)
             .setOnlineAuthContext(tenantId: defaultTenantId)
             .setLogEnabled(config.consoleLogEnabled)
-            .setDiagnosisConfig(makeDiagnosisConfig(from: config))
             .setNetworkEnvironment(config.networkEnvironment)
+            .setDiagnosisConfig(
+                TmkDiagnosisConfig(
+                    enabled: config.diagnosisEnabled,
+                    level: config.diagnosisLevel,
+                    rootDirectory: nil,
+                    audioCaptureEnabled: config.diagnosisLevel == .trace && config.diagnosisAudioCaptureEnabled
+                )
+            )
         if config.customNetworkBaseURLEnabled,
            let baseURLString = config.normalizedCustomNetworkBaseURL,
            let baseURL = URL(string: baseURLString) {
@@ -29,26 +36,25 @@ enum DemoSDKConfigurationFactory {
         return builder.build()
     }
 
-    static func makeDiagnosisConfig(from config: DemoSettingsConfig) -> TmkDiagnosisConfig {
-        TmkDiagnosisConfig(
-            enabled: config.diagnosisEnabled,
-            level: TmkDiagnosisLevel(rawValue: config.diagnosisLevel.rawValue) ?? .essential,
-            audioCaptureEnabled: config.diagnosisAudioCaptureEnabled
-        )
-    }
-
     static func onlineAuthFailureMessage(_ error: Error) -> String {
         """
-        在线鉴权失败：\(error.localizedDescription)
+        在线鉴权失败：\(diagnosticMessage(for: error))
         请在 \(localSecretsPath) 中配置：\(credentialKeys.joined(separator: " / "))
         """
     }
 
     static func authFailureMessage(_ error: Error) -> String {
         """
-        鉴权失败：\(error.localizedDescription)
+        鉴权失败：\(diagnosticMessage(for: error))
         请在 \(localSecretsPath) 中配置：\(credentialKeys.joined(separator: " / "))
         """
+    }
+
+    private static func diagnosticMessage(for error: Error) -> String {
+        guard let translationError = error as? TmkTranslationError else {
+            return error.localizedDescription
+        }
+        return DemoConversationRuntimePolicy.diagnosticMessage(for: translationError)
     }
 
     private static func resolveCredentials() -> (appId: String, appSecret: String) {

@@ -44,8 +44,7 @@ final class DemoOptionCardView: UIButton {
         badgeLabel.text = badge
         badgeLabel.isHidden = (badge == nil)
         checkView.isHidden = showsCheck == false
-        isUserInteractionEnabled = enabled
-        alpha = enabled ? 1 : 0.45
+        applyEnabledState(enabled)
         baseTintColor = tintColor
         selectedTintColor = tintColor
         badgeTintColor = badgeTextColor
@@ -56,6 +55,16 @@ final class DemoOptionCardView: UIButton {
     func applySelectedState(_ selected: Bool) {
         isCardSelected = selected
         updateAppearance()
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        applyEnabledState(enabled)
+    }
+
+    private func applyEnabledState(_ enabled: Bool) {
+        isEnabled = enabled
+        isUserInteractionEnabled = enabled
+        alpha = enabled ? 1 : 0.45
     }
 
     private func setupUI() {

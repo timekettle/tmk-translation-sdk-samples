@@ -53,34 +53,45 @@ private data class ModeOption(
     val label: String,
     val icon: String,
     val desc: String,
+    val badge: String,
     val badgeColor: Color,
 )
 
 private object ModeId {
     const val ONLINE = "ONLINE"
     const val OFFLINE = "OFFLINE"
+    const val CONCURRENT_ONE_TO_ONE = "CONCURRENT_ONE_TO_ONE"
     const val AUTO = "AUTO"
     const val MIX = "MIX"
 }
 
 private val MODE_OPTIONS = listOf(
-    ModeOption(ModeId.ONLINE, "在线翻译", "☁️", "云端引擎，43语种90方言", OnlineColor),
-    ModeOption(ModeId.OFFLINE, "离线翻译", "📱", "本地引擎，无需网络", OfflineColor),
-    ModeOption(ModeId.AUTO, "智能切换", "🔄", "断网自动降级离线", AutoColor),
-    ModeOption(ModeId.MIX, "双引擎竞速", "⚡", "在线+离线择优输出", MixColor),
+    ModeOption(ModeId.ONLINE, "在线翻译", "☁️", "云端引擎，43语种90方言", "ONLINE", OnlineColor),
+    ModeOption(ModeId.OFFLINE, "离线翻译", "📱", "本地引擎，无需网络", "OFFLINE", OfflineColor),
+    ModeOption(ModeId.CONCURRENT_ONE_TO_ONE, "在线&离线", "🔀", "在线和离线同时翻译，对比输出", "CONCURRENT", AccentColor),
+    ModeOption(ModeId.AUTO, "智能切换", "🔄", "断网自动降级离线", "AUTO", AutoColor),
+    ModeOption(ModeId.MIX, "双引擎竞速", "⚡", "在线+离线择优输出", "MIX", MixColor),
 )
 
 private val MODE_OPTION_BY_ID = MODE_OPTIONS.associateBy { it.id }
 
 private val SCENARIO_MODES = mapOf(
     ScenarioType.LISTEN to listOf(ModeId.ONLINE, ModeId.OFFLINE),
-    ScenarioType.ONE_TO_ONE to listOf(ModeId.ONLINE, ModeId.OFFLINE),
+    ScenarioType.ONE_TO_ONE to listOf(ModeId.ONLINE, ModeId.OFFLINE, ModeId.CONCURRENT_ONE_TO_ONE),
 )
 
 private val SCENARIO_HINTS = mapOf(
     ScenarioType.LISTEN to "支持在线/离线模式",
     ScenarioType.ONE_TO_ONE to "支持在线/离线模式",
 )
+
+internal fun isHomeModeEnabled(allowedModes: List<String>, modeId: String): Boolean {
+    return modeId in allowedModes
+}
+
+/** 取语言 code 的主标签（如 "zh-CN" → "zh"），与 SDK 离线语言码归一化语义一致。 */
+internal fun String.baseLanguageCode(): String =
+    trim().substringBefore('-').substringBefore('_').lowercase()
 
 class HomeScreen : Screen {
 
@@ -92,27 +103,40 @@ class HomeScreen : Screen {
         var sourceLang by rememberSaveable { mutableStateOf("zh-CN") }
         var targetLang by rememberSaveable { mutableStateOf("en-US") }
         val scenario = ScenarioType.entries.firstOrNull { it.name == scenarioName } ?: ScenarioType.LISTEN
-        val allowedModes = SCENARIO_MODES[scenario] ?: listOf(ModeId.ONLINE)
-        val effectiveModeId = modeId.takeIf { it in allowedModes } ?: allowedModes.firstOrNull() ?: ModeId.ONLINE
-        val effectiveMode = MODE_OPTION_BY_ID[effectiveModeId] ?: MODE_OPTIONS.first()
-        val startLabel = "开始${effectiveMode.label}"
 
-        // 按需加载：默认在线；离线模式才请求离线列表（智能/竞速沿用在线）
-        val langUiState = if (effectiveModeId == ModeId.OFFLINE) {
+        // 语言选择：并发模式用在线列表（BCP-47）；离线单模式用离线列表；其余用在线列表。
+        // 一对一场景额外请求离线列表，用于判断 base code 是否支持离线（不受当前 mode 影响，避免死锁）。
+        val langUiState = if (modeId == ModeId.OFFLINE) {
             rememberOfflineLanguageOptions()
         } else {
             rememberOnlineLanguageOptions()
         }
+        val offlineUiState = if (scenario == ScenarioType.ONE_TO_ONE) {
+            rememberOfflineLanguageOptions()
+        } else null
+
+        // 离线列表就绪后，判断当前语言对的 base code 是否同时支持离线（未加载完成视为暂不可选）。
+        val offlineReady = offlineUiState?.state as? LanguageOptionsState.Ready
+        val offlineBaseCodes = offlineReady?.options?.keys?.map { it.baseLanguageCode() }?.toSet() ?: emptySet()
+        val concurrentSupported = offlineReady != null &&
+            sourceLang.baseLanguageCode() in offlineBaseCodes &&
+            targetLang.baseLanguageCode() in offlineBaseCodes
+
+        val allowedModes = (SCENARIO_MODES[scenario] ?: listOf(ModeId.ONLINE))
+            .filterNot { it == ModeId.CONCURRENT_ONE_TO_ONE && !concurrentSupported }
+        val effectiveModeId = modeId.takeIf { it in allowedModes } ?: allowedModes.firstOrNull() ?: ModeId.ONLINE
+        val effectiveMode = MODE_OPTION_BY_ID[effectiveModeId] ?: MODE_OPTIONS.first()
+        val startLabel = "开始${effectiveMode.label}"
+
         val ready = langUiState.state as? LanguageOptionsState.Ready
         val langOptions = ready?.options ?: emptyMap()
         // 列表就绪且源/目标语言均在列表中，才允许开始翻译
         val canStart = ready != null && sourceLang in langOptions && targetLang in langOptions
 
-        // 如果当前 mode 不在允许列表，自动切到第一个
-        LaunchedEffect(scenarioName) {
-            val allowed = SCENARIO_MODES[scenario] ?: listOf(ModeId.ONLINE)
-            if (modeId !in allowed) {
-                modeId = allowed.first()
+        // 场景切换或语言对离线支持变化导致允许列表变化时，若当前 mode 不在允许列表则自动切到第一个。
+        LaunchedEffect(allowedModes) {
+            if (modeId !in allowedModes) {
+                modeId = allowedModes.first()
             }
         }
 
@@ -167,7 +191,9 @@ class HomeScreen : Screen {
                     Text("· ${SCENARIO_HINTS[scenario]}", fontSize = 11.sp, color = AccentColor)
                 }
                 Spacer(Modifier.height(10.dp))
-                ModeGrid(allowedModes, effectiveModeId) { modeId = it }
+                ModeGrid(allowedModes, effectiveModeId) {
+                    modeId = it
+                }
 
                 Spacer(Modifier.height(20.dp))
 
@@ -268,9 +294,12 @@ class HomeScreen : Screen {
 
 private fun resolveScreen(scenario: ScenarioType, modeId: String, srcLang: String, tgtLang: String): Screen {
     return when {
+        modeId == ModeId.CONCURRENT_ONE_TO_ONE && scenario == ScenarioType.ONE_TO_ONE ->
+            ConcurrentOneToOneScreen(leftLang = tgtLang, rightLang = srcLang)
         modeId == ModeId.OFFLINE && scenario == ScenarioType.LISTEN -> OfflineListenScreen(srcLang, tgtLang)
         modeId == ModeId.OFFLINE && scenario == ScenarioType.ONE_TO_ONE -> Offline1v1Screen(srcLang, tgtLang)
-        scenario == ScenarioType.ONE_TO_ONE -> DualChannelScreen(srcLang, tgtLang)
+        scenario == ScenarioType.ONE_TO_ONE ->
+            DualChannelScreen(leftLang = tgtLang, rightLang = srcLang)
         else -> ListenModeScreen(srcLang, tgtLang)
     }
 }
@@ -335,7 +364,7 @@ private fun ModeGrid(allowed: List<String>, selected: String, onSelect: (String)
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 row.forEach { m ->
-                    val enabled = m.id in allowed
+                    val enabled = isHomeModeEnabled(allowed, m.id)
                     val isSel = m.id == selected && enabled
                     ModeCard(m, isSel, enabled, Modifier.weight(1f)) { onSelect(m.id) }
                 }
@@ -352,7 +381,8 @@ private fun ModeCard(m: ModeOption, selected: Boolean, enabled: Boolean, modifie
     val shape = RoundedCornerShape(12.dp)
     Box(
         modifier = modifier
-            .heightIn(min = 128.dp)
+            // 所有模式卡片使用同一固定高度，避免 Concurrent 文案较长时把首页网格撑高。
+            .height(146.dp)
             .then(if (!enabled) Modifier.alpha(.35f) else Modifier)
             .clip(shape)
             .background(if (enabled) bg else CardColor)
@@ -374,7 +404,7 @@ private fun ModeCard(m: ModeOption, selected: Boolean, enabled: Boolean, modifie
             Text(m.desc, fontSize = 10.sp, color = TextDim, textAlign = TextAlign.Center, lineHeight = 13.sp)
             Spacer(Modifier.height(6.dp))
             Surface(shape = RoundedCornerShape(4.dp), color = m.badgeColor.copy(alpha = .15f)) {
-                Text(m.id, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = m.badgeColor,
+                Text(m.badge, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = m.badgeColor,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
             }
         }

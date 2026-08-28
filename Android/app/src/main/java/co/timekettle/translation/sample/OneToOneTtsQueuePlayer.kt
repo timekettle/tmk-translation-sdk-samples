@@ -21,31 +21,37 @@ class OneToOneTtsQueuePlayer(
     private val maxQueueMs: Int = 1_000,
     private val targetQueueMs: Int = 300,
 ) {
-    private data class TtsFrame(val data: ByteArray, val channelCount: Int)
+    private data class TtsFrame(val data: ByteArray, val sampleRate: Int, val channelCount: Int)
 
     private val queueLock = Object()
     private val queue = java.util.ArrayDeque<TtsFrame>()
     private var queuedBytes: Int = 0
     private var queuedChannelCount: Int = 0
+    private var queuedSampleRate: Int = 0
     private var playerThread: Thread? = null
     @Volatile private var isRunning = false
 
     private var audioTrack: AudioTrack? = null
+    private var audioTrackSampleRate: Int = 0
     private var audioTrackChannelCount: Int = 0
 
-    /** 送一帧 PCM 去播放(拷贝入队)。channelCount 只区分 1/2。 */
-    fun play(data: ByteArray, channelCount: Int) {
+    /** 送一帧 PCM 去播放(拷贝入队)。channelCount 只区分 1/2；sampleRate 变化时重建 AudioTrack。 */
+    fun play(data: ByteArray, channelCount: Int, sampleRate: Int = this.sampleRate) {
         if (data.isEmpty()) return
         val safeChannelCount = if (channelCount == 2) 2 else 1
+        val safeSampleRate = sampleRate.takeIf { it > 0 } ?: this.sampleRate
         synchronized(queueLock) {
-            if (queuedChannelCount != 0 && queuedChannelCount != safeChannelCount) {
+            if ((queuedChannelCount != 0 && queuedChannelCount != safeChannelCount) ||
+                (queuedSampleRate != 0 && queuedSampleRate != safeSampleRate)
+            ) {
                 clearQueueLocked()
             }
             queuedChannelCount = safeChannelCount
+            queuedSampleRate = safeSampleRate
             ensurePlayerThreadLocked()
-            queue.addLast(TtsFrame(data.copyOf(), safeChannelCount))
+            queue.addLast(TtsFrame(data.copyOf(), safeSampleRate, safeChannelCount))
             queuedBytes += data.size
-            trimQueueLocked(safeChannelCount)
+            trimQueueLocked(safeSampleRate, safeChannelCount)
             queueLock.notifyAll()
         }
     }
@@ -87,7 +93,10 @@ class OneToOneTtsQueuePlayer(
                 } else {
                     val next = queue.removeFirst()
                     queuedBytes -= next.data.size
-                    if (queue.isEmpty()) queuedChannelCount = 0
+                    if (queue.isEmpty()) {
+                        queuedChannelCount = 0
+                        queuedSampleRate = 0
+                    }
                     next
                 }
             } ?: break
@@ -98,7 +107,7 @@ class OneToOneTtsQueuePlayer(
 
     private fun writeFrame(frame: TtsFrame) {
         try {
-            val track = ensureAudioTrack(frame.channelCount) ?: return
+            val track = ensureAudioTrack(frame.sampleRate, frame.channelCount) ?: return
             var offset = 0
             while (offset < frame.data.size && isRunning) {
                 val written = track.write(frame.data, offset, frame.data.size - offset)
@@ -114,9 +123,10 @@ class OneToOneTtsQueuePlayer(
         }
     }
 
-    private fun ensureAudioTrack(channelCount: Int): AudioTrack? {
+    private fun ensureAudioTrack(sampleRate: Int, channelCount: Int): AudioTrack? {
         val existing = audioTrack
         if (existing != null &&
+            audioTrackSampleRate == sampleRate &&
             audioTrackChannelCount == channelCount &&
             existing.state != AudioTrack.STATE_UNINITIALIZED
         ) {
@@ -126,7 +136,7 @@ class OneToOneTtsQueuePlayer(
         releaseAudioTrack()
         val outCh = if (channelCount == 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
         val minBufferSize = AudioTrack.getMinBufferSize(sampleRate, outCh, audioFormat).coerceAtLeast(0)
-        val bufferSize = maxOf(minBufferSize, bytesForMs(channelCount, 200))
+        val bufferSize = maxOf(minBufferSize, bytesForMs(sampleRate, channelCount, 200))
         audioTrack = AudioTrack.Builder()
             .setAudioFormat(
                 AudioFormat.Builder()
@@ -138,15 +148,16 @@ class OneToOneTtsQueuePlayer(
             .setBufferSizeInBytes(bufferSize)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
+        audioTrackSampleRate = sampleRate
         audioTrackChannelCount = channelCount
         audioTrack?.play()
         return audioTrack
     }
 
-    private fun trimQueueLocked(channelCount: Int) {
-        val maxBytes = bytesForMs(channelCount, maxQueueMs)
+    private fun trimQueueLocked(sampleRate: Int, channelCount: Int) {
+        val maxBytes = bytesForMs(sampleRate, channelCount, maxQueueMs)
         if (queuedBytes <= maxBytes) return
-        val targetBytes = bytesForMs(channelCount, targetQueueMs)
+        val targetBytes = bytesForMs(sampleRate, channelCount, targetQueueMs)
         var droppedBytes = 0
         while (queue.size > 1 && queuedBytes > targetBytes) {
             val dropped = queue.removeFirst()
@@ -154,7 +165,7 @@ class OneToOneTtsQueuePlayer(
             droppedBytes += dropped.data.size
         }
         if (droppedBytes > 0) {
-            Log.w(tag, "TTS 队列过长，丢弃旧音频约 ${durationMs(droppedBytes, channelCount)}ms")
+            Log.w(tag, "TTS 队列过长，丢弃旧音频约 ${durationMs(droppedBytes, sampleRate, channelCount)}ms")
         }
     }
 
@@ -162,12 +173,13 @@ class OneToOneTtsQueuePlayer(
         queue.clear()
         queuedBytes = 0
         queuedChannelCount = 0
+        queuedSampleRate = 0
     }
 
-    private fun bytesForMs(channelCount: Int, ms: Int): Int =
+    private fun bytesForMs(sampleRate: Int, channelCount: Int, ms: Int): Int =
         sampleRate * channelCount * PCM_16BIT_BYTES * ms / 1_000
 
-    private fun durationMs(bytes: Int, channelCount: Int): Long {
+    private fun durationMs(bytes: Int, sampleRate: Int, channelCount: Int): Long {
         val bytesPerSecond = sampleRate * channelCount * PCM_16BIT_BYTES
         return if (bytesPerSecond > 0) bytes * 1_000L / bytesPerSecond else 0L
     }
@@ -181,6 +193,7 @@ class OneToOneTtsQueuePlayer(
         } catch (_: Exception) {
         }
         audioTrack = null
+        audioTrackSampleRate = 0
         audioTrackChannelCount = 0
     }
 

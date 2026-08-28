@@ -54,15 +54,9 @@ struct DemoSettingsViewState: Equatable {
     }
 }
 
-enum DemoDiagnosisLevel: String, CaseIterable {
-    case essential
-    case diagnostic
-    case trace
-}
-
 struct DemoSettingsConfig: Equatable {
     var diagnosisEnabled: Bool
-    var diagnosisLevel: DemoDiagnosisLevel
+    var diagnosisLevel: TmkDiagnosisLevel
     var diagnosisAudioCaptureEnabled: Bool
     var consoleLogEnabled: Bool
     var networkEnvironment: TmkTranslationNetworkEnvironment
@@ -84,8 +78,8 @@ struct DemoSettingsConfig: Equatable {
 
     static var `default`: DemoSettingsConfig {
         DemoSettingsConfig(
-            diagnosisEnabled: false,
-            diagnosisLevel: .essential,
+            diagnosisEnabled: true,
+            diagnosisLevel: .trace,
             diagnosisAudioCaptureEnabled: false,
             consoleLogEnabled: true,
             networkEnvironment: .test,
@@ -122,7 +116,7 @@ struct DemoSettingsConfig: Equatable {
     }
 }
 
-extension DemoDiagnosisLevel {
+extension TmkDiagnosisLevel {
     var demoDisplayName: String {
         switch self {
         case .essential:

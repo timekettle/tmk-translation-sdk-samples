@@ -21,11 +21,13 @@ final class ViewController: UIViewController {
     private let modeGrid = UIStackView()
     private let modeTopRow = UIStackView()
     private let modeBottomRow = UIStackView()
+    private let modeThirdRow = UIStackView()
     private let languageRow = UIStackView()
     private let listenCard = DemoOptionCardView()
     private let oneToOneCard = DemoOptionCardView()
     private let onlineCard = DemoOptionCardView()
     private let offlineCard = DemoOptionCardView()
+    private let concurrentCard = DemoOptionCardView()
     private let autoCard = DemoOptionCardView()
     private let mixCard = DemoOptionCardView()
     private let sourceLanguageButton = DemoLanguageItemView()
@@ -104,6 +106,14 @@ final class ViewController: UIViewController {
                               tintColor: DemoTheme.offline,
                               badgeTextColor: DemoTheme.offline,
                               badgeBackgroundColor: DemoTheme.offline.withAlphaComponent(0.15))
+        concurrentCard.configure(icon: DemoHomeMode.concurrentOneToOne.icon,
+                                 title: DemoHomeMode.concurrentOneToOne.title,
+                                 subtitle: DemoHomeMode.concurrentOneToOne.subtitle,
+                                 badge: DemoHomeMode.concurrentOneToOne.badgeText,
+                                 enabled: state.selectedScenario == .oneToOne,
+                                 tintColor: DemoTheme.accent,
+                                 badgeTextColor: DemoTheme.accent,
+                                 badgeBackgroundColor: DemoTheme.accent.withAlphaComponent(0.15))
         autoCard.configure(icon: DemoHomeMode.auto.icon,
                            title: DemoHomeMode.auto.title,
                            subtitle: DemoHomeMode.auto.subtitle,
@@ -124,7 +134,7 @@ final class ViewController: UIViewController {
         [listenCard, oneToOneCard].forEach { card in
             card.addTarget(self, action: #selector(onScenarioCardTap(_:)), for: .touchUpInside)
         }
-        [onlineCard, offlineCard, autoCard, mixCard].forEach { card in
+        [onlineCard, offlineCard, concurrentCard, autoCard, mixCard].forEach { card in
             card.addTarget(self, action: #selector(onModeCardTap(_:)), for: .touchUpInside)
         }
 
@@ -181,13 +191,22 @@ final class ViewController: UIViewController {
         modeBottomRow.axis = .horizontal
         modeBottomRow.spacing = 12
         modeBottomRow.distribution = .fillEqually
+        modeBottomRow.addArrangedSubview(concurrentCard)
         modeBottomRow.addArrangedSubview(autoCard)
-        modeBottomRow.addArrangedSubview(mixCard)
+
+        modeThirdRow.axis = .horizontal
+        modeThirdRow.spacing = 12
+        modeThirdRow.distribution = .fillEqually
+        modeThirdRow.addArrangedSubview(mixCard)
+        let modePlaceholder = UIView()
+        modePlaceholder.isUserInteractionEnabled = false
+        modeThirdRow.addArrangedSubview(modePlaceholder)
 
         modeGrid.axis = .vertical
         modeGrid.spacing = 12
         modeGrid.addArrangedSubview(modeTopRow)
         modeGrid.addArrangedSubview(modeBottomRow)
+        modeGrid.addArrangedSubview(modeThirdRow)
 
         languageRow.axis = .horizontal
         languageRow.spacing = 12
@@ -237,7 +256,7 @@ final class ViewController: UIViewController {
             make.top.equalTo(modeHint.snp.bottom).offset(12)
             make.left.right.equalToSuperview().inset(16)
         }
-        [onlineCard, offlineCard, autoCard, mixCard].forEach { card in
+        [onlineCard, offlineCard, concurrentCard, autoCard, mixCard].forEach { card in
             card.snp.makeConstraints { make in
                 make.height.equalTo(146)
             }
@@ -303,6 +322,8 @@ final class ViewController: UIViewController {
         oneToOneCard.applySelectedState(state.selectedScenario == .oneToOne)
         onlineCard.applySelectedState(state.selectedMode == .online)
         offlineCard.applySelectedState(state.selectedMode == .offline)
+        concurrentCard.applySelectedState(state.selectedMode == .concurrentOneToOne)
+        concurrentCard.setEnabled(state.selectedScenario == .oneToOne && state.isConcurrentSelectable)
         autoCard.applySelectedState(false)
         mixCard.applySelectedState(false)
         updateLanguageButton(sourceLanguageButton, option: state.sourceLanguage)
@@ -383,6 +404,8 @@ final class ViewController: UIViewController {
             viewModel.selectMode(.online)
         case offlineCard:
             viewModel.selectMode(.offline)
+        case concurrentCard:
+            viewModel.selectMode(.concurrentOneToOne)
         default:
             break
         }
@@ -441,7 +464,14 @@ final class ViewController: UIViewController {
             let nav = UINavigationController(rootViewController: controller)
             nav.modalPresentationStyle = .fullScreen
             present(nav, animated: true)
-        case (_, .auto), (_, .mix):
+        case (.oneToOne, .concurrentOneToOne):
+            // 一对一 Demo 按左右路组织；统一 SDK source=右路、target=左路。
+            let controller = ConcurrentOneToOneController(initialLeftLanguage: targetLanguage,
+                                                          initialRightLanguage: sourceLanguage)
+            let nav = UINavigationController(rootViewController: controller)
+            nav.modalPresentationStyle = .fullScreen
+            present(nav, animated: true)
+        case (_, .concurrentOneToOne), (_, .auto), (_, .mix):
             break
         }
     }

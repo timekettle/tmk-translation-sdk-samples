@@ -1,7 +1,5 @@
 package co.timekettle.translation.sample
 
-import co.timekettle.translation.TmkTranslationSDK
-import co.timekettle.translation.TmkTranslationChannel
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
@@ -13,6 +11,8 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import co.timekettle.translation.Cancelable
+import co.timekettle.translation.TmkTranslationChannel
+import co.timekettle.translation.TmkTranslationSDK
 import co.timekettle.offlinesdk.vad.VadDetector
 import co.timekettle.translation.config.TmkCreateChannelOptions
 import co.timekettle.translation.config.TmkTransChannelConfig
@@ -54,12 +54,10 @@ class Online1v1ViewModel @Inject constructor(
 
     companion object {
         private const val TAG = "Online1v1VM"
-        private const val SAMPLE_RATE = 16000
+        private const val SAMPLE_RATE = OneToOneDemoDefaults.sampleRate
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val SPEECH_START_TRACE_MIN_INTERVAL_MS = 6_000L
-        private const val TTS_QUEUE_MAX_MS = 1_000
-        private const val TTS_QUEUE_TARGET_MS = 300
     }
 
     private data class StartupTiming(
@@ -78,13 +76,12 @@ class Online1v1ViewModel @Inject constructor(
     private var channelCancelable: Cancelable? = null
     private var speakerCancelable: Cancelable? = null
     private var audioRecord: AudioRecord? = null
-    // 下行 TTS 队列式播放器(与离线一对一共用同一实现)。
-    private val ttsPlayer = OneToOneTtsQueuePlayer(
+    private val ttsCoordinator = DemoTtsPlaybackCoordinator(
         tag = TAG,
+        scene = DemoTtsScene.ONE_TO_ONE,
+        runtime = DemoTtsRuntime.ONLINE,
         sampleRate = SAMPLE_RATE,
-        audioFormat = AUDIO_FORMAT,
-        maxQueueMs = TTS_QUEUE_MAX_MS,
-        targetQueueMs = TTS_QUEUE_TARGET_MS,
+        onPlaybackChannelsChanged = { _playbackChannels.value = it },
     )
     private var leftVadDetector: VadDetector? = null
     private var rightVadDetector: VadDetector? = null
@@ -92,7 +89,7 @@ class Online1v1ViewModel @Inject constructor(
     private val lifecycleGate = DemoConversationLifecycleGate()
     private val pageSessionId = AtomicInteger(0)
     private val isPreparingChannel = java.util.concurrent.atomic.AtomicBoolean(false)
-    /** 因切换通道模式或识别引擎而重建后,是否自动恢复收听(重建前正在收听时置 true)。 */
+    /** 因切换通道模式、识别引擎或翻译下发模式而重建后,是否自动恢复收听(重建前正在收听时置 true)。 */
     @Volatile private var pendingAutoStartAfterRecreate = false
     private var recordingThread: Thread? = null
     private val bubbleAssembler = DemoConversationBubbleAssembler()
@@ -108,24 +105,6 @@ class Online1v1ViewModel @Inject constructor(
      */
     private val blueChunkByChannel = mutableMapOf<String, String>()
     private val networkEventPolicy = DemoOnlineNetworkEventPolicy()
-    private val traceDebounceLock = Any()
-    private var lastSpeechStartTraceAtMs: Long = 0
-
-    // 左声道 traceId & 计时
-    private var leftTraceId: String? = null
-    private var leftVadStartMs: Long = 0
-    private var leftFirstAsrMs: Long = 0
-    private var leftFirstMtMs: Long = 0
-    private var leftFirstTtsMs: Long = 0
-    @Volatile private var pendingMetadataLeft: ByteArray? = null
-
-    // 右声道 traceId & 计时
-    private var rightTraceId: String? = null
-    private var rightVadStartMs: Long = 0
-    private var rightFirstAsrMs: Long = 0
-    private var rightFirstMtMs: Long = 0
-    private var rightFirstTtsMs: Long = 0
-    @Volatile private var pendingMetadataRight: ByteArray? = null
 
     private val idleChannelSnapshot = TmkTranslationChannelStateSnapshot(
         state = TmkTranslationChannelState.IDLE,
@@ -168,22 +147,25 @@ class Online1v1ViewModel @Inject constructor(
     val captureChannels: StateFlow<Int> = _captureChannels.asStateFlow()
     private val _playbackChannels = MutableStateFlow(0)
     val playbackChannels: StateFlow<Int> = _playbackChannels.asStateFlow()
-    private val _sourceLang = MutableStateFlow("zh-CN")
-    val sourceLang: StateFlow<String> = _sourceLang.asStateFlow()
-    private val _targetLang = MutableStateFlow("en-US")
-    val targetLang: StateFlow<String> = _targetLang.asStateFlow()
-    private val _leftSpeakerGender = MutableStateFlow(SpeakerGender.MALE)
+    private val _leftLang = MutableStateFlow("en-US")
+    val leftLang: StateFlow<String> = _leftLang.asStateFlow()
+    private val _rightLang = MutableStateFlow("zh-CN")
+    val rightLang: StateFlow<String> = _rightLang.asStateFlow()
+    private val _leftSpeakerGender = MutableStateFlow(OneToOneDemoDefaults.online.leftSpeaker)
     val leftSpeakerGender: StateFlow<SpeakerGender> = _leftSpeakerGender.asStateFlow()
-    private val _rightSpeakerGender = MutableStateFlow(SpeakerGender.FEMALE)
+    private val _rightSpeakerGender = MutableStateFlow(OneToOneDemoDefaults.online.rightSpeaker)
     val rightSpeakerGender: StateFlow<SpeakerGender> = _rightSpeakerGender.asStateFlow()
-    private val _onlineTranslateEngine = MutableStateFlow(TmkOnlineTranslateEngine.ACCURATE)
+    private val _onlineTranslateEngine = MutableStateFlow(OneToOneDemoDefaults.online.translateEngine)
     val onlineTranslateEngine: StateFlow<TmkOnlineTranslateEngine> = _onlineTranslateEngine.asStateFlow()
-    private val _onlineRecognizeEngine = MutableStateFlow(TmkOnlineRecognizeEngine.DEFAULT)
+    private val _onlineRecognizeEngine = MutableStateFlow(OneToOneDemoDefaults.online.recognizeEngine)
     val onlineRecognizeEngine: StateFlow<TmkOnlineRecognizeEngine> = _onlineRecognizeEngine.asStateFlow()
+    // 在线房间的翻译下发模式默认保留服务端 default 语义。
+    private val _translateMode = MutableStateFlow(OneToOneDemoDefaults.online.translateMode)
+    val translateMode: StateFlow<TmkTranslateDeliveryMode> = _translateMode.asStateFlow()
     private val _roomScenarioOption = MutableStateFlow(OnlineRoomScenarioOption.defaultOption)
     val roomScenarioOption: StateFlow<OnlineRoomScenarioOption> = _roomScenarioOption.asStateFlow()
     // 通道模式:标准(混合双声道单UID) / 低延迟(左右独立单声道双UID)。
-    private val _audioMode = MutableStateFlow(TmkDialogConversationAudioMode.STANDARD)
+    private val _audioMode = MutableStateFlow(OneToOneDemoDefaults.online.audioMode)
     val audioMode: StateFlow<TmkDialogConversationAudioMode> = _audioMode.asStateFlow()
     // 本机播放音源(左路/右路翻译),默认左路。立体声按此拆一路;低延迟单路帧仅播选中那一路。
     private val _playbackMode = MutableStateFlow(OneToOnePlaybackMode.LEFT)
@@ -210,6 +192,21 @@ class Online1v1ViewModel @Inject constructor(
         }
     }
 
+    /** 翻译下发模式在建房时下发，切换后沿用通道模式的释放并重建流程。 */
+    fun setTranslateMode(mode: TmkTranslateDeliveryMode) {
+        if (_translateMode.value == mode) return
+        _translateMode.value = mode
+        val modeText = OnlineTranslateModeOption.from(mode).title
+        val hadChannel = channel != null || _isStarted.value || isPreparingChannel.get()
+        if (hadChannel) {
+            addLog("翻译下发模式切换为 $modeText，正在重建翻译引擎...")
+            recreateChannelForModeChange("正在以$modeText 重建翻译引擎...")
+        } else {
+            addLog("翻译下发模式切换为 $modeText，将在创建房间时生效")
+            _statusText.value = "翻译下发模式已切换为 $modeText"
+        }
+    }
+
     /**
      * 识别引擎在建房时下发，已创建房间或通道后无法热切换；因此沿用通道模式的释放并重建流程。
      */
@@ -227,10 +224,10 @@ class Online1v1ViewModel @Inject constructor(
         }
     }
 
-    fun setLanguagesIfNeeded(s: String, t: String) {
+    fun setLanguagesIfNeeded(leftLanguage: String, rightLanguage: String) {
         if (hasLockedLanguages) return
-        _sourceLang.value = s
-        _targetLang.value = t
+        _leftLang.value = leftLanguage
+        _rightLang.value = rightLanguage
         hasLockedLanguages = true
     }
 
@@ -339,45 +336,6 @@ class Online1v1ViewModel @Inject constructor(
         publishBubbles()
     }
 
-    private fun buildMetadataBytes(ch: String): ByteArray {
-        val sdf = java.text.SimpleDateFormat("HHmmss", java.util.Locale.getDefault())
-        val t = sdf.format(java.util.Date())
-        return byteArrayOf(ch.toByte(), t.substring(0, 2).toByte(), t.substring(2, 4).toByte(), t.substring(4, 6).toByte())
-    }
-
-    private fun metadataToTraceId(m: ByteArray): String =
-        m[0].toString() + m.drop(1).joinToString("") { String.format("%02d", it) }
-
-    private fun shouldSendSpeechStartTrace(nowMs: Long): Boolean {
-        synchronized(traceDebounceLock) {
-            if (lastSpeechStartTraceAtMs != 0L &&
-                nowMs - lastSpeechStartTraceAtMs <= SPEECH_START_TRACE_MIN_INTERVAL_MS
-            ) {
-                return false
-            }
-            lastSpeechStartTraceAtMs = nowMs
-            return true
-        }
-    }
-
-    private fun resetLeftTrace() {
-        leftTraceId = null
-        leftVadStartMs = 0
-        leftFirstAsrMs = 0
-        leftFirstMtMs = 0
-        leftFirstTtsMs = 0
-        pendingMetadataLeft = null
-    }
-
-    private fun resetRightTrace() {
-        rightTraceId = null
-        rightVadStartMs = 0
-        rightFirstAsrMs = 0
-        rightFirstMtMs = 0
-        rightFirstTtsMs = 0
-        pendingMetadataRight = null
-    }
-
     fun initSDK() {
         // 退出竞态守卫:页面已退出(released)时不得再初始化/建房。退出瞬间若有并发的 startTranslation/回调
         // 触发 initSDK,会导致「退出却又建一次房」。合法重建(recreateChannel*)已先置 released=false,不受影响。
@@ -385,7 +343,6 @@ class Online1v1ViewModel @Inject constructor(
         try {
             if (!_isInitialized.value) {
                 TmkTranslationSDK.sdkInit(application, SampleSdkConfig.globalConfig(application))
-                TmkTranslationSDK.lingCastTelemetrySetTraceReportingEnabled(true)
                 _isInitialized.value = true
                 _initErrorMessage.value = null
                 addLog("SDK 初始化完成")
@@ -409,8 +366,7 @@ class Online1v1ViewModel @Inject constructor(
         if (lifecycleGate.isReleased()) return
         if (!_isInitialized.value || channel == null || !isSdkChannelReady()) {
             if (channel != null && canRetrySdkChannel()) {
-                _statusText.value = "通道可恢复，正在重新连接..."
-                channel?.start()
+                recreateChannelAfterRecoverableFailure()
                 return
             }
             addLog("在线通道未就绪，尝试重新准备")
@@ -421,6 +377,7 @@ class Online1v1ViewModel @Inject constructor(
         if (_isStarted.value) return
         if (!startDualChannelStreaming()) return
         _isStarted.value = true
+        ttsCoordinator.setActive(true)
         _statusText.value = "正在收听中..."
         addLog("在线 1v1 已开始采集")
     }
@@ -445,6 +402,7 @@ class Online1v1ViewModel @Inject constructor(
                 addLog("启动翻译耗时 鉴权耗时 authDurationMs=${startupTiming.durationSince(startupTiming.authStartedAtMs)} totalDurationMs=${startupTiming.totalDurationMs()} result=failure")
                 addLog("鉴权失败: [$errorId] ${e.message}")
                 _statusText.value = "鉴权失败: ${e.message}"
+                showConversationErrorPrompt(OnlineConversationErrorPrompts.fromException(errorId, e))
             }
         })
     }
@@ -471,7 +429,7 @@ class Online1v1ViewModel @Inject constructor(
 
                 val channelConfig = buildOnlineChannelConfig(room)
 
-                addLog("left=${_targetLang.value} right=${_sourceLang.value}")
+                addLog("left=${_leftLang.value} right=${_rightLang.value}")
 
                 channelCancelable?.cancel()
                 startupTiming.channelStartedAtMs = SystemClock.elapsedRealtime()
@@ -507,6 +465,7 @@ class Online1v1ViewModel @Inject constructor(
                             addLog("启动翻译耗时 加入通道耗时 channelDurationMs=${startupTiming.durationSince(startupTiming.channelStartedAtMs)} totalDurationMs=${startupTiming.totalDurationMs()} result=failure")
                             addLog("创建 Channel 失败: [$errorId] ${e.message}")
                             _statusText.value = "通道启动失败: ${e.message}"
+                            showConversationErrorPrompt(OnlineConversationErrorPrompts.fromException(errorId, e))
                         }
                     },
                     TmkCreateChannelOptions.defaultConfig()
@@ -520,25 +479,26 @@ class Online1v1ViewModel @Inject constructor(
                 addLog("启动翻译耗时 创建房间耗时 roomDurationMs=${startupTiming.durationSince(startupTiming.roomStartedAtMs)} totalDurationMs=${startupTiming.totalDurationMs()} result=failure")
                 addLog("创建房间失败: [$errorId] ${e.message}")
                 _statusText.value = "房间创建失败: ${e.message}"
+                showConversationErrorPrompt(OnlineConversationErrorPrompts.fromException(errorId, e))
             }
         })
     }
 
     private fun buildRoomConfig(): TmkTranslationRoomConfig {
-        val channelLanguages = OnlineOneToOneLanguageMapping.fromDemoSelection(
-            sourceLang = _sourceLang.value,
-            targetLang = _targetLang.value,
+        val channelLanguages = OnlineOneToOneLanguageMapping.fromLeftRight(
+            leftLang = _leftLang.value,
+            rightLang = _rightLang.value,
         )
         return TmkTranslationRoomConfig.Builder()
             .setScenario(Scenario.ONE_TO_ONE)
-            // SDK 建房参数按 left/right 写入;Demo 业务语义固定为 source=right、target=left。
-            .setSourceLang(channelLanguages.leftLang)
-            .setTargetLang(channelLanguages.rightLang)
+            // 在线一对一统一语义:source=右路/对方、target=左路/自己。
+            .setSourceLang(channelLanguages.rightLang)
+            .setTargetLang(channelLanguages.leftLang)
             .setSpeakers(currentSpeakers())
             .setOnlineTranslateEngine(_onlineTranslateEngine.value)
             .setOnlineRecognizeEngine(_onlineRecognizeEngine.value)
             .setRoomScenario(_roomScenarioOption.value.roomScenario)
-            .setTranslateMode(TmkTranslateDeliveryMode.PARTIAL)
+            .setTranslateMode(_translateMode.value)
             .setDialogConversationAudioMode(_audioMode.value)
             .setEnableSensitiveWordRedaction(
                 if (DemoSettingsStore.loadSensitiveWordRedactionEnabled(application)) {
@@ -551,17 +511,17 @@ class Online1v1ViewModel @Inject constructor(
     }
 
     private fun buildOnlineChannelConfig(room: TmkTranslationRoom?): TmkTransChannelConfig {
-        val channelLanguages = OnlineOneToOneLanguageMapping.fromDemoSelection(
-            sourceLang = _sourceLang.value,
-            targetLang = _targetLang.value,
+        val channelLanguages = OnlineOneToOneLanguageMapping.fromLeftRight(
+            leftLang = _leftLang.value,
+            rightLang = _rightLang.value,
         )
         val builder = TmkTransChannelConfig.Builder()
             .setMode(TranslationMode.ONLINE)
             .setScenario(Scenario.ONE_TO_ONE)
             .setTransModeType(TransModeType.ONE_TO_ONE)
-            // SDK 建房参数按 left/right 写入；Demo 业务语义固定为 source=right、target=left。
-            .setSourceLang(channelLanguages.leftLang)
-            .setTargetLang(channelLanguages.rightLang)
+            // 在线一对一统一语义:source=右路/对方、target=左路/自己。
+            .setSourceLang(channelLanguages.rightLang)
+            .setTargetLang(channelLanguages.leftLang)
             .setSpeakers(currentSpeakers())
             .setOnlineTranslateEngine(_onlineTranslateEngine.value)
             .setRoomScenario(_roomScenarioOption.value.roomScenario)
@@ -573,13 +533,13 @@ class Online1v1ViewModel @Inject constructor(
         return builder.build()
     }
 
-    fun updateRoomLocale(sourceLang: String, targetLang: String) {
+    fun updateRoomLocale(leftLang: String, rightLang: String) {
         val sessionId = pageSessionId.get()
         val currentRoom = room
         if (currentRoom == null || channel == null || !isSdkChannelReady()) {
-            _sourceLang.value = sourceLang
-            _targetLang.value = targetLang
-            addLog("语言已设置为 $sourceLang -> $targetLang，将在创建房间时生效")
+            _leftLang.value = leftLang
+            _rightLang.value = rightLang
+            addLog("语言已设置为 left=$leftLang right=$rightLang，将在创建房间时生效")
             _statusText.value = "语言已切换，将在创建房间时生效"
             return
         }
@@ -587,18 +547,17 @@ class Online1v1ViewModel @Inject constructor(
         _isLocaleUpdating.value = true
         _statusText.value = "正在更新一对一房间语言..."
         currentRoom.updateRoomLocale(
-            // 后端一对一房间约定：source_locales 对应左声道，target_locale 对应右声道。
-            // Demo 对齐 iOS：左声道=目标语言侧，右声道=源语言/麦克风侧。
-            sourceLocales = listOf(targetLang),
-            targetLocales = listOf(sourceLang),
+            // SDK 公共参数仍按 source=右路、target=左路传递。
+            sourceLocales = listOf(rightLang),
+            targetLocales = listOf(leftLang),
             callback = object : ActionCallback {
                 override fun onSuccess(result: Result<Unit>) {
                     if (!isActiveSession(sessionId)) return
-                    _sourceLang.value = sourceLang
-                    _targetLang.value = targetLang
+                    _leftLang.value = leftLang
+                    _rightLang.value = rightLang
                     _isLocaleUpdating.value = false
                     _playbackChannels.value = 0
-                    addLog("语言切换成功: left=$targetLang right=$sourceLang")
+                    addLog("语言切换成功: left=$leftLang right=$rightLang")
                     _statusText.value = "一对一房间语言已更新，下一句话生效"
                 }
 
@@ -724,9 +683,9 @@ class Online1v1ViewModel @Inject constructor(
 
     private fun languagePairForChannel(channel: String): Pair<String, String> {
         return when (channel) {
-            "left" -> _targetLang.value to _sourceLang.value
-            "right" -> _sourceLang.value to _targetLang.value
-            else -> _sourceLang.value to _targetLang.value
+            "left" -> _leftLang.value to _rightLang.value
+            "right" -> _rightLang.value to _leftLang.value
+            else -> _rightLang.value to _leftLang.value
         }
     }
 
@@ -753,16 +712,7 @@ class Online1v1ViewModel @Inject constructor(
 
             if (!isFinal) return
 
-            val now = System.currentTimeMillis()
-            if (ch == "left" && leftTraceId != null && leftFirstAsrMs == 0L) {
-                leftFirstAsrMs = now
-                addLog("ASR [final]:L $text | traceId=$leftTraceId ASR=${now - leftVadStartMs}ms")
-            } else if (ch == "right" && rightTraceId != null && rightFirstAsrMs == 0L) {
-                rightFirstAsrMs = now
-                addLog("ASR [final]:R $text | traceId=$rightTraceId ASR=${now - rightVadStartMs}ms")
-            } else {
-                addLog("ASR [ch=$ch final=$isFinal]: $text")
-            }
+            addLog("ASR [ch=$ch final=$isFinal]: $text")
         }
 
         override fun onTranslate(
@@ -780,16 +730,7 @@ class Online1v1ViewModel @Inject constructor(
 
             if (!isFinal) return
 
-            val now = System.currentTimeMillis()
-            if (ch == "left" && leftTraceId != null && leftFirstMtMs == 0L) {
-                leftFirstMtMs = now
-                addLog("MT [final]:L $text | traceId=$leftTraceId MT=${now - leftVadStartMs}ms")
-            } else if (ch == "right" && rightTraceId != null && rightFirstMtMs == 0L) {
-                rightFirstMtMs = now
-                addLog("MT [final]:R $text | traceId=$rightTraceId MT=${now - rightVadStartMs}ms")
-            } else {
-                addLog("MT [ch=$ch final=$isFinal]: $text")
-            }
+            addLog("MT [ch=$ch final=$isFinal]: $text")
         }
 
         override fun onAudioDataReceive(
@@ -798,29 +739,16 @@ class Online1v1ViewModel @Inject constructor(
             data: ByteArray,
             channelCount: Int
         ) {
-            _playbackChannels.value = channelCount
-            // 立体声按播放音源拆一路(输出单声道)、非立体声直接播;低延迟单路帧仅播选中音源那一路。返回 null 则不播。
-            val audioRoute = OneToOnePlaybackSelector.AudioRoute.from(r?.extraData?.get("audio_route"))
-            val speakerChannel = OneToOnePlaybackSelector.resolveOnlineSpeakerChannel(
-                audioRoute = audioRoute,
-                rawSpeakerChannel = r?.extraData?.get("speaker_channel"),
-            )
-            val output = OneToOnePlaybackSelector.selectPlaybackData(
-                data = data,
-                channelCount = channelCount,
-                playbackMode = _playbackMode.value,
-                audioRoute = audioRoute,
-                speakerChannel = speakerChannel,
-            ) ?: return
-            // 按选择结果的真实声道数播放(立体声拆分后为单声道)。
-            ttsPlayer.play(output.data, output.channelCount)
+            ttsCoordinator.handleAudioData(r, data, channelCount)
         }
 
         override fun onError(code: Int, msg: String) {
             val errorText = "翻译错误 [$code]: $msg"
             addLog(errorText)
             showConversationErrorPrompt(OnlineConversationErrorPrompts.fromCode(code, msg))
-            stopListening()
+            if (OnlineConversationErrorPrompts.shouldStopChannel(code)) {
+                stopListening()
+            }
         }
 
         override fun onEvent(eventName: String, args: Any?) {
@@ -858,16 +786,6 @@ class Online1v1ViewModel @Inject constructor(
                 applyTtsHighlight(args)
                 return
             }
-            if (eventName != "tts_metadata_received") return
-            val rid = args as? String ?: return
-            val now = System.currentTimeMillis()
-            if (rid == leftTraceId && leftFirstTtsMs == 0L) {
-                leftFirstTtsMs = now
-                addLog("TTS metadata L | traceId=$rid 总=${now - leftVadStartMs}ms")
-            } else if (rid == rightTraceId && rightFirstTtsMs == 0L) {
-                rightFirstTtsMs = now
-                addLog("TTS metadata R | traceId=$rid 总=${now - rightVadStartMs}ms")
-            }
         }
 
         override fun onStateChanged(fromEngine: AbstractChannelEngine?, snapshot: TmkTranslationChannelStateSnapshot) {
@@ -889,6 +807,15 @@ class Online1v1ViewModel @Inject constructor(
         stopTranslation("正在重新创建通道...")
         clearConversation()
         _statusText.value = "正在重新创建通道..."
+        lifecycleGate.reopen()
+        initSDK()
+    }
+
+    /** 可恢复失败后释放旧会话，重新走 SDK 内部的加入通道流程。 */
+    private fun recreateChannelAfterRecoverableFailure() {
+        val status = "通道可恢复，正在重新加入..."
+        stopTranslation(status)
+        clearConversation()
         lifecycleGate.reopen()
         initSDK()
     }
@@ -917,8 +844,6 @@ class Online1v1ViewModel @Inject constructor(
         blueSessionByChannel.clear()
         blueChunkByChannel.clear()
         _bubbles.value = emptyList()
-        resetLeftTrace()
-        resetRightTrace()
     }
 
     private fun startDualChannelStreaming(): Boolean {
@@ -943,24 +868,9 @@ class Online1v1ViewModel @Inject constructor(
         rightVadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
             setCallback(object : VadDetector.Callback {
                 override fun onVadStart() {
-                    val nowMs = System.currentTimeMillis()
-                    resetRightTrace()
-                    if (!shouldSendSpeechStartTrace(nowMs)) {
-                        addLog("VAD R → 开始说话 traceId skipped by debounce")
-                        return
-                    }
-                    val m = buildMetadataBytes("2")
-                    rightTraceId = metadataToTraceId(m)
-                    rightVadStartMs = nowMs - (rightVadDetector?.getVadBeginDurationMs() ?: 0)
-                    rightFirstAsrMs = 0; rightFirstMtMs = 0; rightFirstTtsMs = 0
-                    pendingMetadataRight = m
-                    TmkTranslationSDK.lingCastTelemetryStartTrace(rightTraceId)
-                    addLog("VAD R → 开始说话 traceId=$rightTraceId")
+                    addLog("VAD R → 开始说话")
                 }
-                override fun onVadEnd() {
-                    val tid = rightTraceId ?: return
-                    addLog("VAD R → 停止说话 traceId=$tid 持续${System.currentTimeMillis() - rightVadStartMs}ms")
-                }
+                override fun onVadEnd() { addLog("VAD R → 停止说话") }
             })
             init()
         }
@@ -975,7 +885,7 @@ class Online1v1ViewModel @Inject constructor(
 
             while (isRecording && isActiveSession(sessionId)) {
                 // 对齐 iOS Demo：左声道资产 PCM 播完后先推 3 秒静音，再从头循环。
-                val startsNewLeftCycle = leftLoopBuffer.fillNextLoopChunk(leftBuf)
+                leftLoopBuffer.fillNextLoopChunk(leftBuf)
 
                 var ro = 0
                 while (ro < bytesPerCh && isRecording) {
@@ -983,7 +893,6 @@ class Online1v1ViewModel @Inject constructor(
                     if (r > 0) ro += r
                 }
 
-                // 对齐 iOS Demo：在线一对一只用右声道麦克风触发 traceId。
                 rightVadDetector?.pushAudioBytes(rightBuf)
 
                 // 交织成立体声
@@ -997,24 +906,13 @@ class Online1v1ViewModel @Inject constructor(
                     si += 4
                 }
 
-                val leftCycleMetadata = if (startsNewLeftCycle) {
-                    buildLeftFileCycleMetadata()
-                } else {
-                    null
-                }
-
                 if (_audioMode.value == TmkDialogConversationAudioMode.LOW_LATENCY) {
                     // 双 UID:左右各推单声道,分别绑定各自连接 track(对齐 iOS pushStreamAudioData(_:speakerChannel:))。
-                    // metadata 各归各通道:左声道循环起点 metadata 走左,右声道 VAD traceId metadata 走右。
-                    channel?.pushStreamAudioData(leftBuf, SpeakerChannel.LEFT, leftCycleMetadata)
-                    val rightMeta = pendingMetadataRight
-                    pendingMetadataRight = null
-                    channel?.pushStreamAudioData(rightBuf, SpeakerChannel.RIGHT, rightMeta)
+                    channel?.pushStreamAudioData(leftBuf, SpeakerChannel.LEFT, null)
+                    channel?.pushStreamAudioData(rightBuf, SpeakerChannel.RIGHT, null)
                 } else {
                     // 标准单 UID:交织立体声整块推流,SDK 内部按混合双声道处理。
-                    val extra = leftCycleMetadata ?: pendingMetadataRight
-                    if (leftCycleMetadata == null && pendingMetadataRight != null) pendingMetadataRight = null
-                    channel?.pushStreamAudioData(stereoBuf, 2, extra)
+                    channel?.pushStreamAudioData(stereoBuf, 2, null)
                 }
             }
         }, "$TAG-Recorder").apply { start() }
@@ -1030,26 +928,13 @@ class Online1v1ViewModel @Inject constructor(
         }
     }
 
-    private fun buildLeftFileCycleMetadata(): ByteArray {
-        val metadata = buildMetadataBytes("1")
-        val traceId = metadataToTraceId(metadata)
-        leftTraceId = traceId
-        leftVadStartMs = System.currentTimeMillis()
-        leftFirstAsrMs = 0
-        leftFirstMtMs = 0
-        leftFirstTtsMs = 0
-        TmkTranslationSDK.lingCastTelemetryStartTrace(traceId)
-        addLog("左路PCM新一轮开始 traceId=$traceId")
-        return metadata
-    }
-
     /**
-     * 切换本机播放音源(左路/右路翻译)。改字段 + 清空播放缓冲(避免残留反声道数据)+ 刷新 UI,不触碰 RTC。
+     * 切换本机播放音源(左路/右路翻译)。改字段 + 停止当前帧/播放线程(避免残留反声道数据)+ 刷新 UI,不触碰 RTC。
      */
     fun setPlaybackMode(mode: OneToOnePlaybackMode) {
         if (_playbackMode.value == mode) return
         _playbackMode.value = mode
-        ttsPlayer.clearQueue()
+        ttsCoordinator.setPlaybackMode(mode)
         addLog("播放音源切换为 ${mode.title}")
     }
 
@@ -1075,7 +960,8 @@ class Online1v1ViewModel @Inject constructor(
         _captureSampleRate.value = 0
         _captureChannels.value = 0
         _playbackChannels.value = 0
-        ttsPlayer.stop()
+        ttsCoordinator.setActive(false)
+        ttsCoordinator.release()
     }
 
     fun stopTranslation(finalStatus: String = "已停止收听") {

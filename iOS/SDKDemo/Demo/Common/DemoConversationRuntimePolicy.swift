@@ -76,6 +76,20 @@ enum DemoConversationRuntimePolicy {
                actualMessage: error.actualErrorMessage)
     }
 
+    /// 生成 Demo 统一诊断文案：展示 SDK 统一码，并在存在时保留底层系统错误码/错误域信息。
+    /// 不包含密钥、License 或原始音频等敏感内容。
+    static func diagnosticMessage(for error: TmkTranslationError) -> String {
+        var parts = ["错误[\(error.code) \(error.constantName)]：\(error.message)"]
+        if let actualCode = error.actualErrorCode {
+            let domain = error.actualErrorDomain.map { " \($0)" } ?? ""
+            let actualMessage = error.actualErrorMessage ?? ""
+            parts.append("底层错误[\(actualCode)\(domain)]：\(actualMessage)")
+        } else if let actualMessage = error.actualErrorMessage, actualMessage.isEmpty == false {
+            parts.append("底层错误：\(actualMessage)")
+        }
+        return parts.joined(separator: "\n")
+    }
+
     static func action(forCode code: Int, message: String) -> DemoConversationRuntimeAction {
         action(forCode: code,
                message: message,
@@ -109,6 +123,34 @@ enum DemoConversationRuntimePolicy {
             }
             return .prompt(.init(title: "鉴权失败",
                                  message: "请重新鉴权后再创建对话。\n\n\(detail)",
+                                 style: .leaveOnly))
+        case TmkSDKErrorCode.deviceKeyReadFailed.rawValue:
+            return .prompt(.init(title: "设备密钥读取失败",
+                                 message: "设备密钥无法读取，请检查设备 Keychain 状态后重试。\n\n\(detail)",
+                                 style: .restart))
+        case TmkSDKErrorCode.deviceKeyCreationFailed.rawValue:
+            return .prompt(.init(title: "设备密钥创建失败",
+                                 message: "设备密钥无法创建，请检查系统 Security.framework 能力后重试。\n\n\(detail)",
+                                 style: .restart))
+        case TmkSDKErrorCode.deviceKeyInvalid.rawValue:
+            return .prompt(.init(title: "设备密钥无效",
+                                 message: "设备密钥或系统参数无效，请更新配置后重新鉴权。\n\n\(detail)",
+                                 style: .leaveOnly))
+        case TmkSDKErrorCode.deviceKeyAccessDenied.rawValue:
+            return .prompt(.init(title: "设备密钥访问失败",
+                                 message: "系统拒绝访问设备密钥，请检查 Keychain 访问条件、设备锁定状态和应用签名配置。\n\n\(detail)",
+                                 style: .leaveOnly))
+        case TmkSDKErrorCode.deviceKeyUnavailable.rawValue:
+            return .prompt(.init(title: "设备密钥暂不可用",
+                                 message: "设备密钥服务或所需系统交互暂不可用，请稍后重试。\n\n\(detail)",
+                                 style: .restart))
+        case TmkSDKErrorCode.deviceKeyStorageFailed.rawValue:
+            return .prompt(.init(title: "设备密钥存储失败",
+                                 message: "设备密钥所在 Keychain 存储操作失败，请检查系统存储状态后重试。\n\n\(detail)",
+                                 style: .restart))
+        case TmkSDKErrorCode.deviceKeyOperationFailed.rawValue:
+            return .prompt(.init(title: "设备密钥操作失败",
+                                 message: "设备密钥操作失败，请保留底层错误码并导出诊断日志后排查。\n\n\(detail)",
                                  style: .leaveOnly))
         case TmkSDKErrorCode.ttsSynthesisError.rawValue,
              TmkSDKErrorCode.translationError.rawValue,
@@ -285,6 +327,13 @@ enum DemoConversationRuntimePolicy {
         switch code {
         case TmkSDKErrorCode.requestCancelled.rawValue,
              TmkSDKErrorCode.authenticationFailed.rawValue,
+             TmkSDKErrorCode.deviceKeyReadFailed.rawValue,
+             TmkSDKErrorCode.deviceKeyCreationFailed.rawValue,
+             TmkSDKErrorCode.deviceKeyInvalid.rawValue,
+             TmkSDKErrorCode.deviceKeyAccessDenied.rawValue,
+             TmkSDKErrorCode.deviceKeyUnavailable.rawValue,
+             TmkSDKErrorCode.deviceKeyStorageFailed.rawValue,
+             TmkSDKErrorCode.deviceKeyOperationFailed.rawValue,
              TmkSDKErrorCode.sessionExpired.rawValue,
              TmkSDKErrorCode.offlineModelNotReady.rawValue,
              TmkSDKErrorCode.networkInvalidURL.rawValue,

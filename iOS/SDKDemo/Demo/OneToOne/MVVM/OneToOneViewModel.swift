@@ -6,16 +6,8 @@ import AVFoundation
 
 final class OneToOneViewModel: NSObject {
     private static let logger = Logger(subsystem: "co.timekettle.demo", category: "OneToOne")
-    private enum PCMKind: String {
-        case stereo
-        case left
-        case right
-    }
-
-    private struct PCMFileKey: Hashable {
-        let uid: Int
-        let kind: PCMKind
-    }
+    private static let maxPendingPlaybackAudioBytes = 512 * 1024
+    private static let rowUpdateInterval: TimeInterval = 0.12
 
     @Published private(set) var state = OneToOneViewState()
     let rowMutation = PassthroughSubject<ChatListMutation<OneToOneRowViewData>, Never>()
@@ -25,6 +17,20 @@ final class OneToOneViewModel: NSObject {
     private var channel: TmkTranslationChannel?
     private var voiceIO: TmkVoiceProcessingIO?
     private var hasStoppedListening = false
+    private lazy var ttsCoordinator = DemoTtsPlaybackCoordinator(
+        scene: .oneToOne,
+        processQueue: audioProcessQueue,
+        backpressure: audioFrameBackpressure,
+        sourceLaneResolver: { [weak self] result, audioRoute in
+            guard let self else { return nil }
+            // 对齐原实现：无 audio_route 时按 uid→lane 映射兜底；有路由时走 sourceLane 默认逻辑。
+            guard audioRoute == nil else { return nil }
+            return self.audioUID(from: result).flatMap { self.playbackLaneByUID[$0] }
+        },
+        onPlaybackChannelsChanged: { [weak self] channels in
+            self?.updatePlaybackChannel(channels)
+        }
+    )
     private var rows: [OneToOneRowViewData] = []
     private var rowIndexMap: [String: Int] = [:]
     private var bubbleLaneMap: [String: OneToOneRowViewData.Lane] = [:]
@@ -39,6 +45,15 @@ final class OneToOneViewModel: NSObject {
     private let bubbleAssembler = DemoConversationBubbleAssembler()
     private var pendingRowsPublishWorkItem: DispatchWorkItem?
     private var lastPublishedRows: [OneToOneRowViewData] = []
+    private lazy var rowUpdateCoalescer = DemoLatestKeyUpdateCoalescer<String>(
+        interval: Self.rowUpdateInterval,
+        scheduler: { interval, action in
+            DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: action)
+        },
+        onFlush: { [weak self] keys in
+            self?.publishLatestRows(for: keys)
+        }
+    )
 
     private var targetPlaybackUIDs: Set<Int> = []
     private var activePlaybackUID: Int?
@@ -47,10 +62,11 @@ final class OneToOneViewModel: NSObject {
     private var selectedTargetLang = "en-US"
     private var selectedRightLang: String { selectedSourceLang }
     private var selectedLeftLang: String { selectedTargetLang }
-    private var selectedLeftSpeakerGender: TmkSpeakerGender = .male
-    private var selectedRightSpeakerGender: TmkSpeakerGender = .female
+    private var selectedLeftSpeakerGender: TmkSpeakerGender = OneToOneDemoDefaults.online.leftSpeaker
+    private var selectedRightSpeakerGender: TmkSpeakerGender = OneToOneDemoDefaults.online.rightSpeaker
     private var selectedTranslateEngine: TmkOnlineTranslateEngine = .fast
     private var selectedRecognizeEngine: TmkOnlineRecognizeEngine = .default
+    private var selectedTranslateMode: TmkTranslateDeliveryMode = .default
     private var selectedScenarioOption: OneToOneScenarioOption = .defaultOption
     private var selectedChannelModeConfiguration: OneToOneChannelModeConfiguration = OneToOneStandardChannelModeConfiguration()
     private var selectedDialogConversationAudioMode: TmkDialogConversationAudioMode {
@@ -60,19 +76,14 @@ final class OneToOneViewModel: NSObject {
     private var isAuthVerified = false
 
     private let audioProcessQueue = DispatchQueue(label: "co.timekettle.demo.onetoone.audio")
+    private let audioFrameBackpressure = DemoAudioFrameBackpressure(maxPendingBytes: maxPendingPlaybackAudioBytes)
     private let stateLock = NSLock()
     private var isListeningActive = false
-    private var isCaptureEnabled = false
-    private var playbackMode: OneToOnePlaybackMode = .left
+    private var pendingAutoStartAfterRecreate = false
     private var cachedCaptureSampleRate: Int = -1
     private var cachedCaptureChannels: Int = -1
     private var cachedPlaybackChannels: Int = -1
     private let maxDisplayedRows = 200
-    private var hasPCMData = false
-    private var isPCMRecordingEnabled = false
-    private var pcmOutputDirectory: URL?
-    private var pcmFileHandles: [PCMFileKey: FileHandle] = [:]
-    private var pcmFileURLs: [PCMFileKey: URL] = [:]
     private lazy var localPCMData: Data? = {
         guard let path = Bundle.main.path(forResource: "right_audio", ofType: "pcm", inDirectory: "PCM")
             ?? Bundle.main.path(forResource: "right_audio", ofType: "pcm") else { return nil }
@@ -100,11 +111,11 @@ final class OneToOneViewModel: NSObject {
 
     func onViewDidLoad() {
         updateStateOnMain {
-            $0.isCaptureEnabled = self.isCaptureEnabled
             $0.sourceLanguage = self.selectedSourceLang
             $0.targetLanguage = self.selectedTargetLang
             $0.translateEngine = self.selectedTranslateEngine
             $0.recognizeEngine = self.selectedRecognizeEngine
+            $0.translateMode = self.selectedTranslateMode
             $0.scenarioOption = self.selectedScenarioOption
             $0.dialogConversationAudioMode = self.selectedDialogConversationAudioMode
             $0.configuredChannels = self.selectedChannelModeConfiguration.pcmChannels
@@ -132,6 +143,7 @@ final class OneToOneViewModel: NSObject {
                                                                framesPerBuffer: 1024))
         }
         guard let voiceIO else { return }
+        ttsCoordinator.attach(voiceIO: voiceIO)
         configureInterruptionHandling(for: voiceIO)
 
         do {
@@ -164,16 +176,13 @@ final class OneToOneViewModel: NSObject {
                 return
             }
             do {
-                if self.isPCMRecordingEnabled {
-                    self.preparePCMOutputDirectory()
-                }
                 self.resetLocalPCMPlaybackState()
                 try voiceIO.start()
                 self.setListeningActive(true)
+                self.ttsCoordinator.setActive(true)
                 self.updateStateOnMain {
                     $0.canStopListening = true
                     $0.canStartListening = false
-                    $0.canSharePCM = false
                 }
                 self.updateStatus("正在收听中...")
             } catch {
@@ -183,8 +192,9 @@ final class OneToOneViewModel: NSObject {
     }
 
     func stopListening() {
+        clearPendingAutoStartAfterRecreate()
         voiceIO?.stop()
-        closeAllPCMFiles()
+        ttsCoordinator.setActive(false)
         resetLocalPCMPlaybackState()
         setListeningActive(false)
         activePlaybackUID = nil
@@ -192,7 +202,6 @@ final class OneToOneViewModel: NSObject {
         updateStateOnMain {
             $0.canStopListening = false
             $0.canStartListening = self.channel != nil
-            $0.canSharePCM = self.hasPCMData
         }
         updateStatus("收听已停止")
     }
@@ -217,26 +226,8 @@ final class OneToOneViewModel: NSObject {
         }
     }
 
-    var currentPCMURLs: [URL] {
-        Array(pcmFileURLs.values).sorted { $0.lastPathComponent < $1.lastPathComponent }
-    }
-
-    @discardableResult
-    func enablePCMRecordingIfNeeded() -> Bool {
-        if isPCMRecordingEnabled { return false }
-        isPCMRecordingEnabled = true
-        if getListeningActive(), pcmOutputDirectory == nil {
-            preparePCMOutputDirectory()
-        }
-        updateStatus("已开启PCM录制，请先进行对话后再分享")
-        return true
-    }
-
     func setPlaybackMode(_ mode: OneToOnePlaybackMode) {
-        stateLock.lock()
-        playbackMode = mode
-        stateLock.unlock()
-        voiceIO?.clearPlaybackBuffer()
+        ttsCoordinator.setPlaybackMode(mode)
         updateStateOnMain { $0.playbackMode = mode }
     }
 
@@ -271,20 +262,6 @@ final class OneToOneViewModel: NSObject {
         }
         guard source != selectedSourceLang else { return }
         updateOneToOneLanguage(source: source)
-    }
-
-    func setCaptureEnabled(_ enabled: Bool) {
-        stateLock.lock()
-        isCaptureEnabled = enabled
-        stateLock.unlock()
-        isPCMRecordingEnabled = enabled
-        if enabled, getListeningActive(), pcmOutputDirectory == nil {
-            preparePCMOutputDirectory()
-        }
-        if enabled == false {
-            closeAllPCMFiles()
-        }
-        updateStateOnMain { $0.isCaptureEnabled = enabled }
     }
 
     func updateSpeaker(channel speakerChannel: TmkSpeakerChannel, gender: TmkSpeakerGender) {
@@ -397,6 +374,16 @@ final class OneToOneViewModel: NSObject {
         }
         recreateRoomAndChannel(statusText: "在线一对一识别引擎已切换，重新创建通道中...")
     }
+
+    /// 翻译下发模式在创建房间时下发，切换后沿用通道模式的释放并重建流程使新模式生效。
+    func updateTranslateMode(_ translateMode: TmkTranslateDeliveryMode) {
+        guard selectedTranslateMode != translateMode else { return }
+        selectedTranslateMode = translateMode
+        updateStateOnMain {
+            $0.translateMode = translateMode
+        }
+        recreateRoomAndChannel(statusText: "在线一对一翻译下发模式已切换，重新创建通道中...")
+    }
 }
 
 enum DemoTmkResultLogFormatter {
@@ -464,7 +451,6 @@ enum DemoTmkResultLogFormatter {
 }
 
 private extension OneToOneViewModel {
-
     func startOnlineListening() {
         let startupStartedAt = Date()
         let authStartedAt = Date()
@@ -494,6 +480,7 @@ private extension OneToOneViewModel {
             speakers: configuredSpeakers(),
             translateEngine: selectedTranslateEngine,
             recognizeEngine: selectedRecognizeEngine,
+            translateMode: selectedTranslateMode,
             dialogConversationAudioMode: selectedDialogConversationAudioMode,
             enableSensitiveWordRedaction: DemoSettingsStore().loadCurrentConfig().sensitiveWordRedactionEnabled ? .enabled : .disabled
         )
@@ -543,7 +530,16 @@ private extension OneToOneViewModel {
             case .success(let channel):
                 self.channel = channel
                 channel.setTranslationListener(self)
-                self.updateStateOnMain { $0.canStartListening = true }
+                let shouldResumeListening = self.consumePendingAutoStartAfterRecreate()
+                self.updateStateOnMain {
+                    $0.canStartListening = true
+                    if shouldResumeListening {
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self, self.hasStoppedListening == false else { return }
+                            self.startListening()
+                        }
+                    }
+                }
                 Self.logger.info("启动翻译耗时 加入通道耗时 channelDurationMs=\(channelDurationMs, privacy: .public) totalDurationMs=\(totalDurationMs, privacy: .public) result=success")
                 self.updateStatus("在线通道已就绪，点击“开始收听”开始采集")
             case .failure(let error):
@@ -556,14 +552,16 @@ private extension OneToOneViewModel {
     func stopListeningIfNeeded() {
         guard hasStoppedListening == false else { return }
         hasStoppedListening = true
+        clearPendingAutoStartAfterRecreate()
+        rowUpdateCoalescer.flushAll()
+        rowUpdateCoalescer.cancelAll()
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
         voiceIO?.stop()
-        closeAllPCMFiles()
+        ttsCoordinator.setActive(false)
         resetLocalPCMPlaybackState()
         voiceIO = nil
-        isPCMRecordingEnabled = false
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         room = nil
@@ -575,8 +573,9 @@ private extension OneToOneViewModel {
     }
 
     func recreateRoomAndChannel(statusText: String = "语言已切换，重新创建通道中...") {
+        setPendingAutoStartAfterRecreate(getListeningActive())
         voiceIO?.stop()
-        closeAllPCMFiles()
+        ttsCoordinator.setActive(false)
         resetLocalPCMPlaybackState()
         setListeningActive(false)
         activePlaybackUID = nil
@@ -591,7 +590,6 @@ private extension OneToOneViewModel {
             $0.rows = []
             $0.canStartListening = false
             $0.canStopListening = false
-            $0.canSharePCM = false
             $0.playbackChannels = 0
             $0.currentRoomNo = "-"
         }
@@ -686,6 +684,7 @@ private extension OneToOneViewModel {
     }
 
     func resetRows() {
+        rowUpdateCoalescer.cancelAll()
         rows.removeAll()
         rowIndexMap.removeAll()
         bubbleLaneMap.removeAll()
@@ -725,44 +724,66 @@ private extension OneToOneViewModel {
     }
 
     func applyBubbleSnapshot(_ snapshot: DemoConversationBubbleSnapshot) {
-        DispatchQueue.main.async {
-            let lane: OneToOneRowViewData.Lane = snapshot.lane == .right ? .right : .left
-            let key = self.rowKey(bubbleId: snapshot.bubbleId, lane: lane)
-            self.indexSessions(of: snapshot, key: key)
-            if let rowIndex = self.rowIndexMap[key], self.rows.indices.contains(rowIndex) {
-                var row = self.rows[rowIndex]
-                row.sessionId = snapshot.sessionId
-                row.sourceLangCode = snapshot.sourceLangCode
-                row.targetLangCode = snapshot.targetLangCode
-                row.sourceText = snapshot.sourceText
-                row.translatedText = snapshot.translatedText
-                row.sourceSegments = self.highlightedSource(snapshot.sourceSegments)
-                row.translatedSegments = self.highlightedTranslated(snapshot.translatedSegments)
-                row.isBubbleEnded = snapshot.isBubbleEnded
-                row.bOffset = snapshot.bOffset
-                row.bDuration = snapshot.bDuration
-                self.rows[rowIndex] = row
-                self.rowMutation.send(.update(row: row, index: rowIndex, heightMayChange: true))
-            } else {
-                let row = OneToOneRowViewData(sessionId: snapshot.sessionId,
-                                              bubbleId: snapshot.bubbleId,
-                                              lane: lane,
-                                              sourceLangCode: snapshot.sourceLangCode,
-                                              targetLangCode: snapshot.targetLangCode,
-                                              sourceText: snapshot.sourceText,
-                                              translatedText: snapshot.translatedText,
-                                              sourceSegments: self.highlightedSource(snapshot.sourceSegments),
-                                              translatedSegments: self.highlightedTranslated(snapshot.translatedSegments),
-                                              isBubbleEnded: snapshot.isBubbleEnded,
-                                              bOffset: snapshot.bOffset,
-                                              bDuration: snapshot.bDuration)
-                self.rows.append(row)
-                let rowIndex = self.rows.count - 1
-                self.rowIndexMap[key] = rowIndex
-                self.rowMutation.send(.insert(row: row, index: rowIndex))
+        if Thread.isMainThread {
+            applyBubbleSnapshotOnMain(snapshot)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.applyBubbleSnapshotOnMain(snapshot)
             }
-            self.trimRowsIfNeeded()
-            self.schedulePublishRows()
+        }
+    }
+
+    /// SDK 已保证结果回调在主线程；直接应用避免每个 partial 再创建一个主线程任务而形成快照积压。
+    private func applyBubbleSnapshotOnMain(_ snapshot: DemoConversationBubbleSnapshot) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        let lane: OneToOneRowViewData.Lane = snapshot.lane == .right ? .right : .left
+        let key = rowKey(bubbleId: snapshot.bubbleId, lane: lane)
+        indexSessions(of: snapshot, key: key)
+        if let rowIndex = rowIndexMap[key], rows.indices.contains(rowIndex) {
+            var row = rows[rowIndex]
+            row.sessionId = snapshot.sessionId
+            row.sourceLangCode = snapshot.sourceLangCode
+            row.targetLangCode = snapshot.targetLangCode
+            row.sourceText = snapshot.sourceText
+            row.translatedText = snapshot.translatedText
+            row.sourceSegments = highlightedSource(snapshot.sourceSegments)
+            row.translatedSegments = highlightedTranslated(snapshot.translatedSegments)
+            row.isBubbleEnded = snapshot.isBubbleEnded
+            row.bOffset = snapshot.bOffset
+            row.bDuration = snapshot.bDuration
+            rows[rowIndex] = row
+            rowUpdateCoalescer.submit(key)
+            if snapshot.isBubbleEnded {
+                rowUpdateCoalescer.flush(key)
+            }
+        } else {
+            let row = OneToOneRowViewData(sessionId: snapshot.sessionId,
+                                          bubbleId: snapshot.bubbleId,
+                                          lane: lane,
+                                          sourceLangCode: snapshot.sourceLangCode,
+                                          targetLangCode: snapshot.targetLangCode,
+                                          sourceText: snapshot.sourceText,
+                                          translatedText: snapshot.translatedText,
+                                          sourceSegments: highlightedSource(snapshot.sourceSegments),
+                                          translatedSegments: highlightedTranslated(snapshot.translatedSegments),
+                                          isBubbleEnded: snapshot.isBubbleEnded,
+                                          bOffset: snapshot.bOffset,
+                                          bDuration: snapshot.bDuration)
+            rows.append(row)
+            let rowIndex = rows.count - 1
+            rowIndexMap[key] = rowIndex
+            rowMutation.send(.insert(row: row, index: rowIndex))
+        }
+        trimRowsIfNeeded()
+        schedulePublishRows()
+    }
+
+    /// UI 刷新时重新读取 rows 中的最新值，避免调度窗口持有多份中间文本快照。
+    func publishLatestRows(for keys: [String]) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        for key in keys {
+            guard let rowIndex = rowIndexMap[key], rows.indices.contains(rowIndex) else { continue }
+            rowMutation.send(.update(row: rows[rowIndex], index: rowIndex, heightMayChange: true))
         }
     }
 
@@ -858,7 +879,7 @@ private extension OneToOneViewModel {
             self.updateStateOnMain { $0.rows = self.rows }
         }
         pendingRowsPublishWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.rowUpdateInterval, execute: workItem)
     }
 
     func rebuildBubbleLaneMap() {
@@ -997,79 +1018,12 @@ private extension OneToOneViewModel {
         return uid == Int(dialog.connectUid) || uid == Int(dialog.speakerIdentityNo)
     }
 
-    func preparePCMOutputDirectory() {
-        closeAllPCMFiles()
-        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first ?? FileManager.default.temporaryDirectory
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let outputDir = dir.appendingPathComponent("OneToOneAudio_\(formatter.string(from: Date()))", isDirectory: true)
-        try? FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
-        pcmOutputDirectory = outputDir
-        pcmFileHandles.removeAll()
-        pcmFileURLs.removeAll()
-        hasPCMData = false
-        updateStateOnMain { $0.pcmFileURL = outputDir }
-    }
-
-    private func writePCMData(_ data: Data, uid: Int, kind: PCMKind) {
-        guard data.isEmpty == false else { return }
-        guard let outputDir = pcmOutputDirectory else { return }
-        let key = PCMFileKey(uid: uid, kind: kind)
-        let handle: FileHandle
-        if let existingHandle = pcmFileHandles[key] {
-            handle = existingHandle
-        } else {
-            let fileURL = outputDir.appendingPathComponent("uid_\(uid)_\(kind.rawValue).pcm")
-            if FileManager.default.fileExists(atPath: fileURL.path) == false {
-                FileManager.default.createFile(atPath: fileURL.path, contents: nil)
-            }
-            guard let newHandle = try? FileHandle(forWritingTo: fileURL) else { return }
-            pcmFileHandles[key] = newHandle
-            pcmFileURLs[key] = fileURL
-            handle = newHandle
-        }
-        do {
-            try handle.write(contentsOf: data)
-            hasPCMData = true
-            updateStateOnMain { $0.canSharePCM = true }
-        } catch {}
-    }
-
-    func closeAllPCMFiles() {
-        pcmFileHandles.values.forEach { try? $0.close() }
-        pcmFileHandles.removeAll()
-    }
-
     func resetLocalPCMPlaybackState() {
         leftFileAudioLoopBuffer.reset()
     }
 
     func nextLeftFileAudioChunk(expectedLength: Int) -> OneToOneLocalAudioLoopChunk {
         leftFileAudioLoopBuffer.nextLoopChunk(expectedLength: expectedLength)
-    }
-
-    func makeStereoFromMono(_ mono: Data) -> Data {
-        guard mono.isEmpty == false else { return Data() }
-        var aligned = mono
-        if aligned.count.isMultiple(of: 2) == false {
-            aligned = Data(aligned.prefix(aligned.count - 1))
-        }
-        guard aligned.isEmpty == false else { return Data() }
-        var stereo = Data(capacity: aligned.count * 2)
-        aligned.withUnsafeBytes { raw in
-            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
-            var offset = 0
-            while offset + 1 < aligned.count {
-                let b0 = base[offset]
-                let b1 = base[offset + 1]
-                stereo.append(b0)
-                stereo.append(b1)
-                stereo.append(b0)
-                stereo.append(b1)
-                offset += 2
-            }
-        }
-        return stereo
     }
 
     func audioUID(from result: TmkResult<String>) -> Int? {
@@ -1080,35 +1034,37 @@ private extension OneToOneViewModel {
         return result.sessionId > 0 ? result.sessionId : nil
     }
 
-    func audioRoute(from result: TmkResult<String>) -> TmkTranslatedAudioRoute? {
-        let routeValue = result.extraData["audio_route"]
-        if let route = routeValue as? TmkTranslatedAudioRoute { return route }
-        if let route = routeValue as? String { return TmkTranslatedAudioRoute(rawValue: route) }
-        return nil
-    }
-
     func setListeningActive(_ active: Bool) {
         stateLock.lock()
         isListeningActive = active
         stateLock.unlock()
+        if active == false {
+            audioFrameBackpressure.invalidate()
+        }
+    }
+
+    func setPendingAutoStartAfterRecreate(_ pending: Bool) {
+        stateLock.lock()
+        pendingAutoStartAfterRecreate = pending
+        stateLock.unlock()
+    }
+
+    func consumePendingAutoStartAfterRecreate() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let pending = pendingAutoStartAfterRecreate
+        pendingAutoStartAfterRecreate = false
+        return pending
+    }
+
+    func clearPendingAutoStartAfterRecreate() {
+        setPendingAutoStartAfterRecreate(false)
     }
 
     func getListeningActive() -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
         return isListeningActive
-    }
-
-    func getPlaybackMode() -> OneToOnePlaybackMode {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return playbackMode
-    }
-
-    func getCaptureEnabled() -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return isCaptureEnabled
     }
 
     func applyRuntimeAction(_ action: DemoConversationRuntimeAction) {
@@ -1133,14 +1089,14 @@ private extension OneToOneViewModel {
             return
         }
         hasStoppedListening = true
+        clearPendingAutoStartAfterRecreate()
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
         voiceIO?.stop()
-        closeAllPCMFiles()
+        ttsCoordinator.setActive(false)
         resetLocalPCMPlaybackState()
         voiceIO = nil
-        isPCMRecordingEnabled = false
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         room = nil
@@ -1153,7 +1109,6 @@ private extension OneToOneViewModel {
         updateStateOnMain {
             $0.canStartListening = false
             $0.canStopListening = false
-            $0.canSharePCM = self.hasPCMData
             $0.currentRoomNo = "-"
             $0.captureSampleRate = 0
             $0.captureChannels = 0
@@ -1186,75 +1141,7 @@ extension OneToOneViewModel: TmkTranslationListener {
 
     func onAudioDataReceive(from engine: AbstractChannelEngine, result: TmkResult<String>, data: Data, channelCount: Int) {
         _ = engine
-        guard result.data == "translated_audio", data.isEmpty == false else { return }
-        audioProcessQueue.async { [weak self] in
-            autoreleasepool {
-                guard let self else { return }
-                guard self.getListeningActive() else { return }
-                self.updatePlaybackChannel(channelCount)
-                let uid = self.audioUID(from: result)
-                let audioRoute = self.audioRoute(from: result)
-                let stereoData: Data
-                let leftData: Data
-                let rightData: Data
-                if audioRoute == .left || audioRoute == .right {
-                    stereoData = Data()
-                    leftData = data
-                    rightData = data
-                } else if channelCount >= 2, let split = TmkTranslationPCMTools.splitStereoInterleaved16LE(data) {
-                    stereoData = data
-                    leftData = split.left
-                    rightData = split.right
-                } else {
-                    leftData = data
-                    rightData = data
-                    stereoData = self.makeStereoFromMono(data)
-                }
-                let lane: OneToOneRowViewData.Lane?
-                switch audioRoute {
-                case .left:
-                    lane = .left
-                case .right:
-                    lane = .right
-                case .stereo:
-                    lane = nil
-                case .none:
-                    lane = uid.flatMap { self.playbackLaneByUID[$0] }
-                }
-                if self.isPCMRecordingEnabled {
-                    if self.pcmOutputDirectory == nil {
-                        self.preparePCMOutputDirectory()
-                    }
-                    let fileUID = uid ?? Int(self.room?.channelDialogResponse?.roomNo ?? "0") ?? 0
-                    if audioRoute == .stereo {
-                        self.writePCMData(stereoData, uid: fileUID, kind: .stereo)
-                        self.writePCMData(leftData, uid: fileUID, kind: .left)
-                        self.writePCMData(rightData, uid: fileUID, kind: .right)
-                    } else if let lane {
-                        self.writePCMData(data, uid: fileUID, kind: lane == .left ? .left : .right)
-                    } else {
-                        self.writePCMData(stereoData, uid: fileUID, kind: .stereo)
-                        self.writePCMData(leftData, uid: fileUID, kind: .left)
-                        self.writePCMData(rightData, uid: fileUID, kind: .right)
-                    }
-                }
-                let playbackMode = self.getPlaybackMode()
-                let sourceLane = OneToOneTranslatedAudioSourceRouting.sourceLane(
-                    audioRoute: audioRoute,
-                    rawSpeakerChannel: result.extraData["speaker_channel"]
-                ) ?? (audioRoute == nil ? lane : nil)
-                    ?? (playbackMode == .left ? OneToOneRowViewData.Lane.left : .right)
-                guard let output = OneToOneTranslatedAudioPlaybackSelector.selectPlaybackData(
-                    data: data,
-                    channelCount: channelCount,
-                    playbackMode: playbackMode,
-                    audioRoute: audioRoute,
-                    sourceLane: sourceLane,
-                    extraData: result.extraData
-                ) else { return }
-                self.voiceIO?.enqueuePlaybackPCM(output)
-            }
-        }
+        ttsCoordinator.handleAudioData(result: result, data: data, channelCount: channelCount)
     }
 
     func onError(_ error: TmkTranslationError) {
@@ -1305,14 +1192,14 @@ extension OneToOneViewModel: TmkTranslationListener {
     private func handleRemoteCloseRoom() {
         guard hasStoppedListening == false else { return }
         hasStoppedListening = true
+        clearPendingAutoStartAfterRecreate()
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
         voiceIO?.stop()
-        closeAllPCMFiles()
+        ttsCoordinator.setActive(false)
         resetLocalPCMPlaybackState()
         voiceIO = nil
-        isPCMRecordingEnabled = false
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         room = nil
@@ -1325,7 +1212,6 @@ extension OneToOneViewModel: TmkTranslationListener {
         updateStateOnMain {
             $0.canStartListening = false
             $0.canStopListening = false
-            $0.canSharePCM = self.hasPCMData
             $0.currentRoomNo = "-"
             $0.captureSampleRate = 0
             $0.captureChannels = 0

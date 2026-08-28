@@ -11,11 +11,8 @@ final class NowListeningController: UIViewController {
 
     private let statusLabel = UILabel()
     private let infoLabel = UILabel()
-    private let captureLabel = UILabel()
-    private let captureSwitch = UISwitch()
     private let startListeningButton = UIButton(type: .system)
     private let stopListeningButton = UIButton(type: .system)
-    private let sharePCMButton = UIButton(type: .system)
     private let tableView = UITableView(frame: .zero, style: .plain)
 
     private let viewModel = NowListeningViewModel()
@@ -77,14 +74,9 @@ private extension NowListeningController {
         infoLabel.numberOfLines = 1
         infoLabel.font = .systemFont(ofSize: 12)
         infoLabel.textColor = .secondaryLabel
-        captureLabel.text = "翻译音频采集"
-        captureLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        captureLabel.textColor = .secondaryLabel
-        captureSwitch.addTarget(self, action: #selector(onCaptureSwitchChanged), for: .valueChanged)
 
         setupButton(startListeningButton, title: "开始收听", action: #selector(onTapStartListening))
         setupButton(stopListeningButton, title: "停止收听", action: #selector(onTapStopListening))
-        setupButton(sharePCMButton, title: "分享PCM", action: #selector(onTapSharePCM))
 
         tableView.register(NowListeningBubbleCell.self, forCellReuseIdentifier: NowListeningBubbleCell.reuseId)
         tableView.dataSource = self
@@ -95,11 +87,8 @@ private extension NowListeningController {
 
         view.addSubview(statusLabel)
         view.addSubview(infoLabel)
-        view.addSubview(captureLabel)
-        view.addSubview(captureSwitch)
         view.addSubview(startListeningButton)
         view.addSubview(stopListeningButton)
-        view.addSubview(sharePCMButton)
         view.addSubview(tableView)
 
         statusLabel.snp.makeConstraints { make in
@@ -110,35 +99,20 @@ private extension NowListeningController {
             make.top.equalTo(statusLabel.snp.bottom).offset(4)
             make.left.right.equalToSuperview().inset(16)
         }
-        captureLabel.snp.makeConstraints { make in
+        startListeningButton.snp.makeConstraints { make in
             make.top.equalTo(infoLabel.snp.bottom).offset(8)
             make.left.equalToSuperview().offset(12)
             make.height.equalTo(32)
-        }
-        captureSwitch.snp.makeConstraints { make in
-            make.centerY.equalTo(captureLabel)
-            make.left.equalTo(captureLabel.snp.right).offset(6)
-        }
-        startListeningButton.snp.makeConstraints { make in
-            make.top.equalTo(captureLabel)
-            make.left.equalTo(captureSwitch.snp.right).offset(8)
-            make.height.equalTo(captureLabel)
             make.width.equalTo(stopListeningButton)
         }
         stopListeningButton.snp.makeConstraints { make in
-            make.top.equalTo(captureLabel)
+            make.top.equalTo(startListeningButton)
             make.left.equalTo(startListeningButton.snp.right).offset(8)
-            make.height.equalTo(captureLabel)
-            make.width.equalTo(sharePCMButton)
-        }
-        sharePCMButton.snp.makeConstraints { make in
-            make.top.equalTo(captureLabel)
-            make.left.equalTo(stopListeningButton.snp.right).offset(8)
             make.right.equalToSuperview().inset(12)
-            make.height.equalTo(captureLabel)
+            make.height.equalTo(startListeningButton)
         }
         tableView.snp.makeConstraints { make in
-            make.top.equalTo(captureLabel.snp.bottom).offset(8)
+            make.top.equalTo(startListeningButton.snp.bottom).offset(8)
             make.left.right.bottom.equalToSuperview()
         }
     }
@@ -181,10 +155,8 @@ private extension NowListeningController {
         let capture = state.captureChannels > 0 ? "\(state.captureSampleRate)Hz/\(state.captureChannels)ch" : "-"
         let playback = state.playbackChannels > 0 ? "\(state.playbackChannels)ch" : "-"
         infoLabel.text = "房间:\(state.currentRoomNo)  能力:\(state.scenarioOption.title)  语言:\(localizedLanguageName(for: state.sourceLanguage))→\(localizedLanguageName(for: state.targetLanguage))  采集:\(capture)  回放:\(playback)"
-        captureSwitch.isOn = state.isCaptureEnabled
         startListeningButton.isEnabled = state.canStartListening
         stopListeningButton.isEnabled = state.canStopListening
-        sharePCMButton.isEnabled = state.canSharePCM
     }
 
     func setupButton(_ button: UIButton, title: String, action: Selector) {
@@ -234,15 +206,6 @@ private extension NowListeningController {
         viewModel.stopListening()
     }
 
-    @objc func onTapSharePCM() {
-        guard let url = viewModel.currentPCMURL else { return }
-        presentShareActivityForFileURLs([url], sourceView: sharePCMButton)
-    }
-
-    @objc func onCaptureSwitchChanged() {
-        viewModel.setCaptureEnabled(captureSwitch.isOn)
-    }
-
     @objc func onTapChangeLanguage() {
         loadSupportedLanguagesAndShowPicker()
     }
@@ -260,6 +223,9 @@ private extension NowListeningController {
             },
             UIAction(title: "识别引擎") { [weak self] _ in
                 self?.showRecognizeEngineMenu()
+            },
+            UIAction(title: "翻译下发模式") { [weak self] _ in
+                self?.showTranslateModeMenu()
             },
             UIAction(title: "音色") { [weak self] _ in
                 self?.showSpeakerMenu()
@@ -328,6 +294,27 @@ private extension NowListeningController {
         let displayTitle = state.recognizeEngine == engine ? "✓ \(title)" : title
         let action = UIAlertAction(title: displayTitle, style: .default) { [weak self] _ in
             self?.viewModel.updateRecognizeEngine(engine)
+        }
+        alert.addAction(action)
+    }
+
+    func showTranslateModeMenu() {
+        let alert = UIAlertController(title: "翻译下发模式",
+                                      message: "切换后将重新创建房间和通道。",
+                                      preferredStyle: .actionSheet)
+        addTranslateModeAction(mode: .default, to: alert)
+        addTranslateModeAction(mode: .partial, to: alert)
+        addTranslateModeAction(mode: .stable, to: alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
+        present(alert, animated: true)
+    }
+
+    private func addTranslateModeAction(mode: TmkTranslateDeliveryMode,
+                                        to alert: UIAlertController) {
+        let title = mode == state.translateMode ? "\(mode.onlineDemoTitle)（当前）" : mode.onlineDemoTitle
+        let action = UIAlertAction(title: title, style: .default) { [weak self] _ in
+            self?.viewModel.updateTranslateMode(mode)
         }
         alert.addAction(action)
     }

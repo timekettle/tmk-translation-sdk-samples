@@ -42,12 +42,14 @@ data class ListenModeScreen(
         val speakerGender by viewModel.speakerGender.collectAsState()
         val onlineTranslateEngine by viewModel.onlineTranslateEngine.collectAsState()
         val onlineRecognizeEngine by viewModel.onlineRecognizeEngine.collectAsState()
+        val translateMode by viewModel.translateMode.collectAsState()
         val roomScenarioOption by viewModel.roomScenarioOption.collectAsState()
         var settingsExpanded by remember { mutableStateOf(false) }
         var showLocaleDialog by remember { mutableStateOf(false) }
         var showSpeakerDialog by remember { mutableStateOf(false) }
         var showTranslateEngineDialog by remember { mutableStateOf(false) }
         var showRecognizeEngineDialog by remember { mutableStateOf(false) }
+        var showTranslateModeDialog by remember { mutableStateOf(false) }
         var showRoomScenarioDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
         val onlineLanguageOptions = (rememberOnlineLanguageOptions().state
@@ -142,6 +144,13 @@ data class ListenModeScreen(
                             },
                         )
                         DropdownMenuItem(
+                            text = { Text("翻译下发模式") },
+                            onClick = {
+                                settingsExpanded = false
+                                showTranslateModeDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
                             text = { Text(if (isScenarioUpdating) "房间能力切换中..." else "房间能力设置") },
                             enabled = !isScenarioUpdating,
                             onClick = {
@@ -177,6 +186,7 @@ data class ListenModeScreen(
                         "连接：$connectionState",
                         "房间：$currentRoomNo",
                         "能力：${roomScenarioOption.title}",
+                        "下发：${OnlineTranslateModeOption.from(translateMode).title}",
                         "通道：listen/online",
                         "采样：配置16000Hz/1ch  采集$captureInfo  回放$playbackInfo",
                     ),
@@ -254,6 +264,17 @@ data class ListenModeScreen(
                 onConfirm = {
                     showRecognizeEngineDialog = false
                     viewModel.setOnlineRecognizeEngine(it)
+                },
+            )
+        }
+
+        if (showTranslateModeDialog) {
+            OnlineTranslateModeDialog(
+                initialMode = translateMode,
+                onDismiss = { showTranslateModeDialog = false },
+                onConfirm = {
+                    showTranslateModeDialog = false
+                    viewModel.setTranslateMode(it)
                 },
             )
         }
