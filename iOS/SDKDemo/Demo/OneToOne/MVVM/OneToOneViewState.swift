@@ -79,6 +79,9 @@ struct OneToOneViewState: Equatable {
     var currentRoomNo: String = "-"
     var currentScenario: String = "listen"
     var currentMode: String = "online"
+    var networkStats: DemoOnlineNetworkStatsSnapshot = .init()
+    var bootstrapStats: DemoBootstrapSnapshot = .init()
+    var wifiSpeed: DemoWifiSpeedSnapshot = .init()
 
     var configuredSampleRate: Int = 16_000
     var configuredChannels: Int = 2

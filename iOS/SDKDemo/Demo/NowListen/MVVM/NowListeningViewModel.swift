@@ -9,6 +9,7 @@ final class NowListeningViewModel: NSObject {
     @Published private(set) var state = NowListeningViewState()
     let rowMutation = PassthroughSubject<ChatListMutation<NowListeningRowViewData>, Never>()
     let remoteCloseRoomPrompt = PassthroughSubject<DemoConversationPrompt, Never>()
+    let reconnectTimeoutPromptDismiss = PassthroughSubject<Void, Never>()
 
     private var room: TmkTranslationRoom?
     private var channel: TmkTranslationChannel?
@@ -51,6 +52,23 @@ final class NowListeningViewModel: NSObject {
     private var hasPCMData = false
     private var isPCMRecordingEnabled = false
     private let networkEventPolicy = DemoOnlineNetworkEventPolicy()
+    private let networkStatsTracker = DemoOnlineNetworkStatsTracker()
+    private let bootstrapTracker = DemoBootstrapPipelineTracker()
+    private let wifiSpeedProbe = DemoWifiSpeedProbe()
+    private lazy var reconnectTimeoutMonitor: DemoReconnectTimeoutMonitor = {
+        let monitor = DemoReconnectTimeoutMonitor()
+        monitor.onPromptRequired = { [weak self] in
+            self?.remoteCloseRoomPrompt.send(.init(
+                title: "连接恢复超时",
+                message: "连接已持续恢复 1 分钟。你可以重新创建房间，或继续等待连接恢复。",
+                style: .reconnectTimeout
+            ))
+        }
+        monitor.onPromptDismissRequired = { [weak self] in
+            self?.reconnectTimeoutPromptDismiss.send(())
+        }
+        return monitor
+    }()
 
     func configureInitialLanguages(source: String?, target: String?) {
         if let source, source.isEmpty == false {
@@ -69,17 +87,31 @@ final class NowListeningViewModel: NSObject {
             $0.scenarioOption = self.selectedScenarioOption
             $0.isCaptureEnabled = self.isCaptureEnabled
         }
+        startWifiSpeedProbe()
         startOnlineListening()
     }
 
     func onViewWillClose() {
+        reconnectTimeoutMonitor.cancel()
+        cancelWifiSpeedProbe()
         stopListeningIfNeeded()
+    }
+
+    func continueWaitingForReconnect() {
+        reconnectTimeoutMonitor.continueWaiting()
+    }
+
+    func recreateAfterReconnectTimeout() {
+        reconnectTimeoutMonitor.confirmRecreation()
+        stopConversationForPrompt(status: "正在重新创建通道...")
+        recreateAfterRemoteClose()
     }
 
     func recreateAfterRemoteClose() {
         guard hasStoppedListening else { return }
         hasStoppedListening = false
         updateStatus("正在重新创建通道...")
+        startWifiSpeedProbe()
         startOnlineListening()
     }
 
@@ -151,7 +183,9 @@ final class NowListeningViewModel: NSObject {
             $0.canStopListening = false
             $0.canStartListening = self.channel != nil
             $0.canSharePCM = self.hasPCMData
+            $0.networkStats = .init()
         }
+        networkStatsTracker.reset()
         updateStatus("收听已停止")
     }
 
@@ -304,21 +338,26 @@ final class NowListeningViewModel: NSObject {
 
 private extension NowListeningViewModel {
     func startOnlineListening() {
+        publishBootstrap(bootstrapTracker.begin(.auth))
+        updateStatus("正在鉴权...")
         TmkTranslationSDK.shared.verifyAuth { [weak self] result in
             guard let self else { return }
             switch result {
             case .success:
                 self.isAuthVerified = true
+                self.publishBootstrap(self.bootstrapTracker.complete(.auth))
                 self.updateStatus("鉴权成功，准备创建房间...")
                 self.createRoomAndChannel()
             case .failure(let error):
                 self.isAuthVerified = false
+                self.publishBootstrap(self.bootstrapTracker.fail(.auth))
                 self.updateStatus(DemoSDKConfigurationFactory.authFailureMessage(error))
             }
         }
     }
 
     func createRoomAndChannel() {
+        publishBootstrap(bootstrapTracker.begin(.createRoom))
         TmkTranslationSDK.shared.createTmkTranslationRoom(sourceLang: selectedSourceLang,
                                                           targetLang: selectedTargetLang,
                                                           scenario: selectedScenarioOption.roomScenario,
@@ -328,8 +367,10 @@ private extension NowListeningViewModel {
             guard let self else { return }
             switch roomResult {
             case .success(let room):
+                self.publishBootstrap(self.bootstrapTracker.complete(.createRoom))
                 self.createTranslationChannel(room: room)
             case .failure(let error):
+                self.publishBootstrap(self.bootstrapTracker.fail(.createRoom))
                 self.updateStatus("房间创建失败：\(error.localizedDescription)")
             }
         }
@@ -356,16 +397,23 @@ private extension NowListeningViewModel {
             $0.configuredChannels = channelConfig.pcmChannels
         }
 
+        publishBootstrap(bootstrapTracker.begin(.createChannel))
         TmkTranslationSDK.shared.createTranslationChannel(channelConfig, listener: self) { [weak self] channelResult in
             guard let self else { return }
             switch channelResult {
             case .success(let channel):
                 self.channel = channel
+                self.publishBootstrap(self.bootstrapTracker.beginChannelReady())
+                let runtime = channel.currentRuntimeState().state
+                if runtime == .running || runtime == .degraded {
+                    self.publishBootstrap(self.bootstrapTracker.completeChannelReady())
+                }
                 self.updateStateOnMain {
                     $0.canStartListening = true
                 }
                 self.updateStatus("在线通道已就绪，点击“开始收听”开始采集")
             case .failure(let error):
+                self.publishBootstrap(self.bootstrapTracker.fail(.createChannel))
                 self.updateStatus("通道启动失败：\(error.localizedDescription)")
             }
         }
@@ -385,11 +433,14 @@ private extension NowListeningViewModel {
         channel = nil
         room = nil
         activePlaybackUID = nil
+        networkStatsTracker.reset()
+        updateStateOnMain { $0.networkStats = .init() }
         updateStatus("已停止收听")
         Self.logger.info("channel stopped")
     }
 
     func recreateRoomAndChannel(statusText: String) {
+        networkStatsTracker.reset()
         voiceIO?.stop()
         closePCMFile()
         setListeningActive(false)
@@ -414,6 +465,7 @@ private extension NowListeningViewModel {
             $0.captureSampleRate = 0
             $0.captureChannels = 0
             $0.playbackChannels = 0
+            $0.networkStats = .init()
         }
         updateStatus(statusText)
         startOnlineListening()
@@ -472,6 +524,26 @@ private extension NowListeningViewModel {
 
     func updateStatus(_ text: String) {
         updateStateOnMain { $0.statusText = text }
+    }
+
+    func publishBootstrap(_ snapshot: DemoBootstrapSnapshot) {
+        updateStateOnMain { $0.bootstrapStats = snapshot }
+    }
+
+    func startWifiSpeedProbe() {
+        let baseURL = DemoWifiSpeedProbe.resolvedBusinessBaseURL()
+        wifiSpeedProbe.start(businessBaseURL: baseURL) { [weak self] snapshot in
+            self?.updateStateOnMain { $0.wifiSpeed = snapshot }
+        }
+    }
+
+    func cancelWifiSpeedProbe() {
+        wifiSpeedProbe.cancel()
+        updateStateOnMain {
+            if $0.wifiSpeed.status == .running || $0.wifiSpeed.status == .idle {
+                $0.wifiSpeed.status = .cancelled
+            }
+        }
     }
 
     func updateCaptureAudioInfo(sampleRate: Int, channels: Int) {
@@ -740,6 +812,7 @@ private extension NowListeningViewModel {
              .reconnecting(let text):
             updateStatus(text)
         case .prompt(let prompt):
+            reconnectTimeoutMonitor.cancel()
             stopConversationForPrompt(status: prompt.title)
             DispatchQueue.main.async { [weak self] in
                 self?.remoteCloseRoomPrompt.send(prompt)
@@ -862,6 +935,11 @@ extension NowListeningViewModel: TmkTranslationListener {
             handleRemoteCloseRoom()
             return
         }
+
+        if let snapshot = networkStatsTracker.consume(eventName: name, args: args) {
+            updateStateOnMain { $0.networkStats = snapshot }
+        }
+
         let networkAction = networkEventPolicy.action(forEvent: name, args: args)
         if networkAction != .none {
             applyRuntimeAction(networkAction)
@@ -894,6 +972,19 @@ extension NowListeningViewModel: TmkTranslationListener {
 
     func onStateChanged(from engine: AbstractChannelEngine, snapshot: TmkTranslationChannelStateSnapshot) {
         _ = engine
+        if let isRTMReconnecting = DemoRTMReconnectTimeoutStatePolicy.reconnecting(from: snapshot) {
+            reconnectTimeoutMonitor.handle(isRTMReconnecting: isRTMReconnecting)
+        }
+        switch snapshot.state {
+        case .running, .degraded:
+            publishBootstrap(bootstrapTracker.completeChannelReady())
+        case .failed:
+            if bootstrapTracker.current().isRunning {
+                publishBootstrap(bootstrapTracker.fail(.channelReady))
+            }
+        default:
+            break
+        }
         applyRuntimeAction(DemoConversationRuntimePolicy.action(for: snapshot,
                                                                 isListening: getListeningActive()))
     }
@@ -924,7 +1015,9 @@ extension NowListeningViewModel: TmkTranslationListener {
             $0.captureSampleRate = 0
             $0.captureChannels = 0
             $0.playbackChannels = 0
+            $0.networkStats = .init()
         }
+        networkStatsTracker.reset()
         updateStatus("房间已关闭")
         Self.logger.info("nowListening remote close_room received, waiting for user decision")
         let prompt = DemoConversationPrompt(

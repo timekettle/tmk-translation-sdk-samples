@@ -210,6 +210,11 @@ class HomeScreen : Screen {
                     is LanguageOptionsState.Ready -> Unit
                 }
 
+                TextButton(
+                    onClick = { navigator.push(ChannelRaceStressScreen(sourceLang, targetLang)) },
+                ) {
+                    Text("🧪 建连竞态压测", color = OfflineColor, fontSize = 13.sp)
+                }
                 Spacer(Modifier.height(20.dp))
             }
 
@@ -259,6 +264,11 @@ class HomeScreen : Screen {
                         modifier = Modifier.padding(top = 4.dp),
                     ) {
                         Text("⚙️ 设置", color = TextDim, fontSize = 13.sp)
+                    }
+                    TextButton(
+                        onClick = { navigator.push(ChannelRaceStressScreen(sourceLang, targetLang)) },
+                    ) {
+                        Text("🧪 建链竞态压测", color = OfflineColor, fontSize = 13.sp)
                     }
                 }
             }

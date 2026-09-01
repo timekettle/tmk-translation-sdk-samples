@@ -17,6 +17,10 @@ final class OneToOneController: UIViewController {
     private let stopListeningButton = UIButton(type: .system)
     private let sharePCMButton = UIButton(type: .system)
     private let tableView = UITableView(frame: .zero, style: .plain)
+    private let networkOverlayView = NetworkQualityOverlayView()
+    private var networkOverlayTopConstraint: Constraint?
+    private var networkOverlayRightConstraint: Constraint?
+    private var networkOverlayPanStartFrame: CGRect = .zero
 
     private let viewModel = OneToOneViewModel()
     private let initialSourceLanguage: String?
@@ -31,6 +35,10 @@ final class OneToOneController: UIViewController {
     private let allModes = OneToOnePlaybackMode.allCases
     private var supportedSourceLanguageOptions: [LanguageOption] = []
     private let zhLocale = Locale(identifier: "zh-Hans-CN")
+    private weak var conversationPromptAlert: UIAlertController?
+    private var activeConversationPrompt: DemoConversationPrompt?
+    private var pendingConversationPrompt: DemoConversationPrompt?
+    private var isDismissingConversationPrompt = false
     private let sourceLangMaskView = UIView()
     private let sourceLangContainerView = UIView()
     private let sourceLangPickerView = UIPickerView()
@@ -151,6 +159,60 @@ private extension OneToOneController {
             make.top.equalTo(captureLabel.snp.bottom).offset(8)
             make.left.right.bottom.equalToSuperview()
         }
+
+        view.addSubview(networkOverlayView)
+        networkOverlayView.snp.makeConstraints { make in
+            networkOverlayTopConstraint = make.top.equalTo(view.safeAreaLayoutGuide.snp.top).offset(8).constraint
+            networkOverlayRightConstraint = make.right.equalToSuperview().inset(12).constraint
+            make.width.lessThanOrEqualTo(240)
+        }
+        networkOverlayView.setContentHuggingPriority(.required, for: .vertical)
+        networkOverlayView.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(onNetworkOverlayPan(_:)))
+        networkOverlayView.addGestureRecognizer(pan)
+        networkOverlayView.isUserInteractionEnabled = true
+    }
+
+    @objc func onNetworkOverlayPan(_ gesture: UIPanGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            // 拖动中只用 transform，避免 Auto Layout / 文案变高导致“不跟手”。
+            networkOverlayView.transform = .identity
+            networkOverlayPanStartFrame = networkOverlayView.frame
+        case .changed:
+            let translation = gesture.translation(in: view)
+            networkOverlayView.transform = CGAffineTransform(translationX: translation.x, y: translation.y)
+        case .ended, .cancelled, .failed:
+            let translation = gesture.translation(in: view)
+            networkOverlayView.transform = .identity
+
+            let startFrame = networkOverlayPanStartFrame
+            let proposed = CGRect(
+                x: startFrame.origin.x + translation.x,
+                y: startFrame.origin.y + translation.y,
+                width: startFrame.width,
+                height: startFrame.height
+            )
+            let safeTop = view.safeAreaInsets.top
+            let safeBottom = view.safeAreaInsets.bottom
+            let minX: CGFloat = 8
+            let maxX = max(minX, view.bounds.width - proposed.width - 8)
+            let minY = safeTop
+            let maxY = max(minY, view.bounds.height - safeBottom - proposed.height - 8)
+            let clampedX = min(max(proposed.minX, minX), maxX)
+            let clampedY = min(max(proposed.minY, minY), maxY)
+
+            // top 相对 safeArea；right 用 inset（与初始 .inset(12) 同向，勿用 offset）。
+            let topOffset = max(0, clampedY - safeTop)
+            let rightInset = max(8, view.bounds.maxX - (clampedX + proposed.width))
+            networkOverlayTopConstraint?.update(offset: topOffset)
+            networkOverlayRightConstraint?.update(inset: rightInset)
+            view.layoutIfNeeded()
+            gesture.setTranslation(.zero, in: view)
+        default:
+            break
+        }
     }
 
     func bindViewModel() {
@@ -184,6 +246,13 @@ private extension OneToOneController {
                 self?.presentConversationPrompt(prompt)
             }
             .store(in: &cancellables)
+
+        viewModel.reconnectTimeoutPromptDismiss
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                self?.dismissReconnectTimeoutPromptIfNeeded(animated: true)
+            }
+            .store(in: &cancellables)
     }
 
     func render(_ state: OneToOneViewState) {
@@ -197,6 +266,8 @@ private extension OneToOneController {
         startListeningButton.isEnabled = state.canStartListening
         stopListeningButton.isEnabled = state.canStopListening
         sharePCMButton.isEnabled = state.canSharePCM
+
+        networkOverlayView.update(network: state.networkStats, bootstrap: state.bootstrapStats, wifiSpeed: state.wifiSpeed)
     }
 
     func setupButton(_ button: UIButton, title: String, action: Selector) {
@@ -265,19 +336,84 @@ private extension OneToOneController {
     }
 
     func presentConversationPrompt(_ prompt: DemoConversationPrompt) {
+        if let activeConversationPrompt {
+            guard DemoConversationPromptPresentationPolicy.shouldReplace(
+                current: activeConversationPrompt,
+                with: prompt
+            ) else { return }
+            pendingConversationPrompt = prompt
+            dismissActiveConversationPrompt(animated: false)
+            return
+        }
+        if isDismissingConversationPrompt {
+            if DemoConversationPromptPresentationPolicy.shouldReplace(
+                current: pendingConversationPrompt,
+                with: prompt
+            ) {
+                pendingConversationPrompt = prompt
+            }
+            return
+        }
         guard presentedViewController == nil else { return }
         let alert = UIAlertController(title: prompt.title,
                                       message: prompt.message,
                                       preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
-            self?.onClose()
-        })
-        if prompt.style == .restart {
-            alert.addAction(UIAlertAction(title: "重新创建", style: .default) { [weak self] _ in
-                self?.viewModel.recreateAfterRemoteClose()
+        activeConversationPrompt = prompt
+        conversationPromptAlert = alert
+        if prompt.style == .reconnectTimeout {
+            alert.addAction(UIAlertAction(title: "继续等待", style: .cancel) { [weak self] _ in
+                self?.completeActiveConversationPrompt()
+                self?.viewModel.continueWaitingForReconnect()
             })
+            alert.addAction(UIAlertAction(title: "重新创建", style: .default) { [weak self] _ in
+                self?.completeActiveConversationPrompt()
+                self?.viewModel.recreateAfterReconnectTimeout()
+            })
+        } else {
+            alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
+                self?.completeActiveConversationPrompt()
+                self?.onClose()
+            })
+            if prompt.style == .restart {
+                alert.addAction(UIAlertAction(title: "重新创建", style: .default) { [weak self] _ in
+                    self?.completeActiveConversationPrompt()
+                    self?.viewModel.recreateAfterRemoteClose()
+                })
+            }
         }
         present(alert, animated: true)
+    }
+
+    func dismissReconnectTimeoutPromptIfNeeded(animated: Bool) {
+        guard activeConversationPrompt?.style == .reconnectTimeout else { return }
+        dismissActiveConversationPrompt(animated: animated)
+    }
+
+    func dismissActiveConversationPrompt(animated: Bool) {
+        guard isDismissingConversationPrompt == false else { return }
+        guard let alert = conversationPromptAlert else {
+            completeActiveConversationPrompt()
+            presentPendingConversationPromptIfNeeded()
+            return
+        }
+        isDismissingConversationPrompt = true
+        alert.dismiss(animated: animated) { [weak self] in
+            guard let self else { return }
+            self.completeActiveConversationPrompt()
+            self.isDismissingConversationPrompt = false
+            self.presentPendingConversationPromptIfNeeded()
+        }
+    }
+
+    func completeActiveConversationPrompt() {
+        activeConversationPrompt = nil
+        conversationPromptAlert = nil
+    }
+
+    func presentPendingConversationPromptIfNeeded() {
+        guard let prompt = pendingConversationPrompt else { return }
+        pendingConversationPrompt = nil
+        presentConversationPrompt(prompt)
     }
 
     func makeSettingsMenu() -> UIMenu {

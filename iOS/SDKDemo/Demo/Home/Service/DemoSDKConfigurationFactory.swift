@@ -7,23 +7,45 @@ import Foundation
 import TmkTranslationSDK
 
 enum DemoSDKConfigurationFactory {
+    static let networkTimeoutSeconds: TimeInterval = 15
+
     private static let appIdInfoPlistKey = "TMKSampleAppID"
     private static let appSecretInfoPlistKey = "TMKSampleAppSecret"
     private static let localSecretsPath = "Config/LocalSecrets.xcconfig"
     private static let credentialKeys = ["TMK_SAMPLE_APP_ID", "TMK_SAMPLE_APP_SECRET"]
     private static let defaultTenantId = "timekettle"
 
+    /// 非 nil 时覆盖环境默认业务地址；与 `makeGlobalConfig` / 测速延迟共用。
+    static let networkBaseURLOverride: URL? = URL(string: "https://api-rayneo.timekettle.co")
+
     static func makeGlobalConfig(from config: DemoSettingsConfig) -> TmkTranslationGlobalConfig {
         let credentials = resolveCredentials()
-        return TmkTranslationGlobalConfig.Builder()
+        var builder = TmkTranslationGlobalConfig.Builder()
             .setAuth(appId: credentials.appId, secret: credentials.appSecret)
             .setOnlineAuthContext(tenantId: defaultTenantId)
             .setLogEnabled(config.consoleLogEnabled)
             .setNetworkEnvironment(config.networkEnvironment)
-            .setNetworkBaseURL(URL(string: "https://api-rayneo.timekettle.co")!)
             .setDiagnosisEnabled(config.diagnosisEnabled)
-            .setNetworkTimeout(15)
-            .build()
+            .setNetworkTimeout(networkTimeoutSeconds)
+        if let override = networkBaseURLOverride {
+            builder = builder.setNetworkBaseURL(override)
+        }
+        return builder.build()
+    }
+
+    /// 业务延迟探测用 baseURL，与 `makeGlobalConfig` 实际生效地址一致（不读 SDK internal 字段）。
+    static func resolvedBusinessBaseURL(from config: DemoSettingsConfig) -> URL {
+        if let override = networkBaseURLOverride {
+            return override
+        }
+        switch config.networkEnvironment {
+        case .dev:
+            return URL(string: "http://8.135.239.158:18080/")!
+        case .test:
+            return URL(string: "https://tmk-translation-test.timekettle.net/")!
+        case .pre:
+            return URL(string: "https://api-rayneo.timekettle.co/")!
+        }
     }
 
     static func onlineAuthFailureMessage(_ error: Error) -> String {

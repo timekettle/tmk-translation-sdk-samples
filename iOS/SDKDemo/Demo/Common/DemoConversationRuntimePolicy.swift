@@ -5,11 +5,147 @@ struct DemoConversationPrompt: Equatable {
     enum Style: Equatable {
         case restart
         case leaveOnly
+        case reconnectTimeout
     }
 
     let title: String
     let message: String
     let style: Style
+}
+
+enum DemoConversationPromptPresentationPolicy {
+    static func shouldReplace(current: DemoConversationPrompt?,
+                              with incoming: DemoConversationPrompt) -> Bool {
+        guard let current else { return true }
+        guard current != incoming else { return false }
+        if current.style == .reconnectTimeout { return true }
+        return incoming.style != .reconnectTimeout
+    }
+}
+
+protocol DemoReconnectTimeoutTask: AnyObject {
+    func cancel()
+}
+
+protocol DemoReconnectTimeoutScheduling {
+    func schedule(after delay: TimeInterval,
+                  action: @escaping () -> Void) -> DemoReconnectTimeoutTask
+}
+
+private final class DemoDispatchReconnectTimeoutTask: DemoReconnectTimeoutTask {
+    private let workItem: DispatchWorkItem
+
+    init(workItem: DispatchWorkItem) {
+        self.workItem = workItem
+    }
+
+    func cancel() {
+        workItem.cancel()
+    }
+}
+
+private struct DemoDispatchReconnectTimeoutScheduler: DemoReconnectTimeoutScheduling {
+    func schedule(after delay: TimeInterval,
+                  action: @escaping () -> Void) -> DemoReconnectTimeoutTask {
+        let workItem = DispatchWorkItem(block: action)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        return DemoDispatchReconnectTimeoutTask(workItem: workItem)
+    }
+}
+
+/// Demo 侧持续重连超时监控：只观察 SDK 状态，不主动干预 SDK 重连。
+final class DemoReconnectTimeoutMonitor {
+    var onPromptRequired: (() -> Void)?
+    var onPromptDismissRequired: (() -> Void)?
+
+    private let timeout: TimeInterval
+    private let scheduler: DemoReconnectTimeoutScheduling
+    private var timeoutTask: DemoReconnectTimeoutTask?
+    private var isReconnecting = false
+    private var isPromptVisible = false
+
+    init(timeout: TimeInterval = 60,
+         scheduler: DemoReconnectTimeoutScheduling? = nil) {
+        self.timeout = timeout
+        self.scheduler = scheduler ?? DemoDispatchReconnectTimeoutScheduler()
+    }
+
+    func handle(isRTMReconnecting: Bool) {
+        performOnMain { [weak self] in
+            self?.handleOnMain(isRTMReconnecting: isRTMReconnecting)
+        }
+    }
+
+    func continueWaiting() {
+        performOnMain { [weak self] in
+            guard let self else { return }
+            self.isPromptVisible = false
+            self.cancelTimer()
+            self.scheduleTimerIfNeeded()
+        }
+    }
+
+    func confirmRecreation() {
+        performOnMain { [weak self] in
+            self?.reset(dismissPrompt: false)
+        }
+    }
+
+    func cancel() {
+        performOnMain { [weak self] in
+            self?.reset(dismissPrompt: true)
+        }
+    }
+
+    private func handleOnMain(isRTMReconnecting: Bool) {
+        if isRTMReconnecting {
+            isReconnecting = true
+            scheduleTimerIfNeeded()
+            return
+        }
+
+        isReconnecting = false
+        cancelTimer()
+        if isPromptVisible {
+            isPromptVisible = false
+            onPromptDismissRequired?()
+        }
+    }
+
+    private func scheduleTimerIfNeeded() {
+        guard isReconnecting, isPromptVisible == false, timeoutTask == nil else { return }
+        timeoutTask = scheduler.schedule(after: timeout) { [weak self] in
+            guard let self else { return }
+            self.timeoutTask = nil
+            guard self.isReconnecting, self.isPromptVisible == false else { return }
+            self.isPromptVisible = true
+            self.onPromptRequired?()
+        }
+    }
+
+    private func cancelTimer() {
+        timeoutTask?.cancel()
+        timeoutTask = nil
+    }
+
+    private func reset(dismissPrompt: Bool) {
+        isReconnecting = false
+        cancelTimer()
+        if isPromptVisible {
+            isPromptVisible = false
+            if dismissPrompt {
+                onPromptDismissRequired?()
+            }
+        }
+    }
+
+    private func performOnMain(_ action: @escaping () -> Void) {
+        if Thread.isMainThread {
+            action()
+        } else {
+            DispatchQueue.main.async(execute: action)
+        }
+    }
 }
 
 enum DemoConversationRuntimeAction: Equatable {
@@ -19,6 +155,19 @@ enum DemoConversationRuntimeAction: Equatable {
     case weakNetwork(String)
     case reconnecting(String)
     case prompt(DemoConversationPrompt)
+}
+
+enum DemoRTMReconnectTimeoutStatePolicy {
+    static func reconnecting(from snapshot: TmkTranslationChannelStateSnapshot) -> Bool? {
+        if snapshot.reason == .messageChannelFailure {
+            if snapshot.state == .reconnecting { return true }
+            if snapshot.state == .failed { return false }
+        }
+        if snapshot.message.hasPrefix("rtm connected") {
+            return false
+        }
+        return nil
+    }
 }
 
 enum DemoConversationRuntimePolicy {
@@ -462,5 +611,697 @@ final class DemoOnlineNetworkEventPolicy {
         if let floatValue = value as? Float { return Int(floatValue) }
         if let stringValue = value as? String { return Int(stringValue) ?? 0 }
         return 0
+    }
+}
+
+// MARK: - Demo Network Loss Overlay (Host App Side)
+// 对齐时空壶 LC_SHOW_NETWORK：只展示上丢 / 下丢。
+
+struct DemoOnlineNetworkStatsSnapshot: Equatable {
+    /// 上行丢包率（%），对应时空壶「上丢」
+    var txLossRate: Int? = nil
+    /// 下行丢包率（%），对应时空壶「下丢」
+    var rxLossRate: Int? = nil
+
+    func formatLoss(_ value: Int?) -> String {
+        guard let value else { return "-" }
+        return "\(value)%"
+    }
+}
+
+final class DemoOnlineNetworkStatsTracker {
+    private var snapshot = DemoOnlineNetworkStatsSnapshot()
+
+    func current() -> DemoOnlineNetworkStatsSnapshot {
+        snapshot
+    }
+
+    @discardableResult
+    func reset() -> DemoOnlineNetworkStatsSnapshot {
+        snapshot = DemoOnlineNetworkStatsSnapshot()
+        return snapshot
+    }
+
+    func consume(eventName: String, args: Any?) -> DemoOnlineNetworkStatsSnapshot? {
+        let extra = extraData(from: args)
+        switch eventName {
+        case "online_remote_audio_stats":
+            snapshot.rxLossRate = Self.intValueOrNull(extra["audio_loss_rate"])
+            return snapshot
+
+        case "online_local_audio_stats":
+            snapshot.txLossRate = Self.intValueOrNull(extra["audio_loss_rate"])
+            return snapshot
+
+        default:
+            return nil
+        }
+    }
+
+    private func extraData(from args: Any?) -> [String: Any] {
+        if let result = args as? TmkResult<String> {
+            return result.extraData
+        }
+        if let dict = args as? [String: Any] {
+            return dict
+        }
+        return [:]
+    }
+
+    private static func intValueOrNull(_ value: Any?) -> Int? {
+        guard let value else { return nil }
+        if let intValue = value as? Int { return intValue }
+        if let uintValue = value as? UInt { return Int(uintValue) }
+        if let doubleValue = value as? Double { return Int(doubleValue) }
+        if let floatValue = value as? Float { return Int(floatValue) }
+        if let stringValue = value as? String { return Int(stringValue) }
+        return nil
+    }
+}
+
+// MARK: - Demo Bootstrap Pipeline (Host App Side)
+// 鉴权 → 建房 → 建通道 → 就绪，与 Android Demo 对齐。
+
+enum DemoBootstrapStage: CaseIterable, Equatable {
+    case auth
+    case createRoom
+    case createChannel
+    case channelReady
+
+    var label: String {
+        switch self {
+        case .auth: return "鉴权"
+        case .createRoom: return "建房"
+        case .createChannel: return "建通道"
+        case .channelReady: return "就绪"
+        }
+    }
+}
+
+enum DemoBootstrapNodeStatus: Equatable {
+    case pending
+    case running
+    case done
+    case failed
+}
+
+struct DemoBootstrapNodeSnapshot: Equatable {
+    var stage: DemoBootstrapStage
+    var status: DemoBootstrapNodeStatus = .pending
+    var durationMs: Int64? = nil
+    var startedAtMs: Int64? = nil
+}
+
+struct DemoBootstrapSnapshot: Equatable {
+    var nodes: [DemoBootstrapNodeSnapshot] = DemoBootstrapStage.allCases.map {
+        DemoBootstrapNodeSnapshot(stage: $0)
+    }
+    var totalMs: Int64? = nil
+    var startedAtMs: Int64? = nil
+    var completedAtMs: Int64? = nil
+    var failed: Bool = false
+
+    var isRunning: Bool {
+        !failed && totalMs == nil && nodes.contains { $0.status == .running }
+    }
+
+    func formatDuration(_ ms: Int64?) -> String {
+        guard let ms else { return "-" }
+        if ms < 1000 { return "\(ms)ms" }
+        return String(format: "%.1fs", Double(ms) / 1000.0)
+    }
+
+    func nodeLine(_ node: DemoBootstrapNodeSnapshot, nowMs: Int64 = DemoBootstrapPipelineTracker.nowMs()) -> String {
+        let elapsed: Int64?
+        switch node.status {
+        case .running:
+            if let started = node.startedAtMs {
+                elapsed = max(0, nowMs - started)
+            } else {
+                elapsed = nil
+            }
+        case .done, .failed:
+            elapsed = node.durationMs
+        case .pending:
+            elapsed = nil
+        }
+        let mark: String
+        switch node.status {
+        case .pending: mark = "·"
+        case .running: mark = "…"
+        case .done: mark = "✓"
+        case .failed: mark = "✗"
+        }
+        return "\(node.stage.label)\(mark) \(formatDuration(elapsed))"
+    }
+
+    func summaryLine(nowMs: Int64 = DemoBootstrapPipelineTracker.nowMs()) -> String {
+        nodes.map { nodeLine($0, nowMs: nowMs) }.joined(separator: "  ")
+    }
+
+    func totalLine(nowMs: Int64 = DemoBootstrapPipelineTracker.nowMs()) -> String {
+        let ms: Int64?
+        if let totalMs {
+            ms = totalMs
+        } else if let startedAtMs, isRunning || failed {
+            ms = max(0, nowMs - startedAtMs)
+        } else {
+            ms = nil
+        }
+        let suffix: String
+        if failed {
+            suffix = "失败"
+        } else if totalMs != nil {
+            suffix = "完成"
+        } else if isRunning {
+            suffix = "进行中"
+        } else {
+            suffix = ""
+        }
+        if suffix.isEmpty {
+            return "Bootstrap \(formatDuration(ms))"
+        }
+        return "Bootstrap \(suffix) \(formatDuration(ms))"
+    }
+}
+
+final class DemoBootstrapPipelineTracker {
+    private var snapshot = DemoBootstrapSnapshot()
+
+    static func nowMs() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1000.0)
+    }
+
+    func current() -> DemoBootstrapSnapshot {
+        snapshot
+    }
+
+    @discardableResult
+    func reset() -> DemoBootstrapSnapshot {
+        snapshot = DemoBootstrapSnapshot()
+        return snapshot
+    }
+
+    @discardableResult
+    func begin(_ stage: DemoBootstrapStage, nowMs: Int64 = DemoBootstrapPipelineTracker.nowMs()) -> DemoBootstrapSnapshot {
+        if stage == .auth {
+            snapshot = DemoBootstrapSnapshot(
+                nodes: DemoBootstrapStage.allCases.map { s in
+                    if s == .auth {
+                        return DemoBootstrapNodeSnapshot(stage: s, status: .running, startedAtMs: nowMs)
+                    }
+                    return DemoBootstrapNodeSnapshot(stage: s)
+                },
+                startedAtMs: nowMs
+            )
+            return snapshot
+        }
+
+        let nodes = snapshot.nodes.map { node -> DemoBootstrapNodeSnapshot in
+            guard node.stage == stage else { return node }
+            return DemoBootstrapNodeSnapshot(stage: stage, status: .running, startedAtMs: nowMs)
+        }
+        snapshot = DemoBootstrapSnapshot(
+            nodes: nodes,
+            totalMs: nil,
+            startedAtMs: snapshot.startedAtMs,
+            completedAtMs: nil,
+            failed: false
+        )
+        return snapshot
+    }
+
+    @discardableResult
+    func complete(_ stage: DemoBootstrapStage, nowMs: Int64 = DemoBootstrapPipelineTracker.nowMs()) -> DemoBootstrapSnapshot {
+        let nodes = snapshot.nodes.map { node -> DemoBootstrapNodeSnapshot in
+            guard node.stage == stage else { return node }
+            let start = node.startedAtMs ?? snapshot.startedAtMs ?? nowMs
+            return DemoBootstrapNodeSnapshot(
+                stage: stage,
+                status: .done,
+                durationMs: max(0, nowMs - start),
+                startedAtMs: start
+            )
+        }
+        var next = DemoBootstrapSnapshot(
+            nodes: nodes,
+            totalMs: snapshot.totalMs,
+            startedAtMs: snapshot.startedAtMs,
+            completedAtMs: snapshot.completedAtMs,
+            failed: false
+        )
+        if stage == .channelReady {
+            let totalStart = next.startedAtMs ?? nowMs
+            next.totalMs = max(0, nowMs - totalStart)
+            next.completedAtMs = nowMs
+        }
+        snapshot = next
+        return snapshot
+    }
+
+    @discardableResult
+    func fail(_ stage: DemoBootstrapStage, nowMs: Int64 = DemoBootstrapPipelineTracker.nowMs()) -> DemoBootstrapSnapshot {
+        let nodes = snapshot.nodes.map { node -> DemoBootstrapNodeSnapshot in
+            guard node.stage == stage else { return node }
+            let start = node.startedAtMs ?? snapshot.startedAtMs ?? nowMs
+            return DemoBootstrapNodeSnapshot(
+                stage: stage,
+                status: .failed,
+                durationMs: max(0, nowMs - start),
+                startedAtMs: start
+            )
+        }
+        let totalStart = snapshot.startedAtMs
+        snapshot = DemoBootstrapSnapshot(
+            nodes: nodes,
+            totalMs: totalStart.map { max(0, nowMs - $0) },
+            startedAtMs: snapshot.startedAtMs,
+            completedAtMs: nowMs,
+            failed: true
+        )
+        return snapshot
+    }
+
+    @discardableResult
+    func beginChannelReady(nowMs: Int64 = DemoBootstrapPipelineTracker.nowMs()) -> DemoBootstrapSnapshot {
+        if node(.createChannel)?.status == .running {
+            _ = complete(.createChannel, nowMs: nowMs)
+        }
+        return begin(.channelReady, nowMs: nowMs)
+    }
+
+    @discardableResult
+    func completeChannelReady(nowMs: Int64 = DemoBootstrapPipelineTracker.nowMs()) -> DemoBootstrapSnapshot {
+        guard let ready = node(.channelReady) else { return snapshot }
+        if ready.status == .done { return snapshot }
+        if ready.status == .pending {
+            _ = begin(.channelReady, nowMs: nowMs)
+        }
+        return complete(.channelReady, nowMs: nowMs)
+    }
+
+    private func node(_ stage: DemoBootstrapStage) -> DemoBootstrapNodeSnapshot? {
+        snapshot.nodes.first { $0.stage == stage }
+    }
+}
+
+// MARK: - Demo Wi-Fi Speed Probe (Host App Side)
+
+enum DemoWifiSpeedStatus: Equatable {
+    case idle
+    case running
+    case done
+    case cancelled
+    case failed
+}
+
+struct DemoWifiSpeedSnapshot: Equatable {
+    static let poorBandwidthKbps: Double = 100
+    static let measureWindowMs: Int64 = 10_000
+
+    var status: DemoWifiSpeedStatus = .idle
+    var bandwidthKbps: Double? = nil
+    var latencyMs: Int64? = nil
+    var elapsedMs: Int64? = nil
+    var errorMessage: String? = nil
+
+    var isBandwidthPoor: Bool {
+        guard let bandwidthKbps else { return false }
+        return bandwidthKbps < Self.poorBandwidthKbps
+    }
+
+    func formatBandwidth() -> String {
+        guard let bandwidthKbps else { return "-" }
+        if bandwidthKbps >= 1000 {
+            return String(format: "%.2fMbps", bandwidthKbps / 1000.0)
+        }
+        return String(format: "%.0fkbps", bandwidthKbps)
+    }
+
+    func formatLatency() -> String {
+        guard let latencyMs else { return "-" }
+        return "\(latencyMs)ms"
+    }
+
+    func displayLine() -> String {
+        switch status {
+        case .idle:
+            return "测速 -"
+        case .running:
+            let bw = bandwidthKbps == nil ? "…" : formatBandwidth()
+            let lat = formatLatency()
+            let elapsed = elapsedMs.map { "\($0 / 1000)s" } ?? "…"
+            return "测速中 \(elapsed)  带宽 \(bw)  业务延迟 \(lat)"
+        case .done:
+            return "带宽 \(formatBandwidth())  业务延迟 \(formatLatency())"
+        case .cancelled:
+            return "测速已取消"
+        case .failed:
+            return "测速失败 \(errorMessage ?? "")".trimmingCharacters(in: .whitespaces)
+        }
+    }
+
+    static func bytesToKbps(bytes: Int64, elapsedMs: Int64) -> Double {
+        let seconds = Double(max(1, elapsedMs)) / 1000.0
+        return (Double(bytes) * 8.0) / 1000.0 / seconds
+    }
+}
+
+final class DemoWifiSpeedProbe {
+    private let downloadURLs: [URL] = [
+        URL(string: "https://speed.cloudflare.com/__down?bytes=100000000")!,
+        URL(string: "https://proof.ovh.net/files/100Mb.dat")!,
+        URL(string: "https://cachefly.cachefly.net/100mb.test")!,
+    ]
+    private let measureWindowMs = DemoWifiSpeedSnapshot.measureWindowMs
+
+    private let lock = NSLock()
+    private var cancelled = false
+    private var generation: UInt64 = 0
+    private var session: URLSession?
+    private var workItem: DispatchWorkItem?
+    private var streamDelegate: SpeedStreamDelegate?
+
+    /// - Parameter businessBaseURL: Demo 当前生效的业务 API 根地址（与 SDK 网络配置一致）
+    func start(businessBaseURL: URL, onUpdate: @escaping (DemoWifiSpeedSnapshot) -> Void) {
+        cancel()
+        lock.lock()
+        cancelled = false
+        generation &+= 1
+        let runGeneration = generation
+        let runLatencyURLs = Self.latencyURLs(forBusinessBase: businessBaseURL)
+        let delegate = SpeedStreamDelegate()
+        streamDelegate = delegate
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 30
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.httpAdditionalHeaders = [
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            "Accept": "*/*",
+            "Cache-Control": "no-cache",
+        ]
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        self.session = session
+        lock.unlock()
+
+        publish(DemoWifiSpeedSnapshot(status: .running, elapsedMs: 0), generation: runGeneration, onUpdate: onUpdate)
+        let item = DispatchWorkItem { [weak self] in
+            self?.runProbe(
+                session: session,
+                delegate: delegate,
+                latencyURLs: runLatencyURLs,
+                generation: runGeneration,
+                onUpdate: onUpdate
+            )
+        }
+        workItem = item
+        DispatchQueue.global(qos: .utility).async(execute: item)
+    }
+
+    static func latencyURLs(forBusinessBase baseURL: URL) -> [URL] {
+        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        // 业务根路径测 RTT；去掉 query，保留 path（通常是 /）
+        components?.query = nil
+        components?.fragment = nil
+        guard let url = components?.url else { return [baseURL] }
+        return [url]
+    }
+
+    /// 与 Demo SDK 初始化一致的业务 baseURL（不访问 SDK internal 配置字段）。
+    static func resolvedBusinessBaseURL(
+        settings: DemoSettingsConfig = DemoSettingsStore().loadCurrentConfig()
+    ) -> URL {
+        DemoSDKConfigurationFactory.resolvedBusinessBaseURL(from: settings)
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        generation &+= 1
+        workItem?.cancel()
+        workItem = nil
+        session?.invalidateAndCancel()
+        session = nil
+        streamDelegate = nil
+        lock.unlock()
+    }
+
+    private func isCancelled(generation runGeneration: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled || generation != runGeneration
+    }
+
+    private func publish(
+        _ snapshot: DemoWifiSpeedSnapshot,
+        generation runGeneration: UInt64,
+        onUpdate: @escaping (DemoWifiSpeedSnapshot) -> Void
+    ) {
+        guard !isCancelled(generation: runGeneration) else { return }
+        onUpdate(snapshot)
+    }
+
+    private func makeRequest(url: URL) -> URLRequest {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+        if url.host?.contains("speed.cloudflare.com") == true {
+            request.setValue("https://speed.cloudflare.com/", forHTTPHeaderField: "Referer")
+            request.setValue("https://speed.cloudflare.com", forHTTPHeaderField: "Origin")
+        }
+        return request
+    }
+
+    private func runProbe(session: URLSession,
+                          delegate: SpeedStreamDelegate,
+                          latencyURLs: [URL],
+                          generation runGeneration: UInt64,
+                          onUpdate: @escaping (DemoWifiSpeedSnapshot) -> Void) {
+        if isCancelled(generation: runGeneration) { return }
+
+        let latency = measureLatency(urls: latencyURLs, session: session, generation: runGeneration)
+        if isCancelled(generation: runGeneration) { return }
+        publish(
+            DemoWifiSpeedSnapshot(status: .running, latencyMs: latency, elapsedMs: 0),
+            generation: runGeneration,
+            onUpdate: onUpdate
+        )
+
+        let startMs = DemoBootstrapPipelineTracker.nowMs()
+        var lastPublishMs: Int64 = 0
+        var totalBytes: Int64 = 0
+        var lastError: Error?
+
+        for url in downloadURLs {
+            if isCancelled(generation: runGeneration) { return }
+            if DemoBootstrapPipelineTracker.nowMs() - startMs >= measureWindowMs {
+                break
+            }
+
+            let sema = DispatchSemaphore(value: 0)
+            delegate.reset()
+            delegate.onBytes = { [weak self] roundTotal in
+                guard let self, !self.isCancelled(generation: runGeneration) else { return }
+                let combined = totalBytes + roundTotal
+                let now = DemoBootstrapPipelineTracker.nowMs()
+                if now - lastPublishMs >= 400 {
+                    lastPublishMs = now
+                    let elapsed = max(1, now - startMs)
+                    self.publish(
+                        DemoWifiSpeedSnapshot(
+                            status: .running,
+                            bandwidthKbps: DemoWifiSpeedSnapshot.bytesToKbps(bytes: combined, elapsedMs: elapsed),
+                            latencyMs: latency,
+                            elapsedMs: elapsed
+                        ),
+                        generation: runGeneration,
+                        onUpdate: onUpdate
+                    )
+                }
+                if now - startMs >= self.measureWindowMs {
+                    sema.signal()
+                }
+            }
+            delegate.onFinished = { _ in
+                sema.signal()
+            }
+
+            let task = session.dataTask(with: makeRequest(url: url))
+            task.resume()
+
+            while true {
+                if isCancelled(generation: runGeneration) {
+                    task.cancel()
+                    return
+                }
+                let now = DemoBootstrapPipelineTracker.nowMs()
+                if now - startMs >= measureWindowMs {
+                    task.cancel()
+                    break
+                }
+                if sema.wait(timeout: .now() + 0.2) == .success {
+                    task.cancel()
+                    break
+                }
+            }
+
+            if let status = delegate.httpStatus, !(200...299).contains(status) {
+                lastError = NSError(
+                    domain: "DemoWifiSpeedProbe",
+                    code: status,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP \(status)"]
+                )
+                continue
+            }
+            if let error = delegate.error {
+                let ns = error as NSError
+                if !(ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled) {
+                    lastError = error
+                    if delegate.totalBytes == 0 {
+                        continue
+                    }
+                }
+            }
+
+            totalBytes += delegate.totalBytes
+            lastError = nil
+            if DemoBootstrapPipelineTracker.nowMs() - startMs >= measureWindowMs {
+                break
+            }
+            // 当前文件已读完但窗口未满：继续下一个 URL
+        }
+
+        if isCancelled(generation: runGeneration) { return }
+
+        if totalBytes <= 0 {
+            publish(
+                DemoWifiSpeedSnapshot(
+                    status: .failed,
+                    latencyMs: latency,
+                    errorMessage: lastError?.localizedDescription ?? "测速无数据"
+                ),
+                generation: runGeneration,
+                onUpdate: onUpdate
+            )
+            return
+        }
+
+        let elapsedFinal = max(1, DemoBootstrapPipelineTracker.nowMs() - startMs)
+        publish(
+            DemoWifiSpeedSnapshot(
+                status: .done,
+                bandwidthKbps: DemoWifiSpeedSnapshot.bytesToKbps(bytes: totalBytes, elapsedMs: elapsedFinal),
+                latencyMs: latency,
+                elapsedMs: elapsedFinal
+            ),
+            generation: runGeneration,
+            onUpdate: onUpdate
+        )
+    }
+
+    private func measureLatency(urls: [URL], session: URLSession, generation runGeneration: UInt64) -> Int64? {
+        guard !urls.isEmpty else { return nil }
+
+        var samples: [Int64] = []
+        for url in urls {
+            if isCancelled(generation: runGeneration) { break }
+            for _ in 0..<3 {
+                if isCancelled(generation: runGeneration) { break }
+                if let ms = measureLatencyOnce(url: url, session: session, generation: runGeneration) {
+                    samples.append(ms)
+                }
+            }
+            if !samples.isEmpty { break }
+        }
+        return samples.min()
+    }
+
+    /// 业务延迟：拿到任意 HTTP 响应头即计 RTT（401/404 也算可达）。
+    private func measureLatencyOnce(url: URL, session: URLSession, generation runGeneration: UInt64) -> Int64? {
+        for method in ["HEAD", "GET"] {
+            if isCancelled(generation: runGeneration) { return nil }
+            let started = DemoBootstrapPipelineTracker.nowMs()
+            let sema = DispatchSemaphore(value: 0)
+            var ok = false
+            var request = makeRequest(url: url)
+            request.httpMethod = method
+            let task = session.dataTask(with: request) { _, response, _ in
+                if let http = response as? HTTPURLResponse, (100...599).contains(http.statusCode) {
+                    ok = true
+                }
+                sema.signal()
+            }
+            task.resume()
+            let waitResult = sema.wait(timeout: .now() + 5)
+            if waitResult == .timedOut {
+                task.cancel()
+                continue
+            }
+            if isCancelled(generation: runGeneration) {
+                task.cancel()
+                return nil
+            }
+            if ok {
+                return max(0, DemoBootstrapPipelineTracker.nowMs() - started)
+            }
+        }
+        return nil
+    }
+}
+
+private final class SpeedStreamDelegate: NSObject, URLSessionDataDelegate {
+    private let lock = NSLock()
+    private(set) var totalBytes: Int64 = 0
+    private(set) var error: Error?
+    private(set) var httpStatus: Int?
+    var onBytes: ((Int64) -> Void)?
+    var onFinished: ((Error?) -> Void)?
+
+    func reset() {
+        lock.lock()
+        totalBytes = 0
+        error = nil
+        httpStatus = nil
+        lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession,
+                     dataTask: URLSessionDataTask,
+                     didReceive response: URLResponse,
+                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        let status = (response as? HTTPURLResponse)?.statusCode
+        lock.lock()
+        httpStatus = status
+        lock.unlock()
+        if let status, !(200...299).contains(status) {
+            completionHandler(.cancel)
+            let err = NSError(
+                domain: "DemoWifiSpeedProbe",
+                code: status,
+                userInfo: [NSLocalizedDescriptionKey: "HTTP \(status)"]
+            )
+            lock.lock()
+            error = err
+            lock.unlock()
+            return
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        totalBytes += Int64(data.count)
+        let total = totalBytes
+        lock.unlock()
+        onBytes?(total)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        if self.error == nil {
+            self.error = error
+        }
+        let finalError = self.error
+        lock.unlock()
+        onFinished?(finalError)
     }
 }

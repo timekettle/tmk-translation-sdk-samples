@@ -10,7 +10,25 @@ data class OnlineConversationErrorPrompt(
     val message: String,
     val restartText: String = "重新创建",
     val leaveText: String = "离开页面",
+    val action: OnlineConversationPromptAction = OnlineConversationPromptAction.RESTART_OR_LEAVE,
 )
+
+enum class OnlineConversationPromptAction {
+    RESTART_OR_LEAVE,
+    RECONNECT_TIMEOUT,
+}
+
+object OnlineConversationPromptPresentationPolicy {
+    fun shouldReplace(
+        current: OnlineConversationErrorPrompt?,
+        incoming: OnlineConversationErrorPrompt,
+    ): Boolean {
+        if (current == null) return true
+        if (current.id == incoming.id) return false
+        if (current.action == OnlineConversationPromptAction.RECONNECT_TIMEOUT) return true
+        return incoming.action != OnlineConversationPromptAction.RECONNECT_TIMEOUT
+    }
+}
 
 object OnlineConversationErrorPrompts {
     enum class RuntimeMode {
@@ -23,6 +41,17 @@ object OnlineConversationErrorPrompts {
             id = "close_room",
             title = "房间已关闭",
             message = "服务端已关闭当前房间。当前对话资源已释放，需要重新创建一个全新的对话。"
+        )
+    }
+
+    fun fromReconnectTimeout(): OnlineConversationErrorPrompt {
+        return OnlineConversationErrorPrompt(
+            id = "reconnect_timeout",
+            title = "连接恢复超时",
+            message = "连接已持续恢复 1 分钟。你可以重新创建房间，或继续等待连接恢复。",
+            restartText = "重新创建",
+            leaveText = "继续等待",
+            action = OnlineConversationPromptAction.RECONNECT_TIMEOUT,
         )
     }
 
