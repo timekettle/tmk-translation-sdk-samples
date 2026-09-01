@@ -20,6 +20,7 @@ final class OneToOneViewModel: NSObject {
     @Published private(set) var state = OneToOneViewState()
     let rowMutation = PassthroughSubject<ChatListMutation<OneToOneRowViewData>, Never>()
     let remoteCloseRoomPrompt = PassthroughSubject<DemoConversationPrompt, Never>()
+    let reconnectTimeoutPromptDismiss = PassthroughSubject<Void, Never>()
 
     private var room: TmkTranslationRoom?
     private var channel: TmkTranslationChannel?
@@ -79,6 +80,23 @@ final class OneToOneViewModel: NSObject {
     }()
     private lazy var leftFileAudioLoopBuffer = OneToOneLocalAudioLoopBuffer(pcmData: localPCMData)
     private let networkEventPolicy = DemoOnlineNetworkEventPolicy()
+    private let networkStatsTracker = DemoOnlineNetworkStatsTracker()
+    private let bootstrapTracker = DemoBootstrapPipelineTracker()
+    private let wifiSpeedProbe = DemoWifiSpeedProbe()
+    private lazy var reconnectTimeoutMonitor: DemoReconnectTimeoutMonitor = {
+        let monitor = DemoReconnectTimeoutMonitor()
+        monitor.onPromptRequired = { [weak self] in
+            self?.remoteCloseRoomPrompt.send(.init(
+                title: "连接恢复超时",
+                message: "连接已持续恢复 1 分钟。你可以重新创建房间，或继续等待连接恢复。",
+                style: .reconnectTimeout
+            ))
+        }
+        monitor.onPromptDismissRequired = { [weak self] in
+            self?.reconnectTimeoutPromptDismiss.send(())
+        }
+        return monitor
+    }()
 
     var currentLeftSpeakerGender: TmkSpeakerGender {
         selectedLeftSpeakerGender
@@ -107,17 +125,31 @@ final class OneToOneViewModel: NSObject {
             $0.dialogConversationAudioMode = self.selectedDialogConversationAudioMode
             $0.configuredChannels = self.selectedChannelModeConfiguration.pcmChannels
         }
+        startWifiSpeedProbe()
         startOnlineListening()
     }
 
     func onViewWillClose() {
+        reconnectTimeoutMonitor.cancel()
+        cancelWifiSpeedProbe()
         stopListeningIfNeeded()
+    }
+
+    func continueWaitingForReconnect() {
+        reconnectTimeoutMonitor.continueWaiting()
+    }
+
+    func recreateAfterReconnectTimeout() {
+        reconnectTimeoutMonitor.confirmRecreation()
+        stopConversationForPrompt(status: "正在重新创建通道...")
+        recreateAfterRemoteClose()
     }
 
     func recreateAfterRemoteClose() {
         guard hasStoppedListening else { return }
         hasStoppedListening = false
         updateStatus("正在重新创建通道...")
+        startWifiSpeedProbe()
         startOnlineListening()
     }
 
@@ -191,7 +223,9 @@ final class OneToOneViewModel: NSObject {
             $0.canStopListening = false
             $0.canStartListening = self.channel != nil
             $0.canSharePCM = self.hasPCMData
+            $0.networkStats = .init()
         }
+        networkStatsTracker.reset()
         updateStatus("收听已停止")
     }
 
@@ -438,21 +472,26 @@ enum DemoTmkResultLogFormatter {
 
 private extension OneToOneViewModel {
     func startOnlineListening() {
+        publishBootstrap(bootstrapTracker.begin(.auth))
+        updateStatus("正在鉴权...")
         TmkTranslationSDK.shared.verifyAuth { [weak self] result in
             guard let self else { return }
             switch result {
             case .success:
                 self.isAuthVerified = true
+                self.publishBootstrap(self.bootstrapTracker.complete(.auth))
                 self.updateStatus("鉴权成功，准备创建房间...")
                 self.createRoomAndChannel()
             case .failure(let error):
                 self.isAuthVerified = false
+                self.publishBootstrap(self.bootstrapTracker.fail(.auth))
                 self.updateStatus(DemoSDKConfigurationFactory.authFailureMessage(error))
             }
         }
     }
 
     func createRoomAndChannel() {
+        publishBootstrap(bootstrapTracker.begin(.createRoom))
         let roomConfig = TmkTranslationRoomConfig(
             sourceLang: selectedRightLang,
             targetLang: selectedLeftLang,
@@ -467,8 +506,10 @@ private extension OneToOneViewModel {
             guard let self else { return }
             switch result {
             case .success(let room):
+                self.publishBootstrap(self.bootstrapTracker.complete(.createRoom))
                 self.createTranslationChannel(room: room)
             case .failure(let error):
+                self.publishBootstrap(self.bootstrapTracker.fail(.createRoom))
                 self.updateStatus("房间创建失败：\(error.localizedDescription)")
             }
         }
@@ -496,15 +537,22 @@ private extension OneToOneViewModel {
             $0.targetLanguage = self.selectedTargetLang
         }
 
+        publishBootstrap(bootstrapTracker.begin(.createChannel))
         TmkTranslationSDK.shared.createTranslationChannel(config) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let channel):
                 self.channel = channel
                 channel.setTranslationListener(self)
+                self.publishBootstrap(self.bootstrapTracker.beginChannelReady())
+                let runtime = channel.currentRuntimeState().state
+                if runtime == .running || runtime == .degraded {
+                    self.publishBootstrap(self.bootstrapTracker.completeChannelReady())
+                }
                 self.updateStateOnMain { $0.canStartListening = true }
                 self.updateStatus("在线通道已就绪，点击“开始收听”开始采集")
             case .failure(let error):
+                self.publishBootstrap(self.bootstrapTracker.fail(.createChannel))
                 self.updateStatus("通道启动失败：\(error.localizedDescription)")
             }
         }
@@ -527,11 +575,14 @@ private extension OneToOneViewModel {
         activePlaybackUID = nil
         targetPlaybackUIDs.removeAll()
         playbackLaneByUID.removeAll()
+        networkStatsTracker.reset()
+        updateStateOnMain { $0.networkStats = .init() }
         updateStatus("已停止收听")
         Self.logger.info("oneToOne channel stopped")
     }
 
     func recreateRoomAndChannel(statusText: String = "语言已切换，重新创建通道中...") {
+        networkStatsTracker.reset()
         voiceIO?.stop()
         closeAllPCMFiles()
         resetLocalPCMPlaybackState()
@@ -551,6 +602,7 @@ private extension OneToOneViewModel {
             $0.canSharePCM = false
             $0.playbackChannels = 0
             $0.currentRoomNo = "-"
+            $0.networkStats = .init()
         }
         updateStatus(statusText)
         startOnlineListening()
@@ -628,6 +680,26 @@ private extension OneToOneViewModel {
 
     func updateStatus(_ text: String) {
         updateStateOnMain { $0.statusText = text }
+    }
+
+    func publishBootstrap(_ snapshot: DemoBootstrapSnapshot) {
+        updateStateOnMain { $0.bootstrapStats = snapshot }
+    }
+
+    func startWifiSpeedProbe() {
+        let baseURL = DemoWifiSpeedProbe.resolvedBusinessBaseURL()
+        wifiSpeedProbe.start(businessBaseURL: baseURL) { [weak self] snapshot in
+            self?.updateStateOnMain { $0.wifiSpeed = snapshot }
+        }
+    }
+
+    func cancelWifiSpeedProbe() {
+        wifiSpeedProbe.cancel()
+        updateStateOnMain {
+            if $0.wifiSpeed.status == .running || $0.wifiSpeed.status == .idle {
+                $0.wifiSpeed.status = .cancelled
+            }
+        }
     }
 
     func updateStateOnMain(_ action: @escaping (inout OneToOneViewState) -> Void) {
@@ -1067,6 +1139,7 @@ private extension OneToOneViewModel {
              .reconnecting(let text):
             updateStatus(text)
         case .prompt(let prompt):
+            reconnectTimeoutMonitor.cancel()
             stopConversationForPrompt(status: prompt.title)
             DispatchQueue.main.async { [weak self] in
                 self?.remoteCloseRoomPrompt.send(prompt)
@@ -1209,6 +1282,11 @@ extension OneToOneViewModel: TmkTranslationListener {
             handleRemoteCloseRoom()
             return
         }
+
+        if let snapshot = networkStatsTracker.consume(eventName: name, args: args) {
+            updateStateOnMain { $0.networkStats = snapshot }
+        }
+
         let networkAction = networkEventPolicy.action(forEvent: name, args: args)
         if networkAction != .none {
             applyRuntimeAction(networkAction)
@@ -1241,6 +1319,19 @@ extension OneToOneViewModel: TmkTranslationListener {
 
     func onStateChanged(from engine: AbstractChannelEngine, snapshot: TmkTranslationChannelStateSnapshot) {
         _ = engine
+        if let isRTMReconnecting = DemoRTMReconnectTimeoutStatePolicy.reconnecting(from: snapshot) {
+            reconnectTimeoutMonitor.handle(isRTMReconnecting: isRTMReconnecting)
+        }
+        switch snapshot.state {
+        case .running, .degraded:
+            publishBootstrap(bootstrapTracker.completeChannelReady())
+        case .failed:
+            if bootstrapTracker.current().isRunning {
+                publishBootstrap(bootstrapTracker.fail(.channelReady))
+            }
+        default:
+            break
+        }
         applyRuntimeAction(DemoConversationRuntimePolicy.action(for: snapshot,
                                                                 isListening: getListeningActive()))
     }
@@ -1273,7 +1364,9 @@ extension OneToOneViewModel: TmkTranslationListener {
             $0.captureSampleRate = 0
             $0.captureChannels = 0
             $0.playbackChannels = 0
+            $0.networkStats = .init()
         }
+        networkStatsTracker.reset()
         updateStatus("房间已关闭")
         Self.logger.info("oneToOne remote close_room received, waiting for user decision")
         let prompt = DemoConversationPrompt(

@@ -30,6 +30,9 @@ data class DualChannelScreen(
         val isStarting by viewModel.isStarting.collectAsState()
         val bubbles by viewModel.bubbles.collectAsState()
         val statusText by viewModel.statusText.collectAsState()
+        val networkStats by viewModel.networkStats.collectAsState()
+        val bootstrapStats by viewModel.bootstrapStats.collectAsState()
+        val wifiSpeed by viewModel.wifiSpeed.collectAsState()
         val remoteCloseRoomPromptVisible by viewModel.remoteCloseRoomPromptVisible.collectAsState()
         val conversationErrorPrompt by viewModel.conversationErrorPrompt.collectAsState()
         val currentRoomNo by viewModel.currentRoomNo.collectAsState()
@@ -67,20 +70,31 @@ data class DualChannelScreen(
 
         if (conversationErrorPrompt != null || remoteCloseRoomPromptVisible) {
             val prompt = conversationErrorPrompt ?: OnlineConversationErrorPrompts.fromCloseRoom()
+            val isReconnectTimeout = prompt.action == OnlineConversationPromptAction.RECONNECT_TIMEOUT
             AlertDialog(
                 onDismissRequest = {},
                 title = { Text(prompt.title) },
                 text = { Text(prompt.message) },
                 confirmButton = {
-                    TextButton(onClick = { viewModel.recreateChannelAfterRemoteClose() }) {
+                    TextButton(onClick = {
+                        if (isReconnectTimeout) {
+                            viewModel.recreateAfterReconnectTimeout()
+                        } else {
+                            viewModel.recreateChannelAfterRemoteClose()
+                        }
+                    }) {
                         Text(prompt.restartText)
                     }
                 },
                 dismissButton = {
                     TextButton(onClick = {
-                        viewModel.dismissRemoteCloseRoomPrompt()
-                        viewModel.stopTranslation(prompt.title)
-                        navigator.pop()
+                        if (isReconnectTimeout) {
+                            viewModel.continueWaitingForReconnect()
+                        } else {
+                            viewModel.dismissRemoteCloseRoomPrompt()
+                            viewModel.stopTranslation(prompt.title)
+                            navigator.pop()
+                        }
                     }) {
                         Text(prompt.leaveText)
                     }
@@ -88,10 +102,11 @@ data class DualChannelScreen(
             )
         }
 
-        Column(
-            modifier = Modifier.fillMaxSize().padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -197,6 +212,13 @@ data class DualChannelScreen(
                         "采样: 配置16000Hz/2ch  采集$capture  回放$playback"
                 },
                 scrollOnLatestUpdate = true,
+            )
+            }
+
+            DraggableDemoNetworkQualityOverlay(
+                snapshot = networkStats,
+                bootstrap = bootstrapStats,
+                wifiSpeed = wifiSpeed,
             )
         }
 

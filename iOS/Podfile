@@ -8,7 +8,7 @@ target 'SDKDemo' do
   use_frameworks!
 
   # Pods for SDKDemo
-  pod 'TmkTranslationSDK', '1.2.5'
+  pod 'TmkTranslationSDK', '1.2.9'
   pod 'SnapKit'
 
   target 'SDKDemoTests' do
