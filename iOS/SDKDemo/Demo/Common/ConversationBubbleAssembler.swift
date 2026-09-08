@@ -13,6 +13,14 @@ enum DemoConversationLane: String {
     case right
 }
 
+/// 译文在气泡内的组装方式。
+/// 在线流按服务端 chunk 分段；离线 Pipeline 已在 `mergedTranslatedText` 中提供 utterance 累计译文，
+/// 不能再将每次回调当作独立 chunk 做重叠合并。
+enum DemoConversationTranslationAssemblyMode {
+    case chunked
+    case offlineCumulative
+}
+
 struct DemoConversationEvent {
     let bubbleId: String
     let sessionId: Int
@@ -23,6 +31,10 @@ struct DemoConversationEvent {
     let sourceLangCode: String
     let targetLangCode: String
     let chunkId: String?
+    /// 离线 MT 当前断句的译文；`text` 仍保持兼容的累计快照。
+    let translationSegmentText: String?
+    let sourceSegmentText: String?
+    let sentenceState: String?
     /// ASR 句子的 offset(纳秒)；仅 ASR final 句子携带,MT/TTS 为 nil。
     let offset: Int64?
     /// ASR 句子的 duration(纳秒)；仅 ASR final 句子携带,MT/TTS 为 nil。
@@ -37,6 +49,9 @@ struct DemoConversationEvent {
          sourceLangCode: String,
          targetLangCode: String,
          chunkId: String? = nil,
+         translationSegmentText: String? = nil,
+         sourceSegmentText: String? = nil,
+         sentenceState: String? = nil,
          offset: Int64? = nil,
          duration: Int64? = nil) {
         self.bubbleId = bubbleId
@@ -48,6 +63,9 @@ struct DemoConversationEvent {
         self.sourceLangCode = sourceLangCode
         self.targetLangCode = targetLangCode
         self.chunkId = chunkId
+        self.translationSegmentText = translationSegmentText
+        self.sourceSegmentText = sourceSegmentText
+        self.sentenceState = sentenceState
         self.offset = offset
         self.duration = duration
     }
@@ -102,6 +120,8 @@ enum DemoConversationEventAdapter {
                                      sourceLangCode: result.srcCode,
                                      targetLangCode: result.dstCode,
                                      chunkId: chunkId(from: result),
+                                     sourceSegmentText: result.extraData["sentence_source"] as? String,
+                                     sentenceState: result.extraData["sentence_state"] as? String,
                                      offset: int64Value(result.extraData["offset"]),
                                      duration: int64Value(result.extraData["duration"]))
     }
@@ -117,7 +137,8 @@ enum DemoConversationEventAdapter {
                                      text: text,
                                      sourceLangCode: result.srcCode,
                                      targetLangCode: result.dstCode,
-                                     chunkId: chunkId(from: result))
+                                     chunkId: chunkId(from: result),
+                                     translationSegmentText: stringValue(result.extraData["sentence_translation"]))
     }
 
     static func makeAudioEvent(from result: TmkResult<String>) -> DemoConversationEvent? {
@@ -185,6 +206,39 @@ enum DemoConversationEventAdapter {
     }
 }
 
+/// 离线本句结果：稳定正文只追加，当前句只替换；不用文本内容判断句子身份。
+struct OfflineSentenceTextState {
+    private(set) var stableText = ""
+    private(set) var partialText = ""
+    private var partialID: Int?
+    private var lastStableID: Int?
+
+    mutating func update(text: String, id: String?, isFinal: Bool) {
+        guard let id, let value = Int(id) else { return }
+        if let lastStableID, value <= lastStableID { return }
+        if let partialID, value < partialID { return }
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isFinal {
+            if !text.isEmpty {
+                if !stableText.isEmpty { stableText += " " }
+                stableText += text
+            }
+            lastStableID = value
+            partialText = ""
+            partialID = nil
+        } else {
+            partialID = value
+            partialText = text
+        }
+    }
+
+    func displayText(active: Bool) -> String {
+        guard !partialText.isEmpty else { return stableText }
+        let text = stableText.isEmpty ? partialText : stableText + " " + partialText
+        return active ? text + "..." : text
+    }
+}
+
 final class DemoConversationBubbleAssembler {
     /// 单个气泡保留的服务端 session 别名上限；超出后只影响已过期 partial 的高亮映射，不影响文本或 final 语义。
     private static let maxSessionAliasesPerBubble = 64
@@ -197,6 +251,10 @@ final class DemoConversationBubbleAssembler {
     private struct BubbleAggregate {
         var sourceLangCode: String
         var targetLangCode: String
+        var sentenceSource = OfflineSentenceTextState()
+        var sentenceTranslation = OfflineSentenceTextState()
+        var usesSentenceSource = false
+        var usesSentenceTranslation = false
         var sourceSessionOrder: [Int] = []
         var translatedSessionOrder: [Int] = []
         var sourceBySession: [Int: SessionSegment] = [:]
@@ -215,6 +273,17 @@ final class DemoConversationBubbleAssembler {
         /// effectiveSessionId -> 贡献它的原始服务端 chunk_id 集合（用于按 chunk 着色）。
         var sourceRawChunkByEffective: [Int: Set<String>] = [:]
         var translatedRawChunkByEffective: [Int: Set<String>] = [:]
+        /// 离线 MT 的 final 是累计快照；partial 既可能是累计文本，也可能仅是当前句。
+        /// 两者分开保存，避免 partial 覆盖已确认前缀，也允许同一 chunk 的 final 修正文本。
+        var offlineConfirmedTranslatedText: String = ""
+        var offlineLatestFinalChunkId: String?
+        /// 最近一个 final 提交前的稳定前缀，供同一 chunk 的 final 修正替换句尾而非整段回滚。
+        var offlineLatestFinalBaseText: String = ""
+        var offlineProvisionalTranslatedText: String?
+        var offlineProvisionalBaseText: String = ""
+        var offlineProvisionalChunkId: String?
+        var offlineTranslatedSessionIds: Set<Int> = []
+        var offlineTranslatedChunkIds: Set<String> = []
         var latestSessionId: Int = 0
         /// 气泡内第一条 ASR final 句子的 offset(纳秒)。
         var bOffset: Int64? = nil
@@ -246,15 +315,20 @@ final class DemoConversationBubbleAssembler {
     /// aggregate 容量上限。1v1/收听长跑(新闻联播数小时)会持续新建气泡,
     /// aggregates 若不裁剪会单调增长(每个含多份长文本+多个字典),最终 OOM 被系统杀死
     /// (bug 7056277420:5 小时后 iOS demo 退出)。上限对齐 ViewModel 的 maxDisplayedRows。
-    private let maxRows: Int
+    static let minimumMaxRows = 10
+    static let maximumMaxRows = 500
+    private var maxRows: Int
+    private let translationAssemblyMode: DemoConversationTranslationAssemblyMode
     private var aggregates: [String: BubbleAggregate] = [:]
     /// aggregates 的插入顺序,用于按"最老优先"裁剪(Dictionary 本身无序)。
     private var aggregateOrder: [String] = []
     private var activeBubbleIdByLane: [DemoConversationLane: String] = [:]
     private var endedBubbleIds = Set<String>()
 
-    init(maxRows: Int = 200) {
+    init(maxRows: Int = 200,
+         translationAssemblyMode: DemoConversationTranslationAssemblyMode = .chunked) {
         self.maxRows = max(1, maxRows)
+        self.translationAssemblyMode = translationAssemblyMode
     }
 
     func reset() {
@@ -262,6 +336,14 @@ final class DemoConversationBubbleAssembler {
         aggregateOrder.removeAll()
         activeBubbleIdByLane.removeAll()
         endedBubbleIds.removeAll()
+    }
+
+    /// 运行时更新 Demo 页面保留气泡数；缩小上限时立刻淘汰最早的聚合状态。
+    @discardableResult
+    func setMaxRows(_ maxRows: Int) -> [DemoConversationBubbleSnapshot] {
+        self.maxRows = min(max(maxRows, Self.minimumMaxRows), Self.maximumMaxRows)
+        trimIfNeeded()
+        return snapshots()
     }
 
     func consume(_ event: DemoConversationEvent) -> [DemoConversationBubbleSnapshot] {
@@ -295,34 +377,49 @@ final class DemoConversationBubbleAssembler {
 
         switch event.stage {
         case .asr:
-            update(segmentText: event.text,
-                   isFinal: event.isFinal,
-                   sessionId: event.sessionId,
-                   chunkId: event.chunkId,
-                   coalesceUnchunkedPartials: true,
-                   activePartialSegmentID: &aggregate.activeSourcePartialSegmentID,
-                   sessionOrder: &aggregate.sourceSessionOrder,
-                   segments: &aggregate.sourceBySession,
-                   sessionAliases: &aggregate.sourceSessionAlias,
-                   sessionAliasOrder: &aggregate.sourceSessionAliasOrder,
-                   chunkAliases: &aggregate.sourceChunkAlias,
-                   rawIdsByEffective: &aggregate.sourceRawIdsByEffective,
-                   rawChunkByEffective: &aggregate.sourceRawChunkByEffective)
+            if translationAssemblyMode == .offlineCumulative, let text = event.sourceSegmentText {
+                aggregate.usesSentenceSource = true
+                if event.sentenceState != "end" {
+                    aggregate.sentenceSource.update(text: text, id: event.chunkId,
+                                                    isFinal: event.sentenceState == "stable")
+                }
+            } else {
+                update(segmentText: event.text,
+                       isFinal: event.isFinal,
+                       sessionId: event.sessionId,
+                       chunkId: event.chunkId,
+                       coalesceUnchunkedPartials: true,
+                       activePartialSegmentID: &aggregate.activeSourcePartialSegmentID,
+                       sessionOrder: &aggregate.sourceSessionOrder,
+                       segments: &aggregate.sourceBySession,
+                       sessionAliases: &aggregate.sourceSessionAlias,
+                       sessionAliasOrder: &aggregate.sourceSessionAliasOrder,
+                       chunkAliases: &aggregate.sourceChunkAlias,
+                       rawIdsByEffective: &aggregate.sourceRawIdsByEffective,
+                       rawChunkByEffective: &aggregate.sourceRawChunkByEffective)
+            }
         case .mt:
-            var ignoredActivePartialSegmentID: Int?
-            update(segmentText: event.text,
-                   isFinal: event.isFinal,
-                   sessionId: event.sessionId,
-                   chunkId: event.chunkId,
-                   coalesceUnchunkedPartials: false,
-                   activePartialSegmentID: &ignoredActivePartialSegmentID,
-                   sessionOrder: &aggregate.translatedSessionOrder,
-                   segments: &aggregate.translatedBySession,
-                   sessionAliases: &aggregate.translatedSessionAlias,
-                   sessionAliasOrder: &aggregate.translatedSessionAliasOrder,
-                   chunkAliases: &aggregate.translatedChunkAlias,
-                   rawIdsByEffective: &aggregate.translatedRawIdsByEffective,
-                   rawChunkByEffective: &aggregate.translatedRawChunkByEffective)
+            if translationAssemblyMode == .offlineCumulative, let text = event.translationSegmentText {
+                aggregate.usesSentenceTranslation = true
+                aggregate.sentenceTranslation.update(text: text, id: event.chunkId, isFinal: event.isFinal)
+            } else if translationAssemblyMode == .offlineCumulative {
+                updateOfflineCumulativeTranslation(event, aggregate: &aggregate)
+            } else {
+                var ignoredActivePartialSegmentID: Int?
+                update(segmentText: event.text,
+                       isFinal: event.isFinal,
+                       sessionId: event.sessionId,
+                       chunkId: event.chunkId,
+                       coalesceUnchunkedPartials: false,
+                       activePartialSegmentID: &ignoredActivePartialSegmentID,
+                       sessionOrder: &aggregate.translatedSessionOrder,
+                       segments: &aggregate.translatedBySession,
+                       sessionAliases: &aggregate.translatedSessionAlias,
+                       sessionAliasOrder: &aggregate.translatedSessionAliasOrder,
+                       chunkAliases: &aggregate.translatedChunkAlias,
+                       rawIdsByEffective: &aggregate.translatedRawIdsByEffective,
+                       rawChunkByEffective: &aggregate.translatedRawChunkByEffective)
+            }
         case .tts:
             break
         }
@@ -405,22 +502,36 @@ final class DemoConversationBubbleAssembler {
                                   sourceSegments: aggregate.cachedSourceSegments,
                                   translatedSegments: aggregate.cachedTranslatedSegments)
         }
-        let sourceText = composeText(order: aggregate.sourceSessionOrder,
+        let sourceText = aggregate.usesSentenceSource
+            ? aggregate.sentenceSource.displayText(active: isActiveBubble)
+            : composeText(order: aggregate.sourceSessionOrder,
                                      segments: aggregate.sourceBySession,
                                      isActiveBubble: isActiveBubble)
-        let translatedText = composeText(order: aggregate.translatedSessionOrder,
-                                         segments: aggregate.translatedBySession,
-                                         isActiveBubble: isActiveBubble)
-        let sourceSegments = composeSegments(order: aggregate.sourceSessionOrder,
+        let translatedText: String
+        let sourceSegments = aggregate.usesSentenceSource ? [] : composeSegments(order: aggregate.sourceSessionOrder,
                                              segments: aggregate.sourceBySession,
                                              rawIds: aggregate.sourceRawIdsByEffective,
                                              rawChunks: aggregate.sourceRawChunkByEffective,
                                              isActiveBubble: isActiveBubble)
-        let translatedSegments = composeSegments(order: aggregate.translatedSessionOrder,
+        let translatedSegments: [DemoConversationDisplaySegment]
+        if aggregate.usesSentenceTranslation {
+            translatedText = aggregate.sentenceTranslation.displayText(active: isActiveBubble)
+            translatedSegments = []
+        } else if translationAssemblyMode == .offlineCumulative {
+            let cumulative = composeOfflineCumulativeTranslation(aggregate,
+                                                                  isActiveBubble: isActiveBubble)
+            translatedText = cumulative.text
+            translatedSegments = cumulative.segments
+        } else {
+            translatedText = composeText(order: aggregate.translatedSessionOrder,
+                                         segments: aggregate.translatedBySession,
+                                         isActiveBubble: isActiveBubble)
+            translatedSegments = composeSegments(order: aggregate.translatedSessionOrder,
                                                  segments: aggregate.translatedBySession,
                                                  rawIds: aggregate.translatedRawIdsByEffective,
                                                  rawChunks: aggregate.translatedRawChunkByEffective,
                                                  isActiveBubble: isActiveBubble)
+        }
         aggregate.cachedVersion = aggregate.contentVersion
         aggregate.cachedIsActive = isActiveBubble
         aggregate.cachedSourceText = sourceText
@@ -561,6 +672,119 @@ final class DemoConversationBubbleAssembler {
         if coalesceUnchunkedPartials, normalizedChunk == nil {
             activePartialSegmentID = finalValue ? nil : effectiveSessionId
         }
+    }
+
+    /// 离线 MT 的 `text` 是累计快照，`translationSegmentText` 是本句译文。
+    /// 以稳定前缀 + 当前句尾部组装，避免新句 final 的重译历史覆盖气泡中部。
+    private func updateOfflineCumulativeTranslation(_ event: DemoConversationEvent,
+                                                    aggregate: inout BubbleAggregate) {
+        let incoming = (event.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard incoming.isEmpty == false else { return }
+        let chunkId = normalizedChunkId(event.chunkId)
+
+        if event.isFinal {
+            if chunkId == aggregate.offlineLatestFinalChunkId,
+               aggregate.offlineProvisionalChunkId != nil { return }
+            guard isNotOlderOfflineChunk(chunkId, than: aggregate.offlineLatestFinalChunkId) else { return }
+            let base: String
+            if chunkId == aggregate.offlineLatestFinalChunkId {
+                base = aggregate.offlineLatestFinalBaseText
+            } else if chunkId == aggregate.offlineProvisionalChunkId {
+                base = aggregate.offlineProvisionalBaseText
+            } else {
+                base = aggregate.offlineConfirmedTranslatedText
+            }
+            let sentenceText = (event.translationSegmentText ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if sentenceText.isEmpty == false {
+                aggregate.offlineConfirmedTranslatedText = appendOfflineTail(base, sentenceText)
+            } else if base.isEmpty || incoming.hasPrefix(base) {
+                // 兼容未升级 SDK：仅在累计快照确实延续稳定前缀时才采用它。
+                aggregate.offlineConfirmedTranslatedText = incoming
+            } else if chunkId == aggregate.offlineProvisionalChunkId,
+                      let provisional = aggregate.offlineProvisionalTranslatedText {
+                aggregate.offlineConfirmedTranslatedText = provisional
+            } else {
+                // 无句级译文且累计快照改写历史时，宁可只在尾部追加，也不改写已确认文本。
+                aggregate.offlineConfirmedTranslatedText = appendOfflineTail(base, incoming)
+            }
+            aggregate.offlineLatestFinalChunkId = chunkId
+            aggregate.offlineLatestFinalBaseText = base
+            aggregate.offlineProvisionalTranslatedText = nil
+            aggregate.offlineProvisionalBaseText = ""
+            aggregate.offlineProvisionalChunkId = nil
+        } else {
+            // 已确认的 chunk 不接受迟到 partial，避免 final 后回退展示。
+            guard isNewerOfflineChunk(chunkId, than: aggregate.offlineLatestFinalChunkId) else { return }
+            let base: String
+            if chunkId == aggregate.offlineProvisionalChunkId {
+                base = aggregate.offlineProvisionalBaseText
+            } else {
+                base = aggregate.offlineConfirmedTranslatedText
+                aggregate.offlineProvisionalBaseText = base
+                aggregate.offlineProvisionalChunkId = chunkId
+            }
+            // partial 仅替换本句的临时尾部，禁止通用重叠合并写入历史中间。
+            aggregate.offlineProvisionalTranslatedText = incoming.hasPrefix(base)
+                ? incoming
+                : appendOfflineTail(base, incoming)
+        }
+
+        aggregate.offlineTranslatedSessionIds = [event.sessionId]
+        aggregate.offlineTranslatedChunkIds = chunkId.map { [$0] } ?? []
+    }
+
+    private func appendOfflineTail(_ stablePrefix: String, _ tail: String) -> String {
+        let prefix = stablePrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suffix = tail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard prefix.isEmpty == false else { return suffix }
+        guard suffix.isEmpty == false else { return prefix }
+        if suffix.hasPrefix(prefix) { return suffix }
+        if prefix.hasSuffix(suffix) { return prefix }
+        return prefix + " " + suffix
+    }
+
+    private func composeOfflineCumulativeTranslation(_ aggregate: BubbleAggregate,
+                                                     isActiveBubble: Bool)
+        -> (text: String, segments: [DemoConversationDisplaySegment]) {
+        let rawText = aggregate.offlineProvisionalTranslatedText
+            ?? aggregate.offlineConfirmedTranslatedText
+        guard rawText.isEmpty == false else { return ("", []) }
+        let isFinal = aggregate.offlineProvisionalTranslatedText == nil
+        let normalized = normalizedDisplayText(rawText, isFinal: isFinal)
+        guard normalized.isEmpty == false else { return ("", []) }
+        let text: String
+        if isFinal || isActiveBubble == false {
+            text = removeTrailingEllipsis(normalized)
+        } else {
+            text = appendEllipsisIfNeeded(normalized)
+        }
+        return (text,
+                [DemoConversationDisplaySegment(text: text,
+                                                rawSessionIds: aggregate.offlineTranslatedSessionIds,
+                                                rawChunkIds: aggregate.offlineTranslatedChunkIds)])
+    }
+
+    private func isNotOlderOfflineChunk(_ incoming: String?, than current: String?) -> Bool {
+        guard let incoming = numericChunkId(incoming), let current = numericChunkId(current) else {
+            return true
+        }
+        return incoming >= current
+    }
+
+    private func isNewerOfflineChunk(_ incoming: String?, than current: String?) -> Bool {
+        guard let current else { return true }
+        guard let incomingNumeric = numericChunkId(incoming), let currentNumeric = numericChunkId(current) else {
+            // 非数字 chunk 不具备可靠的全序。相同 ID 视为当前已确认句，其他 ID 只要存在便
+            // 交由上游的时序保证；真实 Offline Pipeline 使用递增 sentenceId，因此会走数字分支。
+            return incoming != nil && incoming != current
+        }
+        return incomingNumeric > currentNumeric
+    }
+
+    private func numericChunkId(_ chunkId: String?) -> Int64? {
+        guard let chunkId else { return nil }
+        return Int64(chunkId)
     }
 
     /// 更新服务端 session 到展示分段的别名，并以固定窗口限制长跑 partial 的历史引用。

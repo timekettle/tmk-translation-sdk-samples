@@ -18,12 +18,16 @@ object DemoConversationRuntimePolicy {
     fun action(
         snapshot: TmkTranslationChannelStateSnapshot,
         readyMessage: String = DEFAULT_READY_MESSAGE,
+        previousState: TmkTranslationChannelState? = null,
     ): DemoConversationRuntimeAction {
         return when (snapshot.state) {
             TmkTranslationChannelState.IDLE -> DemoConversationRuntimeAction.Status("通道未启动")
             TmkTranslationChannelState.STARTING -> DemoConversationRuntimeAction.Status("通道连接中...")
             TmkTranslationChannelState.RUNNING -> {
-                val text = if (snapshot.reason == TmkTranslationChannelStateReason.NETWORK_RESTORED) {
+                val text = if (
+                    snapshot.reason == TmkTranslationChannelStateReason.NETWORK_RESTORED ||
+                    previousState == TmkTranslationChannelState.RECONNECTING
+                ) {
                     "连接已恢复"
                 } else {
                     readyMessage

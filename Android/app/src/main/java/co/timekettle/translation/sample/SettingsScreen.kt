@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalFoundationApi::class)
+
 package co.timekettle.translation.sample
 
 import co.timekettle.translation.TmkTranslationSDK
@@ -11,6 +13,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -24,6 +28,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -68,6 +73,7 @@ class SettingsScreen : Screen {
         val scope = rememberCoroutineScope()
         val scrollState = rememberScrollState()
         val baseURLBringIntoViewRequester = remember { BringIntoViewRequester() }
+        val offlineModelURLBringIntoViewRequester = remember { BringIntoViewRequester() }
         BackHandler { navigator.pop() }
 
         var mockEngine by remember { mutableStateOf(false) }
@@ -89,6 +95,8 @@ class SettingsScreen : Screen {
                 customBaseURLInput = DemoSettingsStore.loadCustomNetworkBaseURL(context)
                     ?: DemoSettingsStore.RAYNEO_NETWORK_BASE_URL,
                 sensitiveWordRedactionEnabled = DemoSettingsStore.loadSensitiveWordRedactionEnabled(context),
+                customOfflineModelBaseURLEnabled = DemoSettingsStore.loadCustomOfflineModelBaseURLEnabled(context),
+                offlineModelBaseURLInput = DemoSettingsStore.loadOfflineModelBaseURL(context).orEmpty(),
             )
         }
         var persisted by remember { mutableStateOf(initialConfig) }
@@ -96,10 +104,18 @@ class SettingsScreen : Screen {
         var isApplying by remember { mutableStateOf(false) }
         var onlineEngineStatus by remember { mutableStateOf(DemoEngineStatus.CHECKING) }
         var offlineEngineStatus by remember { mutableStateOf(DemoEngineStatus.CHECKING) }
+        var activeOfflineModelSource by remember {
+            mutableStateOf(DemoOfflineModelSourceInspector.current(context))
+        }
+        var probingOfflineModelURL by remember { mutableStateOf(false) }
+        var offlineModelProbeResult by remember { mutableStateOf<DemoOfflineModelProbeResult?>(null) }
         val isCustomBaseURLValid = !draft.customBaseURLEnabled ||
             DemoSettingsStore.normalizeCustomNetworkBaseURL(draft.customBaseURLInput) != null
+        val isOfflineModelBaseURLValid = !draft.customOfflineModelBaseURLEnabled ||
+            DemoSettingsStore.normalizeOfflineModelBaseURL(draft.offlineModelBaseURLInput) != null
         // 确认按钮启用:有未应用改动 && (未开自定义URL 或 URL 合法) && 非应用中。
-        val isConfirmEnabled = draft != persisted && isCustomBaseURLValid && !isApplying
+        val isConfirmEnabled = draft != persisted && isCustomBaseURLValid &&
+            isOfflineModelBaseURLValid && !isApplying
 
         // 仅刷新引擎状态展示:不销毁 SDK,用于进入页面时呈现当前鉴权/引擎可用性。
         fun refreshEngineStatus() {
@@ -161,6 +177,11 @@ class SettingsScreen : Screen {
                 DemoSettingsStore.saveCustomNetworkBaseURL(context, target.customBaseURLInput)
             }
             DemoSettingsStore.saveSensitiveWordRedactionEnabled(context, target.sensitiveWordRedactionEnabled)
+            DemoSettingsStore.saveCustomOfflineModelBaseURLEnabled(
+                context,
+                target.customOfflineModelBaseURLEnabled,
+            )
+            DemoSettingsStore.saveOfflineModelBaseURL(context, target.offlineModelBaseURLInput)
             runCatching {
                 TmkTranslationSDK.destroy()
                 TmkTranslationSDK.sdkInit(context.applicationContext, SampleSdkConfig.globalConfig(context))
@@ -174,6 +195,7 @@ class SettingsScreen : Screen {
                         onlineEngineStatus = snapshot.online
                         offlineEngineStatus = snapshot.offline
                         persisted = target
+                        activeOfflineModelSource = DemoOfflineModelSourceInspector.current(context)
                         isApplying = false
                         Toast.makeText(context, "设置已应用", Toast.LENGTH_SHORT).show()
                     }
@@ -347,6 +369,153 @@ class SettingsScreen : Screen {
                     }
                 }
             }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 14.dp),
+            ) {
+                Text("离线模型下载源", fontSize = 14.sp, color = TextColor)
+                Text("进入离线翻译时按已应用的选项加载", fontSize = 11.sp, color = TextDim)
+                Spacer(Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .selectableGroup(),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectable(
+                                selected = !draft.customOfflineModelBaseURLEnabled,
+                                onClick = {
+                                    offlineModelProbeResult = null
+                                    draft = draft.copy(customOfflineModelBaseURLEnabled = false)
+                                },
+                                role = Role.RadioButton,
+                            )
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = !draft.customOfflineModelBaseURLEnabled,
+                            onClick = null,
+                            colors = RadioButtonDefaults.colors(
+                                selectedColor = PrimaryLight,
+                                unselectedColor = TextDim,
+                            ),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column {
+                            Text("默认", fontSize = 13.sp, color = TextColor)
+                            Text("不设置 URL，使用 SDK 内置下载源", fontSize = 11.sp, color = TextDim)
+                        }
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectable(
+                                selected = draft.customOfflineModelBaseURLEnabled,
+                                onClick = {
+                                    offlineModelProbeResult = null
+                                    draft = draft.copy(customOfflineModelBaseURLEnabled = true)
+                                },
+                                role = Role.RadioButton,
+                            )
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = draft.customOfflineModelBaseURLEnabled,
+                            onClick = null,
+                            colors = RadioButtonDefaults.colors(
+                                selectedColor = PrimaryLight,
+                                unselectedColor = TextDim,
+                            ),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column {
+                            Text("自定义 URL", fontSize = 13.sp, color = TextColor)
+                            Text("使用指定的 HTTP/HTTPS 模型仓库根地址", fontSize = 11.sp, color = TextDim)
+                        }
+                    }
+                }
+                if (draft.customOfflineModelBaseURLEnabled) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = draft.offlineModelBaseURLInput,
+                        onValueChange = {
+                            offlineModelProbeResult = null
+                            draft = draft.copy(offlineModelBaseURLInput = it)
+                        },
+                        singleLine = true,
+                        isError = !isOfflineModelBaseURLValid,
+                        placeholder = { Text("http://192.168.0.56:9999/tmk-models/v3.3/") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .bringIntoViewRequester(offlineModelURLBringIntoViewRequester)
+                            .onFocusChanged { focusState ->
+                                if (focusState.isFocused) {
+                                    scope.launch { offlineModelURLBringIntoViewRequester.bringIntoView() }
+                                }
+                            },
+                        textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, color = Color.White),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            errorTextColor = Color.White,
+                            cursorColor = PrimaryLight,
+                            errorCursorColor = PrimaryLight,
+                            focusedBorderColor = if (isOfflineModelBaseURLValid) PrimaryLight else DangerColor,
+                            unfocusedBorderColor = if (isOfflineModelBaseURLValid) BorderColor else DangerColor,
+                            errorBorderColor = DangerColor,
+                        ),
+                    )
+                    if (!isOfflineModelBaseURLValid) {
+                        Spacer(Modifier.height(6.dp))
+                        Text("请输入 HTTP/HTTPS 模型仓库根地址", color = DangerColor, fontSize = 11.sp)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            probingOfflineModelURL = true
+                            offlineModelProbeResult = null
+                            scope.launch {
+                                val result = DemoOfflineModelSourceInspector.probe(
+                                    draft.offlineModelBaseURLInput,
+                                )
+                                offlineModelProbeResult = result
+                                probingOfflineModelURL = false
+                                Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        enabled = isOfflineModelBaseURLValid && !probingOfflineModelURL,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(if (probingOfflineModelURL) "检测中..." else "检测地址")
+                    }
+                    offlineModelProbeResult?.let { result ->
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            result.message,
+                            color = if (result.available) OnlineColor else DangerColor,
+                            fontSize = 11.sp,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "当前实际生效：${activeOfflineModelSource.summary}",
+                    color = TextDim,
+                    fontSize = 11.sp,
+                )
+                Text(
+                    "地址检测仅验证仓库连通性；模型包校验成功后才会替换对应旧资源",
+                    color = TextDim,
+                    fontSize = 10.sp,
+                )
+            }
+            HorizontalDivider(color = BorderColor, thickness = 0.5.dp)
 
             Spacer(Modifier.height(24.dp))
 
@@ -447,6 +616,8 @@ private data class DemoDraftConfig(
     val customBaseURLEnabled: Boolean,
     val customBaseURLInput: String,
     val sensitiveWordRedactionEnabled: Boolean,
+    val customOfflineModelBaseURLEnabled: Boolean,
+    val offlineModelBaseURLInput: String,
 )
 
 private suspend fun exportDiagnosisZip(context: Context): File = withContext(Dispatchers.IO) {

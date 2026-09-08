@@ -101,6 +101,8 @@ final class Offline1V1ViewModel: NSObject {
     @Published private(set) var modelPackageInfos: [TmkOfflineModelPackageInfo] = []
     @Published private(set) var supportedLanguages: [OfflineOneToOneLanguageOption] = []
     let runtimePrompt = PassthroughSubject<DemoConversationPrompt, Never>()
+    let offlineModelEntryMessage = PassthroughSubject<String, Never>()
+    let offlineModelDownloadFailureMessage = PassthroughSubject<String, Never>()
     /// 切语言/升档预检未就绪时的"待下载确认"提示;Controller 订阅到即弹确认框。
     let pendingDownloadPrompt = PassthroughSubject<OfflinePendingDownloadPrompt, Never>()
 
@@ -113,9 +115,11 @@ final class Offline1V1ViewModel: NSObject {
             self?.extractChannel(from: result)
         },
         onPlaybackChannelsChanged: { [weak self] channels in
-            guard let self, self.lastPlaybackChannels != channels else { return }
-            self.lastPlaybackChannels = channels
-            self.updateStateOnMain { $0.playbackChannels = channels }
+            DispatchQueue.main.async {
+                guard let self, self.lastPlaybackChannels != channels else { return }
+                self.lastPlaybackChannels = channels
+                self.updateStateOnMain { $0.playbackChannels = channels }
+            }
         }
     )
     /// 当前待下载信息(引导下载场景):点"下载"时按此下差量包,点"取消"时清空。
@@ -128,7 +132,8 @@ final class Offline1V1ViewModel: NSObject {
     private var rows: [OneToOneRowViewData] = []
     private var bubbleIndexMap: [String: Int] = [:]
     private var bubbleLaneMap: [String: OneToOneRowViewData.Lane] = [:]
-    private let bubbleAssembler = DemoConversationBubbleAssembler()
+    private let bubbleAssembler = DemoConversationBubbleAssembler(maxRows: 20,
+                                                                   translationAssemblyMode: .offlineCumulative)
     private var pendingRowsPublishWorkItem: DispatchWorkItem?
     private var lastPublishedRows: [OneToOneRowViewData] = []
     private var selectedSourceLang = "zh"
@@ -143,7 +148,7 @@ final class Offline1V1ViewModel: NSObject {
     /// 能力档位：默认 toSpeech（完整链路）。
     @Published private(set) var selectedScenarioOption: OfflineScenarioOption = .defaultOption
     private var selectedChannelModeConfiguration: OneToOneChannelModeConfiguration = OneToOneStandardChannelModeConfiguration()
-    private let maxDisplayedRows = 200
+    private var maxDisplayedRows = 20
     private var downloadStatusHeader = ""
 
     private let stateLock = NSLock()
@@ -188,6 +193,9 @@ final class Offline1V1ViewModel: NSObject {
     }
 
     func onViewDidLoad() {
+        let modelMessage = DemoOfflineModelSourceInspector.current().entryMessage
+        NSLog("[Offline1V1] %@", modelMessage)
+        offlineModelEntryMessage.send(modelMessage)
         loadOfflineSupportedLanguages()
         updateStateOnMain {
             $0.sourceLanguage = self.selectedSourceLang
@@ -651,6 +659,19 @@ final class Offline1V1ViewModel: NSObject {
     }
 }
 
+extension Offline1V1ViewModel {
+    /// 供页面设置菜单展示当前临时保留数量。
+    func currentBubbleRetentionLimit() -> Int { maxDisplayedRows }
+
+    /// 仅作用于当前页面实例；确认后立即裁剪最旧气泡。
+    func setBubbleRetentionLimit(_ limit: Int) {
+        maxDisplayedRows = min(max(limit, DemoConversationBubbleAssembler.minimumMaxRows), DemoConversationBubbleAssembler.maximumMaxRows)
+        _ = bubbleAssembler.setMaxRows(maxDisplayedRows)
+        trimRowsIfNeeded()
+        publishRows()
+    }
+}
+
 private extension Offline1V1ViewModel {
     var channelModeConfiguration: OneToOneChannelModeConfiguration {
         selectedChannelModeConfiguration
@@ -782,6 +803,7 @@ private extension Offline1V1ViewModel {
             .setPCMSampleRate(16_000)
             .setPCMChannels(channelModeConfiguration.pcmChannels)
             .setChannelAudioMode(channelAudioMode)
+            .setTTSAudioCallbackThread(.background)
             .setModelRootDirectory(modelRootDirectory)
             .setTranslateMode(selectedTranslateMode)
             .setCapabilityTier(selectedScenarioOption.roomScenario)
@@ -1035,7 +1057,7 @@ private extension Offline1V1ViewModel {
         }
     }
 
-    func normalizedConversationEvent(from event: DemoConversationEvent,
+    internal func normalizedConversationEvent(from event: DemoConversationEvent,
                                      explicitLane: OneToOneRowViewData.Lane?) -> DemoConversationEvent {
         let lane = resolveLane(bubbleId: event.bubbleId,
                                sessionId: event.sessionId,
@@ -1052,7 +1074,12 @@ private extension Offline1V1ViewModel {
                                      text: event.text,
                                      sourceLangCode: languagePair.source,
                                      targetLangCode: languagePair.target,
-                                     chunkId: event.chunkId)
+                                     chunkId: event.chunkId,
+                                     translationSegmentText: event.translationSegmentText,
+                                     sourceSegmentText: event.sourceSegmentText,
+                                     sentenceState: event.sentenceState,
+                                     offset: event.offset,
+                                     duration: event.duration)
     }
 
     func sourceLanguagePrefix() -> String {
@@ -1233,6 +1260,11 @@ extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadLi
     }
 
     func onOfflineModelError(_ error: TmkTranslationError) {
+        let message = "离线模型下载失败：[\(error.code)] \(error.message)"
+        NSLog("[Offline1V1] %@", message)
+        DispatchQueue.main.async {
+            self.offlineModelDownloadFailureMessage.send(message)
+        }
         onError(error)
     }
 

@@ -3,6 +3,7 @@ package co.timekettle.translation.sample
 import android.content.Context
 import co.timekettle.translation.config.TmkDiagnosisLevel
 import co.timekettle.translation.config.TmkTranslationNetworkEnvironment
+import co.timekettle.translation.config.TmkOfflineModelEndpointConfig
 import java.net.URI
 
 object DemoSettingsStore {
@@ -15,6 +16,8 @@ object DemoSettingsStore {
     private const val KEY_DIAGNOSIS_AUDIO_CAPTURE_ENABLED = "diagnosis_audio_capture_enabled"
     private const val KEY_CONSOLE_LOG_ENABLED = "console_log_enabled"
     private const val KEY_SENSITIVE_WORD_REDACTION_ENABLED = "sensitive_word_redaction_enabled"
+    private const val KEY_CUSTOM_OFFLINE_MODEL_BASE_URL_ENABLED = "custom_offline_model_base_url_enabled"
+    private const val KEY_OFFLINE_MODEL_BASE_URL = "offline_model_base_url"
     const val RAYNEO_NETWORK_BASE_URL = "https://api-rayneo.timekettle.co"
 
     val supportedNetworkEnvironments = listOf(
@@ -143,6 +146,45 @@ object DemoSettingsStore {
             .apply()
     }
 
+    fun loadOfflineModelBaseURL(context: Context): String? {
+        val raw = context.applicationContext
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_OFFLINE_MODEL_BASE_URL, null)
+        return normalizeOfflineModelBaseURL(raw)
+    }
+
+    fun loadCustomOfflineModelBaseURLEnabled(context: Context): Boolean {
+        val preferences = context.applicationContext
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        // 兼容升级前已保存 URL 的测试设备：首次升级时继续按自定义模式使用。
+        return if (preferences.contains(KEY_CUSTOM_OFFLINE_MODEL_BASE_URL_ENABLED)) {
+            preferences.getBoolean(KEY_CUSTOM_OFFLINE_MODEL_BASE_URL_ENABLED, false)
+        } else {
+            normalizeOfflineModelBaseURL(preferences.getString(KEY_OFFLINE_MODEL_BASE_URL, null)) != null
+        }
+    }
+
+    fun saveCustomOfflineModelBaseURLEnabled(context: Context, enabled: Boolean) {
+        context.applicationContext
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_CUSTOM_OFFLINE_MODEL_BASE_URL_ENABLED, enabled)
+            .apply()
+    }
+
+    fun saveOfflineModelBaseURL(context: Context, url: String?) {
+        val normalized = normalizeOfflineModelBaseURL(url)
+        val editor = context.applicationContext
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit()
+        if (normalized == null) {
+            editor.remove(KEY_OFFLINE_MODEL_BASE_URL)
+        } else {
+            editor.putString(KEY_OFFLINE_MODEL_BASE_URL, normalized)
+        }
+        editor.apply()
+    }
+
     fun parseNetworkEnvironment(raw: String?): TmkTranslationNetworkEnvironment {
         val normalized = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return TmkTranslationNetworkEnvironment.TEST
         return supportedNetworkEnvironments.firstOrNull { it.name.equals(normalized, ignoreCase = true) }
@@ -164,5 +206,13 @@ object DemoSettingsStore {
         if (!uri.rawPath.isNullOrBlank()) return null
         if (!uri.rawQuery.isNullOrBlank() || !uri.rawFragment.isNullOrBlank()) return null
         return trimmed
+    }
+
+    fun normalizeOfflineModelBaseURL(raw: String?): String? =
+        TmkOfflineModelEndpointConfig.normalizeBaseURL(raw)
+
+    /** 默认模式或异常的自定义配置都返回 null，让 SDK 沿用内置下载源。 */
+    fun resolveOfflineModelBaseURL(customEnabled: Boolean, raw: String?): String? {
+        return if (customEnabled) normalizeOfflineModelBaseURL(raw) else null
     }
 }

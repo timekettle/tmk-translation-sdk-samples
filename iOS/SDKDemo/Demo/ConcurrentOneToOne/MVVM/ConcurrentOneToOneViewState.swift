@@ -19,5 +19,6 @@ struct ConcurrentOneToOneViewState {
     var offlineCanRetry = false
     var canStart = false
     var isRunning = false
+    var bubbleRetentionLimit = 20
     var rows: [ConcurrentConversationMapper.Row] = []
 }

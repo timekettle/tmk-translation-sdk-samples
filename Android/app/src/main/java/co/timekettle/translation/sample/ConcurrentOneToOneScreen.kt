@@ -63,15 +63,19 @@ data class ConcurrentOneToOneScreen(
         val navigator = LocalNavigator.currentOrThrow
         val viewModel: ConcurrentOneToOneViewModel = getViewModel()
         val state by viewModel.state.collectAsState()
+        val memoryMonitor = rememberDemoAppMemoryMonitor("concurrent_one_to_one", visibleByDefault = true)
 
         LaunchedEffect(viewModel, leftLang, rightLang) { viewModel.prepare(leftLang, rightLang) }
+        LaunchedEffect(state.canStart) { if (state.canStart) memoryMonitor.markRuntimeReady() }
         BackHandler { viewModel.release(); navigator.pop() }
         DisposableEffect(viewModel) { onDispose { viewModel.release() } }
+        DemoAppMemoryOverlay(memoryMonitor)
 
         var controlsExpanded by rememberSaveable { mutableStateOf(true) }
         var settingsExpanded by rememberSaveable { mutableStateOf(false) }
         var showTtsSourceDialog by rememberSaveable { mutableStateOf(false) }
         var showPlaybackModeDialog by rememberSaveable { mutableStateOf(false) }
+        var showBubbleRetentionLimitDialog by rememberSaveable { mutableStateOf(false) }
         Column(Modifier.fillMaxSize().padding(16.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -95,6 +99,13 @@ data class ConcurrentOneToOneScreen(
                         onDismissRequest = { settingsExpanded = false },
                     ) {
                         DropdownMenuItem(
+                            text = { Text("保留气泡数量：${state.bubbleRetentionLimit}") },
+                            onClick = {
+                                settingsExpanded = false
+                                showBubbleRetentionLimitDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
                             text = { Text("TTS 来源") },
                             onClick = {
                                 settingsExpanded = false
@@ -108,6 +119,7 @@ data class ConcurrentOneToOneScreen(
                                 showPlaybackModeDialog = true
                             },
                         )
+                        DemoMemoryMonitorSettingsItem(memoryMonitor) { settingsExpanded = false }
                     }
                 }
             }
@@ -166,8 +178,8 @@ data class ConcurrentOneToOneScreen(
                     ) { Text(if (state.isModelDownloading) "下载中..." else "下载离线模型") }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = viewModel::start, enabled = state.canStart && !state.isRunning, modifier = Modifier.weight(1f)) { Text("开始并发翻译") }
-                    OutlinedButton(onClick = viewModel::stop, enabled = state.isRunning, modifier = Modifier.weight(1f)) { Text("停止") }
+                    Button(onClick = { memoryMonitor.markRunStarted(); viewModel.start() }, enabled = state.canStart && !state.isRunning, modifier = Modifier.weight(1f)) { Text("开始并发翻译") }
+                    OutlinedButton(onClick = { memoryMonitor.markRunStopped(); viewModel.stop() }, enabled = state.isRunning, modifier = Modifier.weight(1f)) { Text("停止") }
                 }
                 Text("采集：${state.captureStatus}", modifier = Modifier.padding(vertical = 4.dp), style = MaterialTheme.typography.bodySmall)
             }
@@ -199,6 +211,16 @@ data class ConcurrentOneToOneScreen(
                 onConfirm = {
                     showTtsSourceDialog = false
                     viewModel.selectTtsSource(it)
+                },
+            )
+        }
+        if (showBubbleRetentionLimitDialog) {
+            BubbleRetentionLimitDialog(
+                initialLimit = state.bubbleRetentionLimit,
+                onDismiss = { showBubbleRetentionLimitDialog = false },
+                onConfirm = {
+                    showBubbleRetentionLimitDialog = false
+                    viewModel.setBubbleRetentionLimit(it)
                 },
             )
         }

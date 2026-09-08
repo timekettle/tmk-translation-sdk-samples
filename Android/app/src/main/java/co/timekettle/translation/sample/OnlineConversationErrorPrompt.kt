@@ -27,6 +27,17 @@ object OnlineConversationErrorPrompts {
         )
     }
 
+    /** 重连观察超过一分钟仍未恢复时的非终态提示；用户可重建或继续等待。 */
+    fun fromReconnectTimeout(): OnlineConversationErrorPrompt {
+        return OnlineConversationErrorPrompt(
+            id = "reconnect_timeout",
+            title = "连接恢复超时",
+            message = "连接已断开，正在尝试自动恢复，但暂未恢复。你可以立即重新创建房间，也可以继续等待自动重连。",
+            restartText = "重新创建",
+            leaveText = "继续等待",
+        )
+    }
+
     fun fromSnapshot(
         snapshot: TmkTranslationChannelStateSnapshot,
         mode: RuntimeMode = RuntimeMode.ONLINE,

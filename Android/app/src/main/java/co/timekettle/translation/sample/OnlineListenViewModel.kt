@@ -6,6 +6,8 @@ import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -13,7 +15,6 @@ import androidx.lifecycle.ViewModel
 import co.timekettle.translation.Cancelable
 import co.timekettle.translation.TmkTranslationChannel
 import co.timekettle.translation.TmkTranslationSDK
-import co.timekettle.offlinesdk.vad.VadDetector
 import co.timekettle.translation.config.TmkCreateChannelOptions
 import co.timekettle.translation.config.TmkTransChannelConfig
 import co.timekettle.translation.config.TmkTransGlobalConfig
@@ -53,6 +54,7 @@ class OnlineListenViewModel @Inject constructor(
 
     companion object {
         private const val TAG = "OnlineListenVM"
+        private const val DEFAULT_BUBBLE_RETENTION_LIMIT = 10
         private const val SAMPLE_RATE = 16000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
@@ -81,8 +83,9 @@ class OnlineListenViewModel @Inject constructor(
         sampleRate = SAMPLE_RATE,
         onPlaybackChannelsChanged = { _playbackChannels.value = it },
     )
-    private var vadDetector: VadDetector? = null
-    private val bubbleAssembler = DemoConversationBubbleAssembler()
+    private val bubbleAssembler = DemoConversationBubbleAssembler(maxRows = DEFAULT_BUBBLE_RETENTION_LIMIT)
+    private val _bubbleRetentionLimit = MutableStateFlow(DEFAULT_BUBBLE_RETENTION_LIMIT)
+    val bubbleRetentionLimit: StateFlow<Int> = _bubbleRetentionLimit.asStateFlow()
     /**
      * 当前每个 channel 应高亮的 session_id（源文蓝色），由 online_tts_state.is_end 控制。
      * 同一 channel 永远只有一段文本在高亮，用 Map<channel, sessionId> 保证唯一性。
@@ -95,6 +98,16 @@ class OnlineListenViewModel @Inject constructor(
      */
     private val blueChunkByChannel = mutableMapOf<String, String>()
     private val networkEventPolicy = DemoOnlineNetworkEventPolicy()
+    private val networkStatsTracker = DemoOnlineNetworkStatsTracker()
+    private val _networkStats =
+        MutableStateFlow(networkStatsTracker.current())
+    val networkStats: StateFlow<DemoOnlineNetworkStatsSnapshot> = _networkStats.asStateFlow()
+    private val bootstrapTracker = DemoBootstrapPipelineTracker()
+    private val _bootstrapStats = MutableStateFlow(bootstrapTracker.current())
+    val bootstrapStats: StateFlow<DemoBootstrapSnapshot> = _bootstrapStats.asStateFlow()
+    private val wifiSpeedProbe = DemoWifiSpeedProbe()
+    private val _wifiSpeed = MutableStateFlow(DemoWifiSpeedSnapshot())
+    val wifiSpeed: StateFlow<DemoWifiSpeedSnapshot> = _wifiSpeed.asStateFlow()
 
     @Volatile private var isRecording = false
     private val lifecycleGate = DemoConversationLifecycleGate()
@@ -135,6 +148,18 @@ class OnlineListenViewModel @Inject constructor(
     val remoteCloseRoomPromptVisible: StateFlow<Boolean> = _remoteCloseRoomPromptVisible.asStateFlow()
     private val _conversationErrorPrompt = MutableStateFlow<OnlineConversationErrorPrompt?>(null)
     val conversationErrorPrompt: StateFlow<OnlineConversationErrorPrompt?> = _conversationErrorPrompt.asStateFlow()
+    private val reconnectTimeoutHandler = Handler(Looper.getMainLooper())
+    private var reconnectTimeoutTask: Runnable? = null
+    private val reconnectTimeoutMonitor = DemoReconnectTimeoutMonitor(
+        schedule = { delayMs, task ->
+            reconnectTimeoutTask = Runnable(task)
+            reconnectTimeoutHandler.postDelayed(reconnectTimeoutTask!!, delayMs)
+        },
+        cancelScheduled = {
+            reconnectTimeoutTask?.let(reconnectTimeoutHandler::removeCallbacks)
+            reconnectTimeoutTask = null
+        },
+    )
     private val _currentRoomNo = MutableStateFlow("-")
     val currentRoomNo: StateFlow<String> = _currentRoomNo.asStateFlow()
     private val _captureSampleRate = MutableStateFlow(0)
@@ -158,7 +183,7 @@ class OnlineListenViewModel @Inject constructor(
     private val _roomScenarioOption = MutableStateFlow(OnlineRoomScenarioOption.defaultOption)
     val roomScenarioOption: StateFlow<OnlineRoomScenarioOption> = _roomScenarioOption.asStateFlow()
     private var hasLockedLanguages = false
-    /** 待对齐语言:通道未就绪/下发中时记账,就绪后与服务端建房语言比对补发。仅主线程访问。 */
+    /** 待对齐语言：建房/入会中或已有请求下发中时只保留最新选择。仅主线程访问。 */
     private var pendingSourceLang: String? = null
     private var pendingTargetLang: String? = null
 
@@ -170,6 +195,13 @@ class OnlineListenViewModel @Inject constructor(
         _bubbles.value = bubbleAssembler.snapshotWithSegments().map { snapshot ->
             DemoConversationHighlighter.applyHighlight(snapshot, blueSessions, blueChunks)
         }
+    }
+
+    fun setBubbleRetentionLimit(limit: Int) {
+        val bounded = limit.coerceIn(DemoConversationBubbleAssembler.MIN_MAX_ROWS, DemoConversationBubbleAssembler.MAX_MAX_ROWS)
+        bubbleAssembler.setMaxRows(bounded)
+        _bubbleRetentionLimit.value = bounded
+        publishBubbles()
     }
 
     /**
@@ -257,30 +289,60 @@ class OnlineListenViewModel @Inject constructor(
     }
 
     private fun applySdkChannelSnapshot(snapshot: TmkTranslationChannelStateSnapshot) {
+        val previousState = _channelState.value.state
         _channelState.value = snapshot
+        reconnectTimeoutMonitor.onStateChanged(snapshot.state) {
+            if (_channelState.value.state == TmkTranslationChannelState.RECONNECTING &&
+                _conversationErrorPrompt.value == null &&
+                !_remoteCloseRoomPromptVisible.value
+            ) {
+                _conversationErrorPrompt.value = OnlineConversationErrorPrompts.fromReconnectTimeout()
+            }
+        }
+        if (snapshot.state != TmkTranslationChannelState.RECONNECTING &&
+            _conversationErrorPrompt.value?.id == "reconnect_timeout"
+        ) {
+            _conversationErrorPrompt.value = null
+        }
         _isStarting.value = when (snapshot.state) {
             TmkTranslationChannelState.STARTING,
             TmkTranslationChannelState.RECONNECTING -> true
             else -> false
         }
         refreshChannelReadyFromState()
-        applyRuntimeAction(DemoConversationRuntimePolicy.action(snapshot))
+        applyRuntimeAction(
+            DemoConversationRuntimePolicy.action(
+                snapshot = snapshot,
+                previousState = previousState,
+            )
+        )
         // 通道进入可用态:补发建房窗口内积压的语言变更(见 bug 7024923916)。
         when (snapshot.state) {
             TmkTranslationChannelState.RUNNING,
-            TmkTranslationChannelState.DEGRADED ->
+            TmkTranslationChannelState.DEGRADED -> {
+                publishBootstrap(bootstrapTracker.completeChannelReady())
                 reconcilePendingLocaleIfNeeded(pageSessionId.get())
+            }
             else -> Unit
         }
 
         when (snapshot.state) {
             TmkTranslationChannelState.STOPPING -> {
+                // 避免浮窗在 STOPPING/STOPPED/FAILED 后仍展示上一轮“网络良好”的旧 QoS 数据。
+                resetNetworkStats()
                 if (_isStarted.value) stopListening()
             }
             TmkTranslationChannelState.STOPPED -> {
+                // 避免浮窗在 STOPPING/STOPPED/FAILED 后仍展示上一轮“网络良好”的旧 QoS 数据。
+                resetNetworkStats()
                 if (_isStarted.value) stopListening()
             }
             TmkTranslationChannelState.FAILED -> {
+                // 避免浮窗在 STOPPING/STOPPED/FAILED 后仍展示上一轮“网络良好”的旧 QoS 数据。
+                resetNetworkStats()
+                if (_bootstrapStats.value.isRunning) {
+                    publishBootstrap(bootstrapTracker.fail(DemoBootstrapStage.CHANNEL_READY))
+                }
                 if (_isStarted.value) stopListening()
                 showConversationErrorPrompt(OnlineConversationErrorPrompts.fromSnapshot(snapshot))
             }
@@ -305,6 +367,10 @@ class OnlineListenViewModel @Inject constructor(
 
     private fun showConversationErrorPrompt(prompt: OnlineConversationErrorPrompt?) {
         if (prompt == null || _conversationErrorPrompt.value?.id == prompt.id) return
+        if (prompt.id != "reconnect_timeout") {
+            reconnectTimeoutMonitor.cancel()
+            _conversationErrorPrompt.value = null
+        }
         _conversationErrorPrompt.value = prompt
     }
 
@@ -319,6 +385,7 @@ class OnlineListenViewModel @Inject constructor(
                 _initErrorMessage.value = null
                 log("SDK 初始化完成")
             }
+            startWifiSpeedProbe()
             prepareChannelIfNeeded(pageSessionId.get())
         } catch (e: Exception) {
             log("SDK 初始化异常: ${e.message}")
@@ -357,11 +424,13 @@ class OnlineListenViewModel @Inject constructor(
         if (!DemoConversationPreparationPolicy.canPrepare(lifecycleGate.isReleased(), channel != null)) return
         if (!isPreparingChannel.compareAndSet(false, true)) return
         val startupTiming = StartupTiming()
+        publishBootstrap(bootstrapTracker.begin(DemoBootstrapStage.AUTH))
         _statusText.value = "正在鉴权..."
         log("开始鉴权...")
         TmkTranslationSDK.verifyAuth(object : AuthCallback {
             override fun onSuccess() {
                 if (!isActiveSession(sessionId)) { isPreparingChannel.set(false); return }
+                publishBootstrap(bootstrapTracker.complete(DemoBootstrapStage.AUTH))
                 _statusText.value = "鉴权成功，准备创建房间..."
                 log("启动翻译耗时 鉴权耗时 authDurationMs=${startupTiming.durationSince(startupTiming.authStartedAtMs)} result=success")
                 log("鉴权成功"); doStart(sessionId, startupTiming)
@@ -370,6 +439,7 @@ class OnlineListenViewModel @Inject constructor(
                 isPreparingChannel.set(false)
                 if (!isActiveSession(sessionId)) return
                 log("启动翻译耗时 鉴权耗时 authDurationMs=${startupTiming.durationSince(startupTiming.authStartedAtMs)} totalDurationMs=${startupTiming.totalDurationMs()} result=failure")
+                publishBootstrap(bootstrapTracker.fail(DemoBootstrapStage.AUTH))
                 log("鉴权失败: [$errorId] ${e.message}")
                 _statusText.value = "鉴权失败: ${e.message}"
                 showConversationErrorPrompt(OnlineConversationErrorPrompts.fromException(errorId, e))
@@ -378,6 +448,7 @@ class OnlineListenViewModel @Inject constructor(
     }
 
     private fun doStart(sessionId: Int, startupTiming: StartupTiming) {
+        publishBootstrap(bootstrapTracker.begin(DemoBootstrapStage.CREATE_ROOM))
         _statusText.value = "正在创建房间..."
         roomCancelable?.cancel()
         startupTiming.roomStartedAtMs = SystemClock.elapsedRealtime()
@@ -389,12 +460,14 @@ class OnlineListenViewModel @Inject constructor(
                     isPreparingChannel.set(false)
                     return
                 }
+                publishBootstrap(bootstrapTracker.complete(DemoBootstrapStage.CREATE_ROOM))
                 this@OnlineListenViewModel.room = room
                 _currentRoomNo.value = room.roomId
                 _statusText.value = "房间已创建，正在创建通道..."
                 log("启动翻译耗时 创建房间耗时 roomDurationMs=${startupTiming.durationSince(startupTiming.roomStartedAtMs)} result=success")
                 log("创建房间成功: ${room.roomId}")
                 val cfg = buildOnlineChannelConfig(room)
+                publishBootstrap(bootstrapTracker.begin(DemoBootstrapStage.CREATE_CHANNEL))
                 channelCancelable?.cancel()
                 startupTiming.channelStartedAtMs = SystemClock.elapsedRealtime()
                 channelCancelable = TmkTranslationSDK.createTranslationChannel(application, cfg, listener, object : CreateChannelCallback {
@@ -406,7 +479,11 @@ class OnlineListenViewModel @Inject constructor(
                             return
                         }
                         channel = ch
+                        publishBootstrap(bootstrapTracker.beginChannelReady())
                         refreshChannelReadyFromState()
+                        if (isSdkChannelReady()) {
+                            publishBootstrap(bootstrapTracker.completeChannelReady())
+                        }
                         isPreparingChannel.set(false)
                         log("启动翻译耗时 加入通道耗时 channelDurationMs=${startupTiming.durationSince(startupTiming.channelStartedAtMs)} totalDurationMs=${startupTiming.totalDurationMs()} result=success")
                         log("Channel 已就绪")
@@ -422,6 +499,7 @@ class OnlineListenViewModel @Inject constructor(
                         isPreparingChannel.set(false)
                         if (!isActiveSession(sessionId)) return
                         log("启动翻译耗时 加入通道耗时 channelDurationMs=${startupTiming.durationSince(startupTiming.channelStartedAtMs)} totalDurationMs=${startupTiming.totalDurationMs()} result=failure")
+                        publishBootstrap(bootstrapTracker.fail(DemoBootstrapStage.CREATE_CHANNEL))
                         log("创建 Channel 失败: [$errorId] ${e.message}")
                         _statusText.value = "通道启动失败: ${e.message}"
                         showConversationErrorPrompt(OnlineConversationErrorPrompts.fromException(errorId, e))
@@ -433,6 +511,7 @@ class OnlineListenViewModel @Inject constructor(
                 isPreparingChannel.set(false)
                 if (!isActiveSession(sessionId)) return
                 log("启动翻译耗时 创建房间耗时 roomDurationMs=${startupTiming.durationSince(startupTiming.roomStartedAtMs)} totalDurationMs=${startupTiming.totalDurationMs()} result=failure")
+                publishBootstrap(bootstrapTracker.fail(DemoBootstrapStage.CREATE_ROOM))
                 log("创建房间失败: [$errorId] ${e.message}")
                 _statusText.value = "房间创建失败: ${e.message}"
                 showConversationErrorPrompt(OnlineConversationErrorPrompts.fromException(errorId, e))
@@ -481,8 +560,8 @@ class OnlineListenViewModel @Inject constructor(
     fun updateRoomLocale(sourceLang: String, targetLang: String) {
         val sessionId = pageSessionId.get()
         val currentRoom = room
-        if (currentRoom == null || channel == null || !isSdkChannelReady()) {
-            // 通道未就绪:记账并更新 UI,待就绪后由 reconcilePendingLocaleIfNeeded 同步到服务端,不丢失变更。
+        if (currentRoom == null || channel == null) {
+            // 建房/入会窗口内先记账，待 room/channel 创建完成后同步到服务端。
             pendingSourceLang = sourceLang
             pendingTargetLang = targetLang
             _sourceLang.value = sourceLang
@@ -491,16 +570,36 @@ class OnlineListenViewModel @Inject constructor(
             log("语言已设置为 $sourceLang -> $targetLang，将在通道就绪后同步到房间")
             return
         }
-        if (_isLocaleUpdating.value) {
-            // 正在下发:并入 pending,完成后由 reconcile 收敛,避免并发下发。
-            pendingSourceLang = sourceLang
-            pendingTargetLang = targetLang
-            return
+
+        when (DemoRoomLocaleUpdatePolicy.action(_channelState.value.state, _isLocaleUpdating.value)) {
+            DemoRoomLocaleUpdateAction.SUBMIT -> {
+                // 当前选择是最新意图：丢弃 STARTING 等阶段遗留的旧 pending，
+                // 避免本次请求完成后 reconcile 又补发旧语言并回退 UI。
+                pendingSourceLang = null
+                pendingTargetLang = null
+                submitRoomLocale(currentRoom, sessionId, sourceLang, targetLang)
+            }
+            DemoRoomLocaleUpdateAction.QUEUE_UNTIL_READY -> {
+                pendingSourceLang = sourceLang
+                pendingTargetLang = targetLang
+                _sourceLang.value = sourceLang
+                _targetLang.value = targetLang
+                _statusText.value = "语言已切换，将在通道就绪后同步到房间"
+                log("语言已设置为 $sourceLang -> $targetLang，将在通道就绪后同步到房间")
+            }
+            DemoRoomLocaleUpdateAction.QUEUE_LATEST -> {
+                // 正在下发:只保留最新一次选择，上一笔结束后继续提交。
+                pendingSourceLang = sourceLang
+                pendingTargetLang = targetLang
+            }
+            DemoRoomLocaleUpdateAction.REJECT -> {
+                _statusText.value = "当前通道不可用，请重新创建后再切换语言"
+                log("忽略语言切换: channel=${_channelState.value.state.rawValue}")
+            }
         }
-        submitRoomLocale(currentRoom, sessionId, sourceLang, targetLang)
     }
 
-    /** 向服务端下发房间语言;成功后回写 UI 并尝试收敛 pending。 */
+    /** 向服务端下发房间语言；完成后回写 UI 并尝试收敛 pending。 */
     private fun submitRoomLocale(
         currentRoom: TmkTranslationRoom,
         sessionId: Int,
@@ -530,16 +629,17 @@ class OnlineListenViewModel @Inject constructor(
                     _isLocaleUpdating.value = false
                     _statusText.value = "语言切换失败: ${e.message}"
                     log("语言切换失败: [$errorId] ${e.message}")
-                    // 失败保留 pending,留待下次就绪/手动重试,不自动重试以免雪崩。
+                    // 若上一笔下发期间用户又选了语言，继续提交最新一次选择；不重试失败的旧请求。
+                    reconcilePendingLocaleIfNeeded(sessionId)
                 }
             }
         )
     }
 
     /**
-     * 通道就绪后补发「积压的语言切换」。
+     * 提交「积压的语言切换」。
      *
-     * 仅处理 pending(通道未就绪 / 上一笔下发进行中时累积的切换),把它下发一次后清空。
+     * 仅处理 pending（建房/入会中或上一笔下发进行中时累积的切换），下发后清空。
      * 不读取建房 translationList 做比较——该值建房后不可变,比较会导致正常切换后无限重发。
      * 「建房语言 != 期望」的兜底由 SDK join 侧负责(只在 join 时触发一次,不会循环)。
      * 仅主线程调用。
@@ -547,14 +647,25 @@ class OnlineListenViewModel @Inject constructor(
     private fun reconcilePendingLocaleIfNeeded(sessionId: Int) {
         if (!isActiveSession(sessionId)) return
         val currentRoom = room ?: return
-        if (channel == null || !isSdkChannelReady() || _isLocaleUpdating.value) return
-
         val target = pendingTargetLang ?: return // 无积压则不动作,避免正常切换后重复下发
         val source = pendingSourceLang ?: _sourceLang.value
-        pendingSourceLang = null
-        pendingTargetLang = null
-        log("补发积压的语言切换: $source -> $target")
-        submitRoomLocale(currentRoom, sessionId, source, target)
+        if (channel == null) return
+
+        when (DemoRoomLocaleUpdatePolicy.action(_channelState.value.state, _isLocaleUpdating.value)) {
+            DemoRoomLocaleUpdateAction.SUBMIT -> {
+                pendingSourceLang = null
+                pendingTargetLang = null
+                log("补发积压的语言切换: $source -> $target")
+                submitRoomLocale(currentRoom, sessionId, source, target)
+            }
+            DemoRoomLocaleUpdateAction.REJECT -> {
+                pendingSourceLang = null
+                pendingTargetLang = null
+                log("丢弃积压的语言切换: channel=${_channelState.value.state.rawValue}")
+            }
+            DemoRoomLocaleUpdateAction.QUEUE_UNTIL_READY,
+            DemoRoomLocaleUpdateAction.QUEUE_LATEST -> Unit
+        }
     }
 
     fun updateTranslateEngine(engine: TmkOnlineTranslateEngine) {
@@ -699,6 +810,12 @@ class OnlineListenViewModel @Inject constructor(
                 )
                 return
             }
+
+        // 先更新宿主侧统计快照：即便后续弱网提示走了 return，也要保证浮窗数据刷新。
+        networkStatsTracker.consume(eventName, args)?.let { snapshot ->
+            _networkStats.value = snapshot
+        }
+
             networkEventPolicy.statusForEvent(eventName, args)?.let { status ->
                 log("网络事件提示: $eventName $status")
                 applyRuntimeAction(DemoConversationRuntimeAction.WeakNetwork(status))
@@ -727,6 +844,7 @@ class OnlineListenViewModel @Inject constructor(
     }
 
     private fun handleRemoteCloseRoom() {
+        reconnectTimeoutMonitor.cancel()
         log("服务端已关闭房间，等待用户确认是否重新创建通道")
         stopTranslation("房间已关闭")
         _remoteCloseRoomPromptVisible.value = true
@@ -734,6 +852,7 @@ class OnlineListenViewModel @Inject constructor(
     }
 
     fun recreateChannelAfterRemoteClose() {
+        reconnectTimeoutMonitor.cancel()
         _remoteCloseRoomPromptVisible.value = false
         _conversationErrorPrompt.value = null
         stopTranslation("正在重新创建通道...")
@@ -767,11 +886,57 @@ class OnlineListenViewModel @Inject constructor(
         _conversationErrorPrompt.value = null
     }
 
+    fun recreateChannelAfterReconnectTimeout() {
+        reconnectTimeoutMonitor.cancel()
+        _conversationErrorPrompt.value = null
+        stopTranslation("正在重新创建通道...")
+        clearConversation()
+        _statusText.value = "正在重新创建通道..."
+        lifecycleGate.reopen()
+        initSDK()
+    }
+
+    fun continueWaitingAfterReconnectTimeout() {
+        _conversationErrorPrompt.value = null
+        reconnectTimeoutMonitor.continueWaiting {
+            if (_channelState.value.state == TmkTranslationChannelState.RECONNECTING &&
+                _conversationErrorPrompt.value == null &&
+                !_remoteCloseRoomPromptVisible.value
+            ) {
+                _conversationErrorPrompt.value = OnlineConversationErrorPrompts.fromReconnectTimeout()
+            }
+        }
+    }
+
     private fun clearConversation() {
         bubbleAssembler.clear()
         blueSessionByChannel.clear()
         blueChunkByChannel.clear()
         _bubbles.value = emptyList()
+        resetNetworkStats()
+    }
+
+    private fun resetNetworkStats() {
+        _networkStats.value = networkStatsTracker.reset()
+    }
+
+    private fun publishBootstrap(snapshot: DemoBootstrapSnapshot) {
+        _bootstrapStats.value = snapshot
+    }
+
+    private fun startWifiSpeedProbe() {
+        val businessBaseUrl = SampleSdkConfig.globalConfig(application).resolvedNetworkBaseURL
+        wifiSpeedProbe.start(businessBaseUrl = businessBaseUrl) { snapshot ->
+            _wifiSpeed.value = snapshot
+        }
+    }
+
+    private fun cancelWifiSpeedProbe() {
+        wifiSpeedProbe.cancel()
+        val current = _wifiSpeed.value
+        if (current.status == DemoWifiSpeedStatus.RUNNING || current.status == DemoWifiSpeedStatus.IDLE) {
+            _wifiSpeed.value = current.copy(status = DemoWifiSpeedStatus.CANCELLED)
+        }
     }
 
     private fun startRecording(): Boolean {
@@ -787,20 +952,12 @@ class OnlineListenViewModel @Inject constructor(
         isRecording = true; audioRecord?.startRecording(); log("录音已开始")
         _captureSampleRate.value = SAMPLE_RATE
         _captureChannels.value = 1
-        vadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
-            setCallback(object : VadDetector.Callback {
-                override fun onVadStart() {
-                    log("VAD → 开始说话")
-                }
-                override fun onVadEnd() { log("VAD → 停止说话") }
-            }); init()
-        }
         recordingThread = Thread({
             val buf = ByteArray(bufferSize)
             while (isRecording && isActiveSession(sessionId)) {
                 val read = audioRecord?.read(buf, 0, buf.size) ?: -1
                 if (read > 0) {
-                    val data = buf.copyOf(read); vadDetector?.pushAudioBytes(data)
+                    val data = buf.copyOf(read)
                     channel?.pushStreamAudioData(data, 1, null)
                 }
             }
@@ -810,8 +967,6 @@ class OnlineListenViewModel @Inject constructor(
 
     fun stopListening() {
         isRecording = false
-        vadDetector?.release()
-        vadDetector = null
         try { audioRecord?.stop(); audioRecord?.release() } catch (_: Exception) {}
         audioRecord = null
         recordingThread?.interrupt()
@@ -822,12 +977,14 @@ class OnlineListenViewModel @Inject constructor(
         _playbackChannels.value = 0
         ttsCoordinator.setActive(false)
         ttsCoordinator.release()
+        resetNetworkStats()
         _isStarted.value = false
         _statusText.value = if (channel != null) "收听已停止" else "已停止"
         log("在线收听已停止采集")
     }
 
     fun stopTranslation(finalStatus: String = "已停止收听") {
+        reconnectTimeoutMonitor.cancel()
         if (!lifecycleGate.tryRelease()) return
         nextPageSession()
         isPreparingChannel.set(false)
@@ -838,6 +995,7 @@ class OnlineListenViewModel @Inject constructor(
         channelCancelable = null
         speakerCancelable?.cancel()
         speakerCancelable = null
+        cancelWifiSpeedProbe()
         stopListening()
         log("录音已停止")
         TmkTranslationSDK.releaseChannel()
@@ -861,5 +1019,9 @@ class OnlineListenViewModel @Inject constructor(
         log("翻译已停止")
     }
 
-    override fun onCleared() { super.onCleared(); stopTranslation() }
+    override fun onCleared() {
+        reconnectTimeoutMonitor.cancel()
+        super.onCleared()
+        stopTranslation()
+    }
 }

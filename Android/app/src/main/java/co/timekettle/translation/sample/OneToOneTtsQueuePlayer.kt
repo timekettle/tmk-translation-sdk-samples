@@ -23,17 +23,28 @@ class OneToOneTtsQueuePlayer(
 ) {
     private data class TtsFrame(val data: ByteArray, val sampleRate: Int, val channelCount: Int)
 
+    /** 每个播放 worker 独占 AudioTrack，stop/start 不会让旧线程访问新 worker 的播放器。 */
+    private class AudioTrackOwner {
+        var track: AudioTrack? = null
+        var sampleRate: Int = 0
+        var channelCount: Int = 0
+    }
+
+    private data class PlaybackWorker(
+        val generation: Long,
+        val thread: Thread,
+    )
+
     private val queueLock = Object()
     private val queue = java.util.ArrayDeque<TtsFrame>()
     private var queuedBytes: Int = 0
     private var queuedChannelCount: Int = 0
     private var queuedSampleRate: Int = 0
-    private var playerThread: Thread? = null
-    @Volatile private var isRunning = false
-
-    private var audioTrack: AudioTrack? = null
-    private var audioTrackSampleRate: Int = 0
-    private var audioTrackChannelCount: Int = 0
+    /** 每次 stop 或创建 worker 都递增，旧线程只能消费自己的代次。 */
+    private var nextWorkerGeneration = 0L
+    private var playerWorker: PlaybackWorker? = null
+    /** 已被 stop 的 worker；新 worker 先等待其释放独占 AudioTrack，避免旧缓冲音频与新音频重叠。 */
+    private val retiredWorkerThreads = java.util.ArrayDeque<Thread>()
 
     /** 送一帧 PCM 去播放(拷贝入队)。channelCount 只区分 1/2；sampleRate 变化时重建 AudioTrack。 */
     fun play(data: ByteArray, channelCount: Int, sampleRate: Int = this.sampleRate) {
@@ -63,56 +74,120 @@ class OneToOneTtsQueuePlayer(
 
     /** 停止播放并释放资源。 */
     fun stop() {
-        synchronized(queueLock) {
-            isRunning = false
+        val threadToInterrupt = synchronized(queueLock) {
+            // 先撤销 worker 所有权，再中断。即使旧线程在 write/wait 后晚醒，也不会重新消费新队列。
+            nextWorkerGeneration += 1
             clearQueueLocked()
             queueLock.notifyAll()
+            val current = playerWorker
+            playerWorker = null
+            current?.thread?.let { retiredWorkerThreads.addLast(it) }
+            pruneRetiredWorkersLocked()
+            current?.thread
         }
-        playerThread?.interrupt()
-        playerThread = null
-        releaseAudioTrack()
+        threadToInterrupt?.interrupt()
     }
 
     private fun ensurePlayerThreadLocked() {
-        if (isRunning && playerThread?.isAlive == true) return
-        isRunning = true
-        playerThread = Thread({ runPlaybackLoop() }, "$tag-TtsPlayer").apply { start() }
+        val current = playerWorker
+        if (current?.thread?.isAlive == true) return
+        pruneRetiredWorkersLocked()
+        val predecessors = retiredWorkerThreads.toList()
+        val generation = ++nextWorkerGeneration
+        val thread = Thread(
+            { runPlaybackLoop(generation, predecessors) },
+            "$tag-TtsPlayer",
+        ).apply { isDaemon = true }
+        playerWorker = PlaybackWorker(generation = generation, thread = thread)
+        thread.start()
     }
 
-    private fun runPlaybackLoop() {
-        while (isRunning) {
-            val frame = synchronized(queueLock) {
-                while (queue.isEmpty() && isRunning) {
+    private fun runPlaybackLoop(generation: Long, predecessors: List<Thread>) {
+        val audioTrackOwner = AudioTrackOwner()
+        try {
+            // stop 不在主线程阻塞；新 worker 自身等待旧 worker 以确保旧轨道已 flush/release。
+            for (predecessor in predecessors) {
+                if (predecessor !== Thread.currentThread() && predecessor.isAlive) {
                     try {
-                        queueLock.wait()
+                        predecessor.join()
                     } catch (_: InterruptedException) {
+                        // 当前 worker 也已被 stop；finally 负责清理，不能让线程异常逃逸。
+                        return
                     }
                 }
-                if (!isRunning) {
-                    null
-                } else {
-                    val next = queue.removeFirst()
-                    queuedBytes -= next.data.size
-                    if (queue.isEmpty()) {
-                        queuedChannelCount = 0
-                        queuedSampleRate = 0
+            }
+            while (isWorkerActive(generation)) {
+                val frame = synchronized(queueLock) {
+                    while (queue.isEmpty() && isWorkerActiveLocked(generation)) {
+                        try {
+                            queueLock.wait()
+                        } catch (_: InterruptedException) {
+                        }
                     }
-                    next
-                }
-            } ?: break
+                    if (!isWorkerActiveLocked(generation)) {
+                        null
+                    } else {
+                        val next = queue.removeFirst()
+                        queuedBytes -= next.data.size
+                        if (queue.isEmpty()) {
+                            queuedChannelCount = 0
+                            queuedSampleRate = 0
+                        }
+                        next
+                    }
+                } ?: break
 
-            writeFrame(frame)
+                writeFrame(frame, generation, audioTrackOwner)
+            }
+        } finally {
+            releaseAudioTrack(audioTrackOwner)
+            synchronized(queueLock) {
+                retiredWorkerThreads.remove(Thread.currentThread())
+                if (playerWorker?.generation == generation &&
+                    playerWorker?.thread === Thread.currentThread()
+                ) {
+                    playerWorker = null
+                }
+                queueLock.notifyAll()
+            }
         }
     }
 
-    private fun writeFrame(frame: TtsFrame) {
+    private fun pruneRetiredWorkersLocked() {
+        val iterator = retiredWorkerThreads.iterator()
+        while (iterator.hasNext()) {
+            if (!iterator.next().isAlive) iterator.remove()
+        }
+    }
+
+    private fun isWorkerActive(generation: Long): Boolean = synchronized(queueLock) {
+        isWorkerActiveLocked(generation)
+    }
+
+    private fun isWorkerActiveLocked(generation: Long): Boolean =
+        playerWorker?.generation == generation
+
+    private fun writeFrame(frame: TtsFrame, generation: Long, audioTrackOwner: AudioTrackOwner) {
         try {
-            val track = ensureAudioTrack(frame.sampleRate, frame.channelCount) ?: return
+            if (!isWorkerActive(generation)) return
+            val track = ensureAudioTrack(audioTrackOwner, frame.sampleRate, frame.channelCount) ?: return
             var offset = 0
-            while (offset < frame.data.size && isRunning) {
-                val written = track.write(frame.data, offset, frame.data.size - offset)
+            while (offset < frame.data.size && isWorkerActive(generation)) {
+                val written = track.write(
+                    frame.data,
+                    offset,
+                    frame.data.size - offset,
+                    AudioTrack.WRITE_NON_BLOCKING,
+                )
                 if (written > 0) {
                     offset += written
+                } else if (written == 0) {
+                    // 非阻塞写入的背压点可被 stop 的 interrupt 唤醒；避免整句 PCM 阻塞取消。
+                    try {
+                        Thread.sleep(5L)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
                 } else if (written < 0) {
                     Log.e(tag, "播放 TTS 写入失败: $written")
                     break
@@ -123,21 +198,25 @@ class OneToOneTtsQueuePlayer(
         }
     }
 
-    private fun ensureAudioTrack(sampleRate: Int, channelCount: Int): AudioTrack? {
-        val existing = audioTrack
+    private fun ensureAudioTrack(
+        owner: AudioTrackOwner,
+        sampleRate: Int,
+        channelCount: Int,
+    ): AudioTrack? {
+        val existing = owner.track
         if (existing != null &&
-            audioTrackSampleRate == sampleRate &&
-            audioTrackChannelCount == channelCount &&
+            owner.sampleRate == sampleRate &&
+            owner.channelCount == channelCount &&
             existing.state != AudioTrack.STATE_UNINITIALIZED
         ) {
             return existing
         }
 
-        releaseAudioTrack()
+        releaseAudioTrack(owner)
         val outCh = if (channelCount == 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
         val minBufferSize = AudioTrack.getMinBufferSize(sampleRate, outCh, audioFormat).coerceAtLeast(0)
         val bufferSize = maxOf(minBufferSize, bytesForMs(sampleRate, channelCount, 200))
-        audioTrack = AudioTrack.Builder()
+        owner.track = AudioTrack.Builder()
             .setAudioFormat(
                 AudioFormat.Builder()
                     .setSampleRate(sampleRate)
@@ -148,10 +227,10 @@ class OneToOneTtsQueuePlayer(
             .setBufferSizeInBytes(bufferSize)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
-        audioTrackSampleRate = sampleRate
-        audioTrackChannelCount = channelCount
-        audioTrack?.play()
-        return audioTrack
+        owner.sampleRate = sampleRate
+        owner.channelCount = channelCount
+        owner.track?.play()
+        return owner.track
     }
 
     private fun trimQueueLocked(sampleRate: Int, channelCount: Int) {
@@ -184,17 +263,17 @@ class OneToOneTtsQueuePlayer(
         return if (bytesPerSecond > 0) bytes * 1_000L / bytesPerSecond else 0L
     }
 
-    private fun releaseAudioTrack() {
+    private fun releaseAudioTrack(owner: AudioTrackOwner) {
         try {
-            audioTrack?.pause()
-            audioTrack?.flush()
-            audioTrack?.stop()
-            audioTrack?.release()
+            owner.track?.pause()
+            owner.track?.flush()
+            owner.track?.stop()
+            owner.track?.release()
         } catch (_: Exception) {
         }
-        audioTrack = null
-        audioTrackSampleRate = 0
-        audioTrackChannelCount = 0
+        owner.track = null
+        owner.sampleRate = 0
+        owner.channelCount = 0
     }
 
     private companion object {
