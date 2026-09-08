@@ -121,34 +121,41 @@ object OneToOnePlaybackSelector {
         // 立体声:按用户选择的播放音源拆一路,输出单声道。
         // left_active/right_active 只描述服务端本帧是否有内容，不能改变用户选择；
         // 否则连续收到“仅右路有内容”的帧时，左路选择也会被偷偷切到右路。
-        val split = splitStereoInterleaved16LE(data, channelCount)
-        if (split != null) {
-            val lane = if (playbackMode == OneToOnePlaybackMode.LEFT) split.left else split.right
+        val lane = selectStereoLane(data, channelCount, playbackMode)
+        if (lane != null) {
             return PlaybackOutput(lane, channelCount = 1)
         }
         // 非立体声:直接播放。
         return PlaybackOutput(data, channelCount)
     }
 
-    /** Samples 内部的 PCM16LE 立体声拆分，避免依赖 SDK 未公开的实现类。 */
-    private fun splitStereoInterleaved16LE(data: ByteArray, channelCount: Int): StereoSplit? {
-        if (channelCount != 2 || data.size < 4 || data.size % 4 != 0) return null
-        val left = ByteArray(data.size / 2)
-        val right = ByteArray(data.size / 2)
-        var source = 0
-        var target = 0
-        while (source < data.size) {
-            left[target] = data[source]
-            left[target + 1] = data[source + 1]
-            right[target] = data[source + 2]
-            right[target + 1] = data[source + 3]
-            source += 4
-            target += 2
+    /**
+     * Demo 本地完成 PCM16LE 立体声拆分。
+     *
+     * 不依赖 SDK 模块的 internal 实现：SDK Release AAR 会先独立经过 R8，内部工具类可能被改名，
+     * App 若跨模块直接引用其源码类名会在运行时触发 NoClassDefFoundError。
+     */
+    private fun selectStereoLane(
+        data: ByteArray,
+        channelCount: Int,
+        playbackMode: OneToOnePlaybackMode,
+    ): ByteArray? {
+        val stereoFrameBytes = 4 // 左右声道各一个 PCM16LE 样本。
+        if (channelCount != 2 || data.size < stereoFrameBytes || data.size % stereoFrameBytes != 0) {
+            return null
         }
-        return StereoSplit(left, right)
+        val lane = ByteArray(data.size / 2)
+        val sourceOffset = if (playbackMode == OneToOnePlaybackMode.LEFT) 0 else 2
+        var sourceIndex = sourceOffset
+        var targetIndex = 0
+        while (sourceIndex + 1 < data.size) {
+            lane[targetIndex] = data[sourceIndex]
+            lane[targetIndex + 1] = data[sourceIndex + 1]
+            sourceIndex += stereoFrameBytes
+            targetIndex += 2
+        }
+        return lane
     }
-
-    private data class StereoSplit(val left: ByteArray, val right: ByteArray)
 }
 
 /**

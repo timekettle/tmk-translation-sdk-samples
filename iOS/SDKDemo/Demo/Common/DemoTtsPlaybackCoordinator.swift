@@ -56,17 +56,19 @@ final class DemoTtsPlaybackCoordinator {
 
     /// 绑定当前会话的播放 IO(VM 创建 TmkVoiceProcessingIO 后调用)。
     func attach(voiceIO: TmkVoiceProcessingIO?) {
+        stateLock.lock()
         self.voiceIO = voiceIO
+        stateLock.unlock()
     }
 
     /// 是否处于翻译中，由 VM 在 start/stop 时同步；非活跃期丢弃迟到的音频帧。
     func setActive(_ active: Bool) {
         stateLock.lock()
         isActive = active
-        stateLock.unlock()
         if !active {
             voiceIO?.clearPlaybackBuffer()
         }
+        stateLock.unlock()
     }
 
     /// 切换本机播放音源(左路/右路翻译)。切换时清空播放缓冲，避免残留反声道数据。
@@ -74,22 +76,22 @@ final class DemoTtsPlaybackCoordinator {
         stateLock.lock()
         let changed = playbackMode != mode
         playbackMode = mode
-        stateLock.unlock()
         if changed {
             voiceIO?.clearPlaybackBuffer()
         }
+        stateLock.unlock()
     }
 
     /// 清空播放缓冲(切换 TTS 来源等场景丢弃残留音频)。
     func clearPlaybackBuffer() {
+        stateLock.lock()
         voiceIO?.clearPlaybackBuffer()
+        stateLock.unlock()
     }
 
     /// 接管 onAudioDataReceive 的一帧数据，内部完成守卫与播放。
     func handleAudioData(result: TmkResult<String>, data: Data, channelCount: Int) {
         guard result.data == "translated_audio", !data.isEmpty else { return }
-        guard currentActive() else { return }
-        onPlaybackChannelsChanged?(channelCount)
 
         if let queue = processQueue, let backpressure {
             guard let reservation = backpressure.reserve(bytes: data.count) else { return }
@@ -98,38 +100,52 @@ final class DemoTtsPlaybackCoordinator {
                     guard let self else { return }
                     defer { backpressure.complete(reservation) }
                     guard backpressure.isCurrent(reservation) else { return }
-                    guard self.currentActive() else { return }
-                    self.processAudioData(result: result, data: data, channelCount: channelCount)
+                    if self.processAudioData(result: result, data: data, channelCount: channelCount) {
+                        self.onPlaybackChannelsChanged?(channelCount)
+                    }
                 }
             }
         } else {
-            processAudioData(result: result, data: data, channelCount: channelCount)
+            if processAudioData(result: result, data: data, channelCount: channelCount) {
+                onPlaybackChannelsChanged?(channelCount)
+            }
         }
     }
 
-    private func processAudioData(result: TmkResult<String>, data: Data, channelCount: Int) {
+    /// 将 active、播放模式快照、选路和最终入队放在同一锁内，防止后台 PCM 在 stop/切路清空后重新写入旧帧。
+    @discardableResult
+    private func processAudioData(result: TmkResult<String>, data: Data, channelCount: Int) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard isActive, let voiceIO else { return false }
         switch scene {
         case .listen:
             if let target = targetLanguageProvider?(), !target.isEmpty {
-                guard result.dstCode.lowercased().hasPrefix(target.lowercased()) else { return }
+                guard result.dstCode.lowercased().hasPrefix(target.lowercased()) else { return false }
             }
-            voiceIO?.enqueuePlaybackPCM(data)
+            voiceIO.enqueuePlaybackPCM(data)
+            return true
         case .oneToOne:
             let route = audioRoute(from: result)
-            let lane = resolveSourceLane(result: result, audioRoute: route)
+            let lane = resolveSourceLane(result: result,
+                                         audioRoute: route,
+                                         playbackMode: playbackMode)
             guard let output = OneToOneTranslatedAudioPlaybackSelector.selectPlaybackData(
                 data: data,
                 channelCount: channelCount,
-                playbackMode: currentPlaybackMode(),
+                playbackMode: playbackMode,
                 audioRoute: route,
                 sourceLane: lane,
                 extraData: result.extraData
-            ) else { return }
-            voiceIO?.enqueuePlaybackPCM(output)
+            ) else { return false }
+            voiceIO.enqueuePlaybackPCM(output)
+            return true
         }
     }
 
-    private func resolveSourceLane(result: TmkResult<String>, audioRoute: TmkTranslatedAudioRoute?) -> OneToOneRowViewData.Lane {
+    private func resolveSourceLane(result: TmkResult<String>,
+                                   audioRoute: TmkTranslatedAudioRoute?,
+                                   playbackMode: OneToOnePlaybackMode) -> OneToOneRowViewData.Lane {
         // SDK 显式给出的原始说话侧(speaker_channel)优先级最高，其次才允许各 VM 的 legacy 兜底(uid→lane / channel 字段)。
         if let lane = OneToOneTranslatedAudioSourceRouting.sourceLane(
             audioRoute: audioRoute,
@@ -140,7 +156,7 @@ final class DemoTtsPlaybackCoordinator {
         if let lane = sourceLaneResolver?(result, audioRoute) {
             return lane
         }
-        return currentPlaybackMode() == .left ? .left : .right
+        return playbackMode == .left ? .left : .right
     }
 
     private func audioRoute(from result: TmkResult<String>) -> TmkTranslatedAudioRoute? {
@@ -150,15 +166,4 @@ final class DemoTtsPlaybackCoordinator {
         return nil
     }
 
-    private func currentActive() -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return isActive
-    }
-
-    private func currentPlaybackMode() -> OneToOnePlaybackMode {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return playbackMode
-    }
 }

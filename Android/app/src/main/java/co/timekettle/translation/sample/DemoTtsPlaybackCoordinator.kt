@@ -29,43 +29,52 @@ class DemoTtsPlaybackCoordinator(
     private val queuePlayer = OneToOneTtsQueuePlayer(tag = tag, sampleRate = sampleRate)
     private val defaultSampleRate = sampleRate
 
-    @Volatile private var active = false
-    @Volatile private var playbackMode = OneToOnePlaybackMode.LEFT
+    /** 将 active 检查、选路和入队串行化，防止后台 TTS 回调在 stop 后重新启动播放器。 */
+    private val stateLock = Any()
+    private var active = false
+    private var playbackMode = OneToOnePlaybackMode.LEFT
 
     /** 是否处于翻译中，由 VM 在 start/stop 时同步；非活跃期丢弃迟到的音频帧。 */
-    fun setActive(active: Boolean) {
+    fun setActive(active: Boolean) = synchronized(stateLock) {
         this.active = active
         if (!active) queuePlayer.clearQueue()
     }
 
     /** 切换本机播放音源(左路/右路翻译)。切换时终止当前帧与待播队列，避免残留反声道数据。 */
-    fun setPlaybackMode(mode: OneToOnePlaybackMode) {
-        if (playbackMode == mode) return
+    fun setPlaybackMode(mode: OneToOnePlaybackMode) = synchronized(stateLock) {
+        if (playbackMode == mode) return@synchronized
         playbackMode = mode
         queuePlayer.stop()
     }
 
     /** 清空待播队列(切换 TTS 来源等场景丢弃残留音频)，不停止播放线程。 */
-    fun clear() = queuePlayer.clearQueue()
+    fun clear() = synchronized(stateLock) { queuePlayer.clearQueue() }
 
-    /** 释放底层播放器资源。 */
-    fun release() = queuePlayer.stop()
+    /** 释放底层播放器资源，并使所有已到达但尚未入队的后台 PCM 失效。 */
+    fun release() = synchronized(stateLock) {
+        active = false
+        queuePlayer.stop()
+    }
 
-    /** 接管 onAudioDataReceive 的一帧数据，内部完成守卫与播放。 */
+    /** 接管 onAudioDataReceive 的一帧数据，内部完成守卫、选路和原子入队。 */
     fun handleAudioData(r: Result<String>?, data: ByteArray, channelCount: Int) {
-        if (!active || data.isEmpty()) return
-        onPlaybackChannelsChanged?.invoke(channelCount)
-        when (scene) {
-            DemoTtsScene.LISTEN -> handleListen(r, data, channelCount)
-            DemoTtsScene.ONE_TO_ONE -> handleOneToOne(r, data, channelCount)
+        if (data.isEmpty()) return
+        val accepted = synchronized(stateLock) {
+            if (!active) return@synchronized false
+            when (scene) {
+                DemoTtsScene.LISTEN -> handleListenLocked(r, data, channelCount)
+                DemoTtsScene.ONE_TO_ONE -> handleOneToOneLocked(r, data, channelCount)
+            }
         }
+        if (accepted) onPlaybackChannelsChanged?.invoke(channelCount)
     }
 
-    private fun handleListen(r: Result<String>?, data: ByteArray, channelCount: Int) {
+    private fun handleListenLocked(r: Result<String>?, data: ByteArray, channelCount: Int): Boolean {
         queuePlayer.play(data, channelCount, resolveSampleRate(r))
+        return true
     }
 
-    private fun handleOneToOne(r: Result<String>?, data: ByteArray, channelCount: Int) {
+    private fun handleOneToOneLocked(r: Result<String>?, data: ByteArray, channelCount: Int): Boolean {
         val extraData = r?.extraData
         when (runtime) {
             DemoTtsRuntime.ONLINE -> {
@@ -80,8 +89,9 @@ class DemoTtsPlaybackCoordinator(
                     playbackMode = playbackMode,
                     audioRoute = audioRoute,
                     speakerChannel = speakerChannel,
-                ) ?: return
+                ) ?: return false
                 queuePlayer.play(output.data, output.channelCount)
+                return true
             }
             DemoTtsRuntime.OFFLINE -> {
                 val audioRoute = OneToOnePlaybackSelector.resolveOfflineAudioRoute(
@@ -96,8 +106,9 @@ class DemoTtsPlaybackCoordinator(
                     audioRoute = audioRoute,
                     leftActive = extraData?.get("left_active") as? Boolean,
                     rightActive = extraData?.get("right_active") as? Boolean,
-                ) ?: return
+                ) ?: return false
                 queuePlayer.play(output.data, output.channelCount)
+                return true
             }
         }
     }

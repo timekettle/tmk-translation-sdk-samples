@@ -23,6 +23,9 @@ final class DemoSettingsViewModel {
                                            onlineEngineStatus: .checking,
                                            offlineEngineStatus: .checking,
                                            authInfo: .placeholder,
+                                           activeOfflineModelSource: DemoOfflineModelSourceInspector.current(store: store),
+                                           offlineModelProbeResult: nil,
+                                           isProbingOfflineModelURL: false,
                                            isApplying: false,
                                            versionText: Self.makeVersionText())
     }
@@ -69,6 +72,34 @@ final class DemoSettingsViewModel {
         publishState()
     }
 
+    func setOfflineModelBaseURL(_ url: String) {
+        state.draftConfig.offlineModelBaseURL = url
+        state.offlineModelProbeResult = nil
+        publishState()
+    }
+
+    func setCustomOfflineModelBaseURLEnabled(_ enabled: Bool) {
+        state.draftConfig.customOfflineModelBaseURLEnabled = enabled
+        state.offlineModelProbeResult = nil
+        publishState()
+    }
+
+    func probeOfflineModelBaseURL(completion: @escaping (DemoOfflineModelProbeResult) -> Void) {
+        guard state.draftConfig.isOfflineModelBaseURLValid,
+              state.draftConfig.customOfflineModelBaseURLEnabled,
+              state.isProbingOfflineModelURL == false else { return }
+        state.isProbingOfflineModelURL = true
+        state.offlineModelProbeResult = nil
+        publishState()
+        DemoOfflineModelSourceInspector.probe(state.draftConfig.offlineModelBaseURL) { [weak self] result in
+            guard let self else { return }
+            self.state.isProbingOfflineModelURL = false
+            self.state.offlineModelProbeResult = result
+            self.publishState()
+            completion(result)
+        }
+    }
+
     func setSensitiveWordRedactionEnabled(_ enabled: Bool) {
         state.draftConfig.sensitiveWordRedactionEnabled = enabled
         publishState()
@@ -97,6 +128,7 @@ final class DemoSettingsViewModel {
             self.state.onlineEngineStatus = snapshot.onlineEngineStatus
             self.state.offlineEngineStatus = snapshot.offlineEngineStatus
             self.state.authInfo = snapshot.authInfo
+            self.state.activeOfflineModelSource = DemoOfflineModelSourceInspector.current(store: self.store)
             self.state.isApplying = false
             self.publishState()
             completion()

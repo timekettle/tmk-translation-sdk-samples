@@ -152,17 +152,23 @@ class HomeScreen : Screen {
             }
         }
 
-        Box(
+        // 与设置页相同：滚动区 weight(1f) + 底栏占固有高度，避免 overlay 挡住语言选择。
+        // targetSdk 36 + enableEdgeToEdge 下手势导航的 navigationBars 常为 0，只补
+        // mandatorySystemGestures 多出来的那一段，避免三键导航下和 Scaffold innerPadding 叠两次。
+        val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        val gestureBottom = WindowInsets.mandatorySystemGestures.asPaddingValues().calculateBottomPadding()
+        val gestureClearance = (gestureBottom - navBottom).coerceAtLeast(0.dp)
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .background(BgColor),
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 20.dp, vertical = 16.dp)
-                    .padding(bottom = 120.dp)
-                    .verticalScroll(rememberScrollState()),
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 16.dp),
             ) {
                 Spacer(Modifier.height(24.dp))
 
@@ -239,51 +245,52 @@ class HomeScreen : Screen {
                 Spacer(Modifier.height(20.dp))
             }
 
-            Box(
+            Column(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .background(BgColor)
-                    .padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 10.dp),
+                    .padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 16.dp + gestureClearance),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Button(
-                        onClick = {
-                            if (canStart) {
-                                navigator.push(resolveScreen(scenario, effectiveModeId, sourceLang, targetLang))
-                            }
-                        },
-                        enabled = canStart,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(52.dp),
-                        shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color.Transparent,
-                            disabledContainerColor = Color.Transparent,
-                        ),
-                        contentPadding = PaddingValues(0.dp),
-                    ) {
-                        Box(
-                            Modifier.fillMaxSize()
-                                .then(if (canStart) Modifier else Modifier.alpha(.4f))
-                                .background(
-                                    Brush.linearGradient(listOf(PrimaryColor, Color(0xFF8B5CF6))),
-                                    RoundedCornerShape(10.dp)
-                                ), contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                startLabel,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color.White,
-                            )
+                Button(
+                    onClick = {
+                        if (canStart) {
+                            navigator.push(resolveScreen(scenario, effectiveModeId, sourceLang, targetLang))
                         }
-                    }
-                    TextButton(
-                        onClick = { navigator.push(SettingsScreen()) },
-                        modifier = Modifier.padding(top = 4.dp),
+                    },
+                    enabled = canStart,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                    ),
+                    contentPadding = PaddingValues(0.dp),
+                ) {
+                    Box(
+                        Modifier.fillMaxSize()
+                            .then(if (canStart) Modifier else Modifier.alpha(.4f))
+                            .background(
+                                Brush.linearGradient(listOf(PrimaryColor, Color(0xFF8B5CF6))),
+                                RoundedCornerShape(10.dp)
+                            ), contentAlignment = Alignment.Center
                     ) {
+                        Text(
+                            startLabel,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White,
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = { navigator.push(SettingsScreen()) }) {
                         Text("⚙️ 设置", color = TextDim, fontSize = 13.sp)
                     }
                 }

@@ -21,6 +21,7 @@ data class DualChannelScreen(
     override fun Content() {
         val navigator = LocalNavigator.currentOrThrow
         val viewModel: Online1v1ViewModel = getViewModel()
+        val memoryMonitor = rememberDemoAppMemoryMonitor("online_one_to_one", visibleByDefault = false)
         val initErrorMessage by viewModel.initErrorMessage.collectAsState()
         val isStarted by viewModel.isStarted.collectAsState()
         val isChannelReady by viewModel.isChannelReady.collectAsState()
@@ -30,6 +31,9 @@ data class DualChannelScreen(
         val isStarting by viewModel.isStarting.collectAsState()
         val bubbles by viewModel.bubbles.collectAsState()
         val statusText by viewModel.statusText.collectAsState()
+        val networkStats by viewModel.networkStats.collectAsState()
+        val bootstrapStats by viewModel.bootstrapStats.collectAsState()
+        val wifiSpeed by viewModel.wifiSpeed.collectAsState()
         val remoteCloseRoomPromptVisible by viewModel.remoteCloseRoomPromptVisible.collectAsState()
         val conversationErrorPrompt by viewModel.conversationErrorPrompt.collectAsState()
         val currentRoomNo by viewModel.currentRoomNo.collectAsState()
@@ -46,6 +50,7 @@ data class DualChannelScreen(
         val roomScenarioOption by viewModel.roomScenarioOption.collectAsState()
         val audioMode by viewModel.audioMode.collectAsState()
         val playbackMode by viewModel.playbackMode.collectAsState()
+        val bubbleRetentionLimit by viewModel.bubbleRetentionLimit.collectAsState()
         var settingsExpanded by remember { mutableStateOf(false) }
         var showLocaleDialog by remember { mutableStateOf(false) }
         var showSpeakerDialog by remember { mutableStateOf(false) }
@@ -55,6 +60,7 @@ data class DualChannelScreen(
         var showRoomScenarioDialog by remember { mutableStateOf(false) }
         var showChannelAudioModeDialog by remember { mutableStateOf(false) }
         var showPlaybackModeDialog by remember { mutableStateOf(false) }
+        var showBubbleRetentionLimitDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
         val onlineLanguageOptions = (rememberOnlineLanguageOptions().state
             as? LanguageOptionsState.Ready)?.options ?: emptyMap()
@@ -63,8 +69,10 @@ data class DualChannelScreen(
             viewModel.setLanguagesIfNeeded(leftLang, rightLang)
             viewModel.initSDK()
         }
+        LaunchedEffect(isChannelReady) { if (isChannelReady) memoryMonitor.markRuntimeReady() }
         BackHandler(enabled = true) { navigator.pop() }
         DisposableEffect(Unit) { onDispose { viewModel.stopTranslation() } }
+        DemoAppMemoryOverlay(memoryMonitor)
 
         if (initErrorMessage != null) {
             SampleInitErrorDialog(
@@ -80,15 +88,25 @@ data class DualChannelScreen(
                 title = { Text(prompt.title) },
                 text = { Text(prompt.message) },
                 confirmButton = {
-                    TextButton(onClick = { viewModel.recreateChannelAfterRemoteClose() }) {
+                    TextButton(onClick = {
+                        if (prompt.id == "reconnect_timeout") {
+                            viewModel.recreateChannelAfterReconnectTimeout()
+                        } else {
+                            viewModel.recreateChannelAfterRemoteClose()
+                        }
+                    }) {
                         Text(prompt.restartText)
                     }
                 },
                 dismissButton = {
                     TextButton(onClick = {
-                        viewModel.dismissRemoteCloseRoomPrompt()
-                        viewModel.stopTranslation(prompt.title)
-                        navigator.pop()
+                        if (prompt.id == "reconnect_timeout") {
+                            viewModel.continueWaitingAfterReconnectTimeout()
+                        } else {
+                            viewModel.dismissRemoteCloseRoomPrompt()
+                            viewModel.stopTranslation(prompt.title)
+                            navigator.pop()
+                        }
                     }) {
                         Text(prompt.leaveText)
                     }
@@ -96,10 +114,11 @@ data class DualChannelScreen(
             )
         }
 
-        Column(
-            modifier = Modifier.fillMaxSize().padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -117,6 +136,13 @@ data class DualChannelScreen(
                         expanded = settingsExpanded,
                         onDismissRequest = { settingsExpanded = false },
                     ) {
+                        DropdownMenuItem(
+                            text = { Text("保留气泡数量：$bubbleRetentionLimit") },
+                            onClick = {
+                                settingsExpanded = false
+                                showBubbleRetentionLimitDialog = true
+                            },
+                        )
                         DropdownMenuItem(
                             text = { Text(if (isLocaleUpdating) "切换中..." else "切换语言") },
                             enabled = !isLocaleUpdating,
@@ -176,6 +202,7 @@ data class DualChannelScreen(
                                 showPlaybackModeDialog = true
                             },
                         )
+                        DemoMemoryMonitorSettingsItem(memoryMonitor) { settingsExpanded = false }
                     }
                 }
             }
@@ -219,8 +246,8 @@ data class DualChannelScreen(
                 stopText = "停止收听",
                 startEnabled = isChannelReady && !isStarted && !isStarting,
                 stopEnabled = isStarted,
-                onStart = { viewModel.startTranslation() },
-                onStop = { viewModel.stopListening() },
+                onStart = { memoryMonitor.markRunStarted(); viewModel.startTranslation() },
+                onStop = { memoryMonitor.markRunStopped(); viewModel.stopListening() },
             )
 
             Spacer(Modifier.height(6.dp))
@@ -238,8 +265,25 @@ data class DualChannelScreen(
                 },
                 scrollOnLatestUpdate = true,
             )
+            }
+
+            DraggableDemoNetworkQualityOverlay(
+                snapshot = networkStats,
+                bootstrap = bootstrapStats,
+                wifiSpeed = wifiSpeed,
+            )
         }
 
+        if (showBubbleRetentionLimitDialog) {
+            BubbleRetentionLimitDialog(
+                initialLimit = bubbleRetentionLimit,
+                onDismiss = { showBubbleRetentionLimitDialog = false },
+                onConfirm = {
+                    showBubbleRetentionLimitDialog = false
+                    viewModel.setBubbleRetentionLimit(it)
+                },
+            )
+        }
         if (showLocaleDialog) {
             OnlineLocaleSwitchDialog(
                 title = "切换 1v1 语言",

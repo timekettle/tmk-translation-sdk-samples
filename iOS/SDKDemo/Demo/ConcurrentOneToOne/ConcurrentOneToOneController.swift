@@ -117,10 +117,21 @@ final class ConcurrentOneToOneController: UIViewController {
         view.addSubview(onlineListTitle); view.addSubview(offlineListTitle)
         view.addSubview(onlineTableView); view.addSubview(offlineTableView)
         installConstraints()
+        installDemoMemoryMonitor(mode: "concurrent_one_to_one", visibleByDefault: true)
+        setDemoMemoryRuntimeHealthProvider { [weak self] in
+            guard let self else { return DemoMemoryRuntimeHealth() }
+            return DemoMemoryRuntimeHealth(
+                onlineRows: self.onlineRows.count,
+                offlineRows: self.offlineRows.count,
+                audioDroppedFrames: self.viewModel.memoryMonitorAudioDroppedFrames(),
+                onlineState: self.currentState.onlineStatus,
+                offlineState: self.currentState.offlineStatus
+            )
+        }
         viewModel.$state.receive(on: DispatchQueue.main).sink { [weak self] in self?.render($0) }.store(in: &cancellables)
         viewModel.prepare()
     }
-    override func viewDidDisappear(_ animated: Bool) { super.viewDidDisappear(animated); if isBeingDismissed || navigationController?.isBeingDismissed == true { viewModel.release() } }
+    override func viewDidDisappear(_ animated: Bool) { super.viewDidDisappear(animated); if isBeingDismissed || isMovingFromParent || navigationController?.isBeingDismissed == true { demoMemoryPageExit(); viewModel.release() } }
     private func installConstraints() {
         collapseButton.snp.makeConstraints {
             $0.top.equalTo(view.safeAreaLayoutGuide).offset(6)
@@ -131,8 +142,8 @@ final class ConcurrentOneToOneController: UIViewController {
             $0.top.equalTo(collapseButton.snp.bottom).offset(4)
             $0.left.right.equalToSuperview().inset(12)
         }
-        statusStack.snp.makeConstraints { $0.height.equalTo(96) }
-        onlineStatusCard.snp.makeConstraints { $0.height.equalTo(96) }
+        statusStack.snp.makeConstraints { $0.height.greaterThanOrEqualTo(96) }
+        onlineStatusCard.snp.makeConstraints { $0.height.greaterThanOrEqualTo(96) }
         onlineTitleLabel.snp.makeConstraints {
             $0.top.equalToSuperview().offset(8)
             $0.left.equalToSuperview().offset(14)
@@ -147,7 +158,7 @@ final class ConcurrentOneToOneController: UIViewController {
             $0.top.equalTo(onlineLangLabel.snp.bottom).offset(2)
             $0.left.equalToSuperview().offset(14)
             $0.right.equalToSuperview().inset(8)
-            $0.bottom.lessThanOrEqualToSuperview().inset(8)
+            $0.bottom.equalToSuperview().inset(8)
         }
         onlineRetryButton.snp.makeConstraints {
             $0.centerY.equalTo(onlineTitleLabel)
@@ -155,7 +166,7 @@ final class ConcurrentOneToOneController: UIViewController {
             $0.width.equalTo(52)
             $0.height.equalTo(30)
         }
-        offlineStatusCard.snp.makeConstraints { $0.height.equalTo(96) }
+        offlineStatusCard.snp.makeConstraints { $0.height.greaterThanOrEqualTo(96) }
         offlineTitleLabel.snp.makeConstraints {
             $0.top.equalToSuperview().offset(8)
             $0.left.equalToSuperview().offset(14)
@@ -170,7 +181,7 @@ final class ConcurrentOneToOneController: UIViewController {
             $0.top.equalTo(offlineLangLabel.snp.bottom).offset(2)
             $0.left.equalToSuperview().offset(14)
             $0.right.equalToSuperview().inset(8)
-            $0.bottom.lessThanOrEqualToSuperview().inset(8)
+            $0.bottom.equalToSuperview().inset(8)
         }
         offlineRetryButton.snp.makeConstraints {
             $0.centerY.equalTo(offlineTitleLabel)
@@ -219,7 +230,8 @@ final class ConcurrentOneToOneController: UIViewController {
         titleLabel.textColor = accent
         langLabel.font = .systemFont(ofSize: 12, weight: .medium)
         langLabel.textColor = .label
-        statusLabel.numberOfLines = 2
+        statusLabel.numberOfLines = 0
+        statusLabel.lineBreakMode = .byWordWrapping
         statusLabel.font = .systemFont(ofSize: 11, weight: .regular)
         statusLabel.textColor = .label
         card.addSubview(titleLabel)
@@ -275,6 +287,7 @@ final class ConcurrentOneToOneController: UIViewController {
         modelButton.isEnabled = state.needsModelDownload && !state.isModelDownloading
         modelButton.setTitle(state.isModelDownloading ? "下载中..." : "下载离线模型", for: .normal)
         startButton.isEnabled = state.canStart && !state.isRunning
+        if state.canStart { demoMemoryRuntimeReady() }
         stopButton.isEnabled = state.isRunning
         startButton.alpha = startButton.isEnabled ? 1 : 0.45
         stopButton.alpha = stopButton.isEnabled ? 1 : 0.45
@@ -284,8 +297,8 @@ final class ConcurrentOneToOneController: UIViewController {
         offlineTableView.reloadData()
         scrollBubbleListsToLatest()
     }
-    @objc private func start() { viewModel.start() }
-    @objc private func stop() { viewModel.stop() }
+    @objc private func start() { demoMemoryRunStarted(); viewModel.start() }
+    @objc private func stop() { demoMemoryRunStopped(); viewModel.stop() }
     @objc private func retryOnline() { viewModel.retryOnline() }
     @objc private func retryOffline() { viewModel.retryOffline() }
     @objc private func downloadModels() { viewModel.downloadModels() }
@@ -297,13 +310,19 @@ final class ConcurrentOneToOneController: UIViewController {
         UIView.performWithoutAnimation { self.view.layoutIfNeeded() }
     }
     private func makeSettingsMenu() -> UIMenu {
+        let bubbleRetentionAction = UIAction(title: "保留气泡数量：\(currentState.bubbleRetentionLimit)") { [weak self] _ in
+            guard let self else { return }
+            presentBubbleRetentionLimitPicker(from: self,
+                                              current: self.currentState.bubbleRetentionLimit,
+                                              onConfirm: self.viewModel.setBubbleRetentionLimit)
+        }
         let ttsSourceAction = UIAction(title: "TTS 来源") { [weak self] _ in
             self?.showTtsSourcePicker()
         }
         let playbackAction = UIAction(title: "播放音源") { [weak self] _ in
             self?.showPlaybackModePicker()
         }
-        return UIMenu(title: "", children: [ttsSourceAction, playbackAction])
+        return UIMenu(title: "", children: [bubbleRetentionAction, ttsSourceAction, playbackAction, demoMemoryMonitorMenuAction(visibleByDefault: true)])
     }
 
     private func showTtsSourcePicker() {

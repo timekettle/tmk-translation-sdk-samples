@@ -7,6 +7,8 @@ import Foundation
 import TmkTranslationSDK
 
 enum DemoSDKConfigurationFactory {
+    static let networkTimeoutSeconds: TimeInterval = 15
+
     private static let appIdInfoPlistKey = "TMKSampleAppID"
     private static let appSecretInfoPlistKey = "TMKSampleAppSecret"
     private static let localSecretsPath = "Config/LocalSecrets.xcconfig"
@@ -28,12 +30,31 @@ enum DemoSDKConfigurationFactory {
                     audioCaptureEnabled: config.diagnosisLevel == .trace && config.diagnosisAudioCaptureEnabled
                 )
             )
+            .setNetworkTimeout(networkTimeoutSeconds)
         if config.customNetworkBaseURLEnabled,
            let baseURLString = config.normalizedCustomNetworkBaseURL,
            let baseURL = URL(string: baseURLString) {
             _ = builder.setNetworkBaseURL(baseURL)
         }
+        _ = builder.setOfflineModelBaseURL(config.resolvedOfflineModelBaseURL)
         return builder.build()
+    }
+
+    /// 业务延迟探测用 baseURL，与 `makeGlobalConfig` 实际生效地址一致（不读 SDK internal 字段）。
+    static func resolvedBusinessBaseURL(from config: DemoSettingsConfig) -> URL {
+        if config.customNetworkBaseURLEnabled,
+           let baseURLString = config.normalizedCustomNetworkBaseURL,
+           let baseURL = URL(string: baseURLString) {
+            return baseURL
+        }
+        switch config.networkEnvironment {
+        case .dev:
+            return URL(string: "http://8.135.239.158:18080/")!
+        case .test:
+            return URL(string: "https://tmk-translation-test.timekettle.net/")!
+        case .pre:
+            return URL(string: "https://api-rayneo.timekettle.co/")!
+        }
     }
 
     static func onlineAuthFailureMessage(_ error: Error) -> String {

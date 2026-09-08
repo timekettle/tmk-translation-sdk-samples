@@ -39,6 +39,7 @@ data class OfflineListenScreen(
     override fun Content() {
         val navigator = LocalNavigator.currentOrThrow
         val viewModel: OfflineListenViewModel = hiltViewModel()
+        val memoryMonitor = rememberDemoAppMemoryMonitor("offline_listen", visibleByDefault = true)
         val isModelReady by viewModel.isModelReady.collectAsState()
         val isDownloading by viewModel.isDownloading.collectAsState()
         val downloadProgress by viewModel.downloadProgress.collectAsState()
@@ -63,8 +64,17 @@ data class OfflineListenScreen(
         val isScenarioUpdating by viewModel.isScenarioUpdating.collectAsState()
         val pendingDownloadPrompt by viewModel.pendingDownloadPrompt.collectAsState()
         val retryHintAfterDownload by viewModel.retryHintAfterDownload.collectAsState()
+        val downloadFailureMessage by viewModel.downloadFailureMessage.collectAsState()
         val totalDownloadProgress by viewModel.totalDownloadProgress.collectAsState()
+        val bubbleRetentionLimit by viewModel.bubbleRetentionLimit.collectAsState()
         val context = LocalContext.current
+        LaunchedEffect(viewModel) {
+            Toast.makeText(
+                context,
+                viewModel.currentOfflineModelVersionMessage(),
+                Toast.LENGTH_LONG,
+            ).show()
+        }
         // 语言切换失败:轻量 Toast 提示,不打断当前通道。
         LaunchedEffect(localeSwitchError) {
             localeSwitchError?.let {
@@ -79,11 +89,18 @@ data class OfflineListenScreen(
                 viewModel.consumeRetryHintAfterDownload()
             }
         }
+        LaunchedEffect(downloadFailureMessage) {
+            downloadFailureMessage?.let {
+                Toast.makeText(context, it, Toast.LENGTH_LONG).show()
+                viewModel.consumeDownloadFailureMessage()
+            }
+        }
         var settingsExpanded by remember { mutableStateOf(false) }
         var showSpeakerDialog by remember { mutableStateOf(false) }
         var showLocaleDialog by remember { mutableStateOf(false) }
         var showTranslateModeDialog by remember { mutableStateOf(false) }
         var showScenarioDialog by remember { mutableStateOf(false) }
+        var showBubbleRetentionLimitDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
         val offlineLanguageOptions = (rememberOfflineLanguageOptions().state
             as? LanguageOptionsState.Ready)?.options ?: emptyMap()
@@ -92,6 +109,7 @@ data class OfflineListenScreen(
             viewModel.setLanguagesIfNeeded(this@OfflineListenScreen.sourceLang, this@OfflineListenScreen.targetLang)
             viewModel.initSDK()
         }
+        LaunchedEffect(isChannelReady) { if (isChannelReady) memoryMonitor.markRuntimeReady() }
 
         BackHandler(enabled = true) {
             viewModel.stop()
@@ -101,6 +119,7 @@ data class OfflineListenScreen(
         DisposableEffect(Unit) {
             onDispose { viewModel.stop() }
         }
+        DemoAppMemoryOverlay(memoryMonitor)
 
         if (initErrorMessage != null) {
             SampleInitErrorDialog(
@@ -156,6 +175,13 @@ data class OfflineListenScreen(
                         onDismissRequest = { settingsExpanded = false },
                     ) {
                         DropdownMenuItem(
+                            text = { Text("保留气泡数量：$bubbleRetentionLimit") },
+                            onClick = {
+                                settingsExpanded = false
+                                showBubbleRetentionLimitDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
                             text = { Text("音色设置") },
                             onClick = {
                                 settingsExpanded = false
@@ -184,6 +210,7 @@ data class OfflineListenScreen(
                                 showScenarioDialog = true
                             },
                         )
+                        DemoMemoryMonitorSettingsItem(memoryMonitor) { settingsExpanded = false }
                     }
                 }
             }
@@ -285,8 +312,8 @@ data class OfflineListenScreen(
                 stopText = "停止收听",
                 startEnabled = isModelReady && isChannelReady && !isStarted && !isStarting,
                 stopEnabled = isStarted,
-                onStart = { viewModel.start() },
-                onStop = { viewModel.stopListening() },
+                onStart = { memoryMonitor.markRunStarted(); viewModel.start() },
+                onStop = { memoryMonitor.markRunStopped(); viewModel.stopListening() },
             )
 
             Spacer(modifier = Modifier.height(6.dp))
@@ -314,6 +341,16 @@ data class OfflineListenScreen(
             )
         }
 
+        if (showBubbleRetentionLimitDialog) {
+            BubbleRetentionLimitDialog(
+                initialLimit = bubbleRetentionLimit,
+                onDismiss = { showBubbleRetentionLimitDialog = false },
+                onConfirm = {
+                    showBubbleRetentionLimitDialog = false
+                    viewModel.setBubbleRetentionLimit(it)
+                },
+            )
+        }
         if (showLocaleDialog) {
             OnlineLocaleSwitchDialog(
                 title = "切换离线收听语言",

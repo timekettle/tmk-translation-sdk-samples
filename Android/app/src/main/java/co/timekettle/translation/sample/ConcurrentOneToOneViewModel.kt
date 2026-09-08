@@ -11,7 +11,6 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
-import co.timekettle.offlinesdk.vad.VadDetector
 import co.timekettle.translation.config.TmkCreateChannelOptions
 import co.timekettle.translation.config.TmkTransChannelConfig
 import co.timekettle.translation.config.TmkTranslationRoomConfig
@@ -21,6 +20,7 @@ import co.timekettle.translation.TmkTranslationSDK
 import co.timekettle.translation.core.AbstractChannelEngine
 import co.timekettle.translation.enums.Scenario
 import co.timekettle.translation.enums.TmkSensitiveWordRedactionOption
+import co.timekettle.translation.enums.TmkTTSAudioCallbackThread
 import co.timekettle.translation.enums.TranslationMode
 import co.timekettle.sdk.common.enums.TransModeType
 import co.timekettle.translation.listener.AuthCallback
@@ -38,7 +38,6 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -46,7 +45,7 @@ import javax.inject.Inject
 
 /**
  * ConcurrentOneToOne 的唯一场景协调器。
- * 两路 Runtime 只拥有各自 Channel；本类统一拥有麦克风、VAD、Mapper 与 TTS Player。
+ * 两路 Runtime 只拥有各自 Channel；本类统一拥有麦克风、Mapper 与 TTS Player。
  */
 @HiltViewModel
 class ConcurrentOneToOneViewModel @Inject constructor(
@@ -69,6 +68,7 @@ class ConcurrentOneToOneViewModel @Inject constructor(
         val isRunning: Boolean = false,
         val ttsSource: TtsSource = TtsSource.ONLINE,
         val playbackMode: OneToOnePlaybackMode = OneToOnePlaybackMode.LEFT,
+        val bubbleRetentionLimit: Int = 20,
         val rows: List<ConcurrentConversationMapper.Row> = emptyList(),
     )
 
@@ -77,9 +77,10 @@ class ConcurrentOneToOneViewModel @Inject constructor(
         private const val CHANNEL_COUNT = OneToOneDemoDefaults.channelCount
         private const val BYTES_PER_20_MS = 640
         private const val TAG = "Concurrent1v1"
+        private const val DEFAULT_BUBBLE_RETENTION_LIMIT = 20
     }
 
-    private val mapper = ConcurrentConversationMapper()
+    private val mapper = ConcurrentConversationMapper(maxRows = DEFAULT_BUBBLE_RETENTION_LIMIT)
     // 两路 Runtime 各持一个 TTS 封装类(在线/离线路由解析不同);TTS 来源(播在线还是离线)由本类守卫决定。
     private val onlineTtsCoordinator = DemoTtsPlaybackCoordinator(
         tag = "Concurrent1v1-Online",
@@ -109,12 +110,10 @@ class ConcurrentOneToOneViewModel @Inject constructor(
     private var onlineChannelOperation: Cancelable? = null
     private var offlineChannelOperation: Cancelable? = null
     private var audioRecord: AudioRecord? = null
-    private var rightVad: VadDetector? = null
     private var recordingThread: Thread? = null
     private val audioCaptureLock = Any()
     @Volatile private var isRecording = false
     @Volatile private var released = false
-    @Volatile private var pendingRightMetadata: ByteArray? = null
     private var prepared = false
     /** 每个 Runtime 独立的回调代次；重试/释放后丢弃旧 Channel 的迟到回调。 */
     private val onlineGeneration = AtomicLong(0)
@@ -130,6 +129,19 @@ class ConcurrentOneToOneViewModel @Inject constructor(
         rowsPublishPending.set(false)
         val snapshot = synchronized(mapper) { mapper.rows() }
         publish { it.copy(rows = snapshot) }
+    }
+
+    fun setBubbleRetentionLimit(limit: Int) {
+        val rows = synchronized(mapper) { mapper.setMaxRows(limit) }
+        publish {
+            it.copy(
+                bubbleRetentionLimit = limit.coerceIn(
+                    DemoConversationBubbleAssembler.MIN_MAX_ROWS,
+                    DemoConversationBubbleAssembler.MAX_MAX_ROWS,
+                ),
+                rows = rows,
+            )
+        }
     }
 
     fun prepare(leftLanguage: String, rightLanguage: String) {
@@ -444,7 +456,13 @@ class ConcurrentOneToOneViewModel @Inject constructor(
             return
         }
         val profile = OneToOneDemoDefaults.concurrentOffline
-        TmkTranslationSDK.createTmkTranslationRoom(object : CreateRoomCallback {
+        val roomConfig = TmkTranslationRoomConfig.Builder()
+            .setMode(TranslationMode.OFFLINE)
+            .setScenario(Scenario.ONE_TO_ONE)
+            .setSourceLang(rightLang)
+            .setTargetLang(leftLang)
+            .build()
+        TmkTranslationSDK.createTmkTranslationRoom(roomConfig, object : CreateRoomCallback {
             override fun onSuccess(room: TmkTranslationRoom) {
                 if (!isCurrent(ConcurrentConversationMapper.Runtime.OFFLINE, generation)) return
                 Log.d(TAG, "runtime=OFFLINE room created")
@@ -461,6 +479,7 @@ class ConcurrentOneToOneViewModel @Inject constructor(
                     .setChannelNum(CHANNEL_COUNT)
                     .setOfflineAudioChannelMode(profile.audioMode)
                     .setModelRootDirectory(TmkTranslationSDK.defaultOfflineModelRootDirectory(application))
+                    .setTtsAudioCallbackThread(TmkTTSAudioCallbackThread.BACKGROUND)
                     .setTranslateMode(profile.translateMode)
                     .setRoomScenario(profile.roomScenario)
                     .build()
@@ -635,22 +654,8 @@ class ConcurrentOneToOneViewModel @Inject constructor(
             publish { it.copy(captureStatus = "音频设备初始化失败") }
             return
         }
-        val detector = try {
-            VadDetector(sampleRate = SAMPLE_RATE).apply {
-                setCallback(object : VadDetector.Callback {
-                    override fun onVadStart() { pendingRightMetadata = newUtterance(ConcurrentConversationMapper.Lane.RIGHT) }
-                    override fun onVadEnd() = Unit
-                })
-                init()
-            }
-        } catch (_: Exception) {
-            record.release()
-            publish { it.copy(captureStatus = "VAD 初始化失败") }
-            return
-        }
         synchronized(audioCaptureLock) {
             audioRecord = record
-            rightVad = detector
             isRecording = true
         }
         try {
@@ -660,7 +665,7 @@ class ConcurrentOneToOneViewModel @Inject constructor(
             publish { it.copy(captureStatus = "音频启动失败") }
             return
         }
-        val worker = Thread({ captureLoop(record, detector) }, "Concurrent1v1-Audio")
+        val worker = Thread({ captureLoop(record) }, "Concurrent1v1-Audio")
         synchronized(audioCaptureLock) { recordingThread = worker }
         worker.start()
         onlineTtsCoordinator.setActive(true)
@@ -668,13 +673,13 @@ class ConcurrentOneToOneViewModel @Inject constructor(
         publish { it.copy(isRunning = true, captureStatus = "采集中") }
     }
 
-    private fun captureLoop(record: AudioRecord, detector: VadDetector) {
+    private fun captureLoop(record: AudioRecord) {
         val left = ByteArray(BYTES_PER_20_MS)
         val right = ByteArray(BYTES_PER_20_MS)
         val loop = DemoLocalAudioLoopBuffer(readDemoPcmAsset("en_simple.pcm"))
         try {
             captureLoop@ while (isRecording && !Thread.currentThread().isInterrupted) {
-                val leftStarted = loop.fillNextLoopChunk(left)
+                loop.fillNextLoopChunk(left)
                 var read = 0
                 while (read < right.size && isRecording && !Thread.currentThread().isInterrupted) {
                     val current = runCatching {
@@ -688,7 +693,6 @@ class ConcurrentOneToOneViewModel @Inject constructor(
                     }
                 }
                 if (read <= 0) continue
-                runCatching { detector.pushAudioBytes(right) }
                 // 每个循环创建一帧只读 PCM，避免 SDK 异步消费时读取下一轮写入的数据。
                 val stereo = ByteArray(BYTES_PER_20_MS * 2)
                 for (index in 0 until BYTES_PER_20_MS step 2) {
@@ -696,23 +700,19 @@ class ConcurrentOneToOneViewModel @Inject constructor(
                     stereo[output] = left[index]; stereo[output + 1] = left[index + 1]
                     stereo[output + 2] = right[index]; stereo[output + 3] = right[index + 1]
                 }
-                val metadata = if (leftStarted) newUtterance(ConcurrentConversationMapper.Lane.LEFT) else pendingRightMetadata.also { pendingRightMetadata = null }
-                onlineChannel?.pushStreamAudioData(stereo, 2, metadata)
-                offlineChannel?.pushStreamAudioData(stereo, 2, metadata)
+                onlineChannel?.pushStreamAudioData(stereo, 2, null)
+                offlineChannel?.pushStreamAudioData(stereo, 2, null)
             }
         } finally {
             // 只由采集线程 release；stopAudioCapture 不在 UI 线程 join/release，避免 read/stop 竞态。
             runCatching { record.stop() }
             runCatching { record.release() }
-            runCatching { detector.release() }
             synchronized(audioCaptureLock) {
                 if (audioRecord === record) audioRecord = null
-                if (rightVad === detector) rightVad = null
                 if (recordingThread === Thread.currentThread()) {
                     recordingThread = null
                     isRecording = false
                 }
-                pendingRightMetadata = null
             }
             publish { state ->
                 if (state.isRunning && !isRecording) state.copy(isRunning = false, captureStatus = "采集线程已停止") else state
@@ -720,35 +720,23 @@ class ConcurrentOneToOneViewModel @Inject constructor(
         }
     }
 
-    private fun newUtterance(lane: ConcurrentConversationMapper.Lane): ByteArray {
-        val now = Calendar.getInstance()
-        val channel = if (lane == ConcurrentConversationMapper.Lane.LEFT) 1 else 2
-        // 这里只发送 SDK 需要的 speechStart 元数据；气泡由各 Runtime 自己的结果回调创建。
-        return byteArrayOf(
-            channel.toByte(),
-            now.get(Calendar.HOUR_OF_DAY).toByte(),
-            now.get(Calendar.MINUTE).toByte(),
-            now.get(Calendar.SECOND).toByte(),
-        )
-    }
-
     private fun stopAudioCapture() {
         isRecording = false
-        onlineTtsCoordinator.setActive(false)
-        offlineTtsCoordinator.setActive(false)
-        val (worker, record, detector) = synchronized(audioCaptureLock) {
-            Triple(recordingThread, audioRecord, rightVad)
+        // 与后台 onAudioDataReceive 的来源选择和入队共用锁，避免停止后旧回调重新播音。
+        synchronized(ttsSelectionLock) {
+            onlineTtsCoordinator.setActive(false)
+            offlineTtsCoordinator.setActive(false)
+        }
+        val (worker, record) = synchronized(audioCaptureLock) {
+            recordingThread to audioRecord
         }
         runCatching { record?.stop() }
         worker?.interrupt()
-        pendingRightMetadata = null
         // 正常路径由 captureLoop finally 完成 release；尚未启动 worker 时由当前线程兜底。
         if (worker == null) {
             runCatching { record?.release() }
-            runCatching { detector?.release() }
             synchronized(audioCaptureLock) {
                 if (audioRecord === record) audioRecord = null
-                if (rightVad === detector) rightVad = null
             }
         }
         if (state.value.isRunning) publish { it.copy(isRunning = false, captureStatus = "已停止") }

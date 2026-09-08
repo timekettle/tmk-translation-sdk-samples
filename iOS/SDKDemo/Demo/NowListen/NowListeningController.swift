@@ -14,6 +14,10 @@ final class NowListeningController: UIViewController {
     private let startListeningButton = UIButton(type: .system)
     private let stopListeningButton = UIButton(type: .system)
     private let tableView = UITableView(frame: .zero, style: .plain)
+    private let networkOverlayView = NetworkQualityOverlayView()
+    private var networkOverlayTopConstraint: Constraint?
+    private var networkOverlayRightConstraint: Constraint?
+    private var networkOverlayPanStartFrame: CGRect = .zero
 
     private let viewModel = NowListeningViewModel()
     private let initialSourceLanguage: String?
@@ -45,6 +49,7 @@ final class NowListeningController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
+        installDemoMemoryMonitor(mode: "online_listen", visibleByDefault: false)
         bindViewModel()
         viewModel.configureInitialLanguages(source: initialSourceLanguage, target: initialTargetLanguage)
         viewModel.onViewDidLoad()
@@ -52,7 +57,8 @@ final class NowListeningController: UIViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        if isBeingDismissed || navigationController?.isBeingDismissed == true {
+        if isBeingDismissed || isMovingFromParent || navigationController?.isBeingDismissed == true {
+            demoMemoryPageExit()
             viewModel.onViewWillClose()
         }
     }
@@ -115,6 +121,60 @@ private extension NowListeningController {
             make.top.equalTo(startListeningButton.snp.bottom).offset(8)
             make.left.right.bottom.equalToSuperview()
         }
+
+        view.addSubview(networkOverlayView)
+        networkOverlayView.snp.makeConstraints { make in
+            networkOverlayTopConstraint = make.top.equalTo(view.safeAreaLayoutGuide.snp.top).offset(8).constraint
+            networkOverlayRightConstraint = make.right.equalToSuperview().inset(12).constraint
+            make.width.lessThanOrEqualTo(240)
+        }
+        networkOverlayView.setContentHuggingPriority(.required, for: .vertical)
+        networkOverlayView.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(onNetworkOverlayPan(_:)))
+        networkOverlayView.addGestureRecognizer(pan)
+        networkOverlayView.isUserInteractionEnabled = true
+    }
+
+    @objc func onNetworkOverlayPan(_ gesture: UIPanGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            // 拖动中只用 transform，避免 Auto Layout / 文案变高导致“不跟手”。
+            networkOverlayView.transform = .identity
+            networkOverlayPanStartFrame = networkOverlayView.frame
+        case .changed:
+            let translation = gesture.translation(in: view)
+            networkOverlayView.transform = CGAffineTransform(translationX: translation.x, y: translation.y)
+        case .ended, .cancelled, .failed:
+            let translation = gesture.translation(in: view)
+            networkOverlayView.transform = .identity
+
+            let startFrame = networkOverlayPanStartFrame
+            let proposed = CGRect(
+                x: startFrame.origin.x + translation.x,
+                y: startFrame.origin.y + translation.y,
+                width: startFrame.width,
+                height: startFrame.height
+            )
+            let safeTop = view.safeAreaInsets.top
+            let safeBottom = view.safeAreaInsets.bottom
+            let minX: CGFloat = 8
+            let maxX = max(minX, view.bounds.width - proposed.width - 8)
+            let minY = safeTop
+            let maxY = max(minY, view.bounds.height - safeBottom - proposed.height - 8)
+            let clampedX = min(max(proposed.minX, minX), maxX)
+            let clampedY = min(max(proposed.minY, minY), maxY)
+
+            // top 相对 safeArea；right 用 inset（与初始 .inset(12) 同向，勿用 offset）。
+            let topOffset = max(0, clampedY - safeTop)
+            let rightInset = max(8, view.bounds.maxX - (clampedX + proposed.width))
+            networkOverlayTopConstraint?.update(offset: topOffset)
+            networkOverlayRightConstraint?.update(inset: rightInset)
+            view.layoutIfNeeded()
+            gesture.setTranslation(.zero, in: view)
+        default:
+            break
+        }
     }
 
     func bindViewModel() {
@@ -148,6 +208,15 @@ private extension NowListeningController {
                 self?.presentConversationPrompt(prompt)
             }
             .store(in: &cancellables)
+
+        viewModel.dismissReconnectTimeoutPrompt
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                guard let alert = self?.presentedViewController as? UIAlertController,
+                      alert.title == "连接恢复超时" else { return }
+                alert.dismiss(animated: true)
+            }
+            .store(in: &cancellables)
     }
 
     func render(_ state: NowListeningViewState) {
@@ -156,7 +225,9 @@ private extension NowListeningController {
         let playback = state.playbackChannels > 0 ? "\(state.playbackChannels)ch" : "-"
         infoLabel.text = "房间:\(state.currentRoomNo)  能力:\(state.scenarioOption.title)  语言:\(localizedLanguageName(for: state.sourceLanguage))→\(localizedLanguageName(for: state.targetLanguage))  采集:\(capture)  回放:\(playback)"
         startListeningButton.isEnabled = state.canStartListening
+        if state.canStartListening { demoMemoryRuntimeReady() }
         stopListeningButton.isEnabled = state.canStopListening
+        networkOverlayView.update(network: state.networkStats, bootstrap: state.bootstrapStats, wifiSpeed: state.wifiSpeed)
     }
 
     func setupButton(_ button: UIButton, title: String, action: Selector) {
@@ -199,10 +270,12 @@ private extension NowListeningController {
     }
 
     @objc func onTapStartListening() {
+        demoMemoryRunStarted()
         viewModel.startListening()
     }
 
     @objc func onTapStopListening() {
+        demoMemoryRunStopped()
         viewModel.stopListening()
     }
 
@@ -212,6 +285,12 @@ private extension NowListeningController {
 
     func makeSettingsMenu() -> UIMenu {
         UIMenu(title: "", children: [
+            UIAction(title: "保留气泡数量：\(viewModel.currentBubbleRetentionLimit())") { [weak self] _ in
+                guard let self else { return }
+                presentBubbleRetentionLimitPicker(from: self,
+                                                  current: self.viewModel.currentBubbleRetentionLimit(),
+                                                  onConfirm: self.viewModel.setBubbleRetentionLimit)
+            },
             UIAction(title: "切换语言") { [weak self] _ in
                 self?.loadSupportedLanguagesAndShowPicker()
             },
@@ -229,7 +308,8 @@ private extension NowListeningController {
             },
             UIAction(title: "音色") { [weak self] _ in
                 self?.showSpeakerMenu()
-            }
+            },
+            demoMemoryMonitorMenuAction(visibleByDefault: false)
         ])
     }
 
@@ -340,13 +420,30 @@ private extension NowListeningController {
     }
 
     func presentConversationPrompt(_ prompt: DemoConversationPrompt) {
+        if let alert = presentedViewController as? UIAlertController,
+           alert.title == "连接恢复超时",
+           prompt.style != .reconnectTimeout {
+            alert.dismiss(animated: true) { [weak self] in
+                self?.presentConversationPrompt(prompt)
+            }
+            return
+        }
         guard presentedViewController == nil else { return }
         let alert = UIAlertController(title: prompt.title,
                                       message: prompt.message,
                                       preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
-            self?.onClose()
-        })
+        if prompt.style == .reconnectTimeout {
+            alert.addAction(UIAlertAction(title: "继续等待", style: .cancel) { [weak self] _ in
+                self?.viewModel.continueWaitingAfterReconnectTimeout()
+            })
+            alert.addAction(UIAlertAction(title: "重新创建", style: .default) { [weak self] _ in
+                self?.viewModel.recreateAfterReconnectTimeout()
+            })
+        } else {
+            alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
+                self?.onClose()
+            })
+        }
         if prompt.style == .restart {
             alert.addAction(UIAlertAction(title: "重新创建", style: .default) { [weak self] _ in
                 self?.viewModel.recreateAfterRemoteClose()
@@ -570,5 +667,110 @@ extension NowListeningController: UIPickerViewDataSource, UIPickerViewDelegate {
 
     func pickerView(_ pickerView: UIPickerView, widthForComponent component: Int) -> CGFloat {
         pickerView.bounds.width / 2
+    }
+}
+
+private final class NetworkQualityOverlayView: UIView {
+    private let lossLabel = UILabel()
+    private let wifiLabel = UILabel()
+    private let totalLabel = UILabel()
+    private let summaryLabel = UILabel()
+    private var tickTimer: Timer?
+    private var latestNetwork = DemoOnlineNetworkStatsSnapshot()
+    private var latestBootstrap = DemoBootstrapSnapshot()
+    private var latestWifi = DemoWifiSpeedSnapshot()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = UIColor.black.withAlphaComponent(0.45)
+        layer.cornerRadius = 10
+        clipsToBounds = true
+
+        lossLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        lossLabel.textColor = .white
+        lossLabel.numberOfLines = 1
+
+        wifiLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        wifiLabel.textColor = UIColor(red: 184/255, green: 190/255, blue: 207/255, alpha: 1)
+        wifiLabel.numberOfLines = 2
+
+        totalLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        totalLabel.textColor = UIColor(red: 184/255, green: 190/255, blue: 207/255, alpha: 1)
+        totalLabel.numberOfLines = 1
+
+        summaryLabel.font = .systemFont(ofSize: 10, weight: .regular)
+        summaryLabel.textColor = UIColor(red: 184/255, green: 190/255, blue: 207/255, alpha: 1)
+        summaryLabel.numberOfLines = 0
+
+        let stack = UIStackView(arrangedSubviews: [lossLabel, wifiLabel, totalLabel, summaryLabel])
+        stack.axis = .vertical
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        tickTimer?.invalidate()
+    }
+
+    func update(network: DemoOnlineNetworkStatsSnapshot,
+                bootstrap: DemoBootstrapSnapshot,
+                wifiSpeed: DemoWifiSpeedSnapshot) {
+        latestNetwork = network
+        latestBootstrap = bootstrap
+        latestWifi = wifiSpeed
+        refreshLabels()
+        syncTickTimer()
+    }
+
+    private func refreshLabels() {
+        let nowMs = DemoBootstrapPipelineTracker.nowMs()
+        lossLabel.text = "上丢（\(latestNetwork.formatLoss(latestNetwork.txLossRate))）  下丢（\(latestNetwork.formatLoss(latestNetwork.rxLossRate))）"
+        wifiLabel.text = latestWifi.displayLine()
+        if latestWifi.status == .failed || latestWifi.isBandwidthPoor {
+            wifiLabel.textColor = UIColor(red: 231/255, green: 76/255, blue: 60/255, alpha: 1)
+        } else if latestWifi.status == .running {
+            wifiLabel.textColor = UIColor(red: 241/255, green: 196/255, blue: 15/255, alpha: 1)
+        } else if latestWifi.status == .done {
+            wifiLabel.textColor = UIColor(red: 46/255, green: 204/255, blue: 113/255, alpha: 1)
+        } else {
+            wifiLabel.textColor = UIColor(red: 184/255, green: 190/255, blue: 207/255, alpha: 1)
+        }
+
+        totalLabel.text = latestBootstrap.totalLine(nowMs: nowMs)
+        summaryLabel.text = latestBootstrap.summaryLine(nowMs: nowMs)
+
+        if latestBootstrap.failed {
+            totalLabel.textColor = UIColor(red: 231/255, green: 76/255, blue: 60/255, alpha: 1)
+        } else if latestBootstrap.totalMs != nil {
+            totalLabel.textColor = UIColor(red: 46/255, green: 204/255, blue: 113/255, alpha: 1)
+        } else if latestBootstrap.isRunning {
+            totalLabel.textColor = UIColor(red: 241/255, green: 196/255, blue: 15/255, alpha: 1)
+        } else {
+            totalLabel.textColor = UIColor(red: 184/255, green: 190/255, blue: 207/255, alpha: 1)
+        }
+    }
+
+    private func syncTickTimer() {
+        if latestBootstrap.isRunning {
+            guard tickTimer == nil else { return }
+            tickTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+                self?.refreshLabels()
+            }
+        } else {
+            tickTimer?.invalidate()
+            tickTimer = nil
+        }
     }
 }

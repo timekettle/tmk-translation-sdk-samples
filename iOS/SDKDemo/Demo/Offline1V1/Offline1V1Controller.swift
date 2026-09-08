@@ -79,6 +79,7 @@ final class Offline1V1Controller: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
+        installDemoMemoryMonitor(mode: "offline_one_to_one", visibleByDefault: true)
         loadLocalLanguageOptions()
         bindViewModel()
         viewModel.configureInitialLanguages(source: initialSourceLanguage, target: initialTargetLanguage)
@@ -87,7 +88,8 @@ final class Offline1V1Controller: UIViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        if isBeingDismissed || navigationController?.isBeingDismissed == true {
+        if isBeingDismissed || isMovingFromParent || navigationController?.isBeingDismissed == true {
+            demoMemoryPageExit()
             viewModel.onViewWillClose()
         }
     }
@@ -195,6 +197,12 @@ private extension Offline1V1Controller {
 
     func makeSettingsMenu() -> UIMenu {
         UIMenu(title: "", children: [
+            UIAction(title: "保留气泡数量：\(viewModel.currentBubbleRetentionLimit())") { [weak self] _ in
+                guard let self else { return }
+                presentBubbleRetentionLimitPicker(from: self,
+                                                  current: self.viewModel.currentBubbleRetentionLimit(),
+                                                  onConfirm: self.viewModel.setBubbleRetentionLimit)
+            },
             UIAction(title: "播放音源") { [weak self] _ in
                 self?.showPlaybackModePicker()
             },
@@ -212,7 +220,8 @@ private extension Offline1V1Controller {
             },
             UIAction(title: "房间能力") { [weak self] _ in
                 self?.showScenarioSheet()
-            }
+            },
+            demoMemoryMonitorMenuAction(visibleByDefault: true)
         ])
     }
 
@@ -343,6 +352,20 @@ private extension Offline1V1Controller {
             }
             .store(in: &cancellables)
 
+        viewModel.offlineModelEntryMessage
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] message in
+                self?.showDemoToast(message)
+            }
+            .store(in: &cancellables)
+
+        viewModel.offlineModelDownloadFailureMessage
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] message in
+                self?.showDemoToast(message, duration: 4)
+            }
+            .store(in: &cancellables)
+
         viewModel.pendingDownloadPrompt
             .receive(on: DispatchQueue.main)
             .sink { [weak self] prompt in
@@ -366,6 +389,7 @@ private extension Offline1V1Controller {
         let targetName = localizedLanguageName(for: state.targetLanguage)
         infoLabel.text = "语言:\(sourceName)→\(targetName)  采集:\(capture)  回放:\(playback)  播放:\(state.playbackMode.title)  通道:\(viewModel.channelAudioMode.oneToOneDemoTitle)"
         startListeningButton.isEnabled = state.canStartListening && modelButtonState == .ready
+        if startListeningButton.isEnabled { demoMemoryRuntimeReady() }
         stopListeningButton.isEnabled = state.canStopListening
     }
 
@@ -447,10 +471,12 @@ private extension Offline1V1Controller {
     }
 
     @objc func onTapStartListening() {
+        demoMemoryRunStarted()
         viewModel.startListening()
     }
 
     @objc func onTapStopListening() {
+        demoMemoryRunStopped()
         viewModel.stopListening()
     }
 

@@ -19,7 +19,7 @@ final class ConcurrentOneToOneViewModel: NSObject {
     /// 一对一 Demo 的左右路语言。SDK 边界统一使用 source=右路、target=左路。
     private let leftLanguage: String
     private let rightLanguage: String
-    private let mapper = ConcurrentConversationMapper()
+    private let mapper = ConcurrentConversationMapper(offlineTranslationAssemblyMode: .offlineCumulative)
     private let mapperQueue = DispatchQueue(label: "co.timekettle.demo.concurrent.mapper")
     private lazy var rowsCoalescer = DemoLatestKeyUpdateCoalescer<String>(
         interval: 0.1,
@@ -61,6 +61,7 @@ final class ConcurrentOneToOneViewModel: NSObject {
     private var onlineDidLogResult = false
     private var offlineDidLogResult = false
     private var released = false
+    private var audioInputDroppedFrames: UInt64 = 0
 
     init(leftLanguage: String, rightLanguage: String) {
         self.leftLanguage = leftLanguage
@@ -178,8 +179,10 @@ final class ConcurrentOneToOneViewModel: NSObject {
     func selectTtsSource(_ source: TTSSource) {
         ttsLock.lock()
         ttsSource = source
+        // 与回调入队共用 ttsLock：来源切换后的旧 PCM 不能越过清缓冲重新写入。
+        onlineTtsCoordinator.clearPlaybackBuffer()
+        offlineTtsCoordinator.clearPlaybackBuffer()
         ttsLock.unlock()
-        voiceIO?.clearPlaybackBuffer()
     }
 
     func selectPlaybackMode(_ mode: OneToOnePlaybackMode) {
@@ -265,7 +268,7 @@ final class ConcurrentOneToOneViewModel: NSObject {
         guard TmkTranslationSDK.shared.isOfflineModelReady(srcLang: rightLanguage, dstLang: leftLanguage, scenario: .oneToOne, needMt: true, needTts: true) else { updateState { $0.offlineStatus = "模型缺失"; $0.modelStatus = "需要下载"; $0.needsModelDownload = true; $0.offlineCanRetry = false }; return }
         let profile = OneToOneDemoDefaults.concurrentOffline
         let speakers = [TmkSpeaker(channel: .left, gender: profile.leftSpeaker), TmkSpeaker(channel: .right, gender: profile.rightSpeaker)]
-        let config = TmkTranslationChannelConfig.Builder().setMode(.offline).setScenario(.oneToOne).setSourceLang(rightLanguage).setTargetLang(leftLanguage).setSpeakers(speakers).setPCMSampleRate(OneToOneDemoDefaults.sampleRate).setPCMChannels(OneToOneDemoDefaults.channelCount).setChannelAudioMode(profile.audioMode).setModelRootDirectory(OneToOneDemoDefaults.offlineModelRootDirectory()).setTranslateMode(profile.translateMode).setCapabilityTier(.toSpeech).build()
+        let config = TmkTranslationChannelConfig.Builder().setMode(.offline).setScenario(.oneToOne).setSourceLang(rightLanguage).setTargetLang(leftLanguage).setSpeakers(speakers).setPCMSampleRate(OneToOneDemoDefaults.sampleRate).setPCMChannels(OneToOneDemoDefaults.channelCount).setChannelAudioMode(profile.audioMode).setTTSAudioCallbackThread(.background).setModelRootDirectory(OneToOneDemoDefaults.offlineModelRootDirectory()).setTranslateMode(profile.translateMode).setCapabilityTier(.toSpeech).build()
         let listener = Listener(owner: self, runtime: .offline, generation: generation)
         offlineListener = listener
         offlineChannelOperation = TmkTranslationSDK.shared.createTranslationChannel(config, listener: listener) { [weak self] result in self?.bind(result, runtime: .offline, generation: generation) }
@@ -313,7 +316,13 @@ final class ConcurrentOneToOneViewModel: NSObject {
 
     private func enqueueAudioInput(_ data: Data, sessionGeneration: UInt64) {
         // AudioUnit realtime callback 不获取生命周期锁；停止后的排队数据由工作队列代际校验丢弃。
-        guard !data.isEmpty, audioInputSlots.wait(timeout: .now()) == .success else { return }
+        guard !data.isEmpty else { return }
+        guard audioInputSlots.wait(timeout: .now()) == .success else {
+            lifecycleLock.lock()
+            audioInputDroppedFrames &+= 1
+            lifecycleLock.unlock()
+            return
+        }
         audioInputQueue.async { [weak self] in
             defer { self?.audioInputSlots.signal() }
             guard let self,
@@ -370,6 +379,17 @@ final class ConcurrentOneToOneViewModel: NSObject {
         let rows = mapper.rows()
         updateState { $0.rows = rows }
     }
+    func setBubbleRetentionLimit(_ limit: Int) {
+        mapperQueue.async { [weak self] in
+            guard let self else { return }
+            let rows = self.mapper.setMaxRows(limit)
+            let bounded = min(max(limit, DemoConversationBubbleAssembler.minimumMaxRows), DemoConversationBubbleAssembler.maximumMaxRows)
+            self.updateState {
+                $0.bubbleRetentionLimit = bounded
+                $0.rows = rows
+            }
+        }
+    }
     private func interleave(left: Data, right: Data) -> Data { let count = min(left.count, right.count) / 2; var output = Data(capacity: count * 4); left.withUnsafeBytes { l in right.withUnsafeBytes { r in guard let lb = l.bindMemory(to: UInt8.self).baseAddress, let rb = r.bindMemory(to: UInt8.self).baseAddress else { return }; for i in 0..<count { output.append(lb[i * 2]); output.append(lb[i * 2 + 1]); output.append(rb[i * 2]); output.append(rb[i * 2 + 1]) } } }; return output }
     private func channel(for runtime: ConcurrentConversationMapper.Runtime) -> TmkTranslationChannel? {
         channelLock.lock()
@@ -402,6 +422,12 @@ final class ConcurrentOneToOneViewModel: NSObject {
         let snapshot = (online: onlineChannel, offline: offlineChannel)
         channelLock.unlock()
         return snapshot
+    }
+
+    func memoryMonitorAudioDroppedFrames() -> UInt64 {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return audioInputDroppedFrames
     }
 
     private func updateState(runtime: ConcurrentConversationMapper.Runtime? = nil,
@@ -537,6 +563,21 @@ final class ConcurrentOneToOneViewModel: NSObject {
         return source
     }
 
+    /// 将来源校验、选中 coordinator 与最终入队置于同一屏障，和切换来源时的清缓冲互斥。
+    private func handleTtsAudio(runtime: ConcurrentConversationMapper.Runtime,
+                                result: TmkResult<String>,
+                                data: Data,
+                                channelCount: Int) {
+        ttsLock.lock()
+        defer { ttsLock.unlock() }
+        guard (runtime == .online && ttsSource == .online) ||
+                (runtime == .offline && ttsSource == .offline) else {
+            return
+        }
+        let coordinator = runtime == .online ? onlineTtsCoordinator : offlineTtsCoordinator
+        coordinator.handleAudioData(result: result, data: data, channelCount: channelCount)
+    }
+
     private func currentPlaybackMode() -> OneToOnePlaybackMode {
         ttsLock.lock()
         let mode = playbackMode
@@ -553,10 +594,7 @@ final class ConcurrentOneToOneViewModel: NSObject {
         func onTranslate(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) { owner?.consume(runtime, generation: generation, kind: .mt, result: result, isFinal: isFinal) }
         func onAudioDataReceive(from engine: AbstractChannelEngine, result: TmkResult<String>, data: Data, channelCount: Int) {
             guard let owner, owner.isCurrent(runtime, generation: generation), result.data == "translated_audio", !data.isEmpty else { return }
-            let selectedSource = owner.currentTtsSource()
-            guard (runtime == .online && selectedSource == .online) || (runtime == .offline && selectedSource == .offline) else { return }
-            let coordinator = runtime == .online ? owner.onlineTtsCoordinator : owner.offlineTtsCoordinator
-            coordinator.handleAudioData(result: result, data: data, channelCount: channelCount)
+            owner.handleTtsAudio(runtime: runtime, result: result, data: data, channelCount: channelCount)
         }
         func onError(_ error: TmkTranslationError) {
             owner?.handleRuntimeError(runtime, generation: generation, message: error.message)

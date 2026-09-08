@@ -14,12 +14,13 @@ import co.timekettle.translation.Cancelable
 import co.timekettle.translation.TmkTranslationChannel
 import co.timekettle.translation.TmkTranslationException
 import co.timekettle.translation.TmkTranslationSDK
-import co.timekettle.offlinesdk.vad.VadDetector
 import co.timekettle.translation.config.TmkTransChannelConfig
+import co.timekettle.translation.config.TmkTranslationRoomConfig
 import co.timekettle.translation.core.AbstractChannelEngine
 import co.timekettle.translation.enums.Scenario
 import co.timekettle.translation.enums.TmkRoomScenario
 import co.timekettle.translation.enums.TmkTranslateDeliveryMode
+import co.timekettle.translation.enums.TmkTTSAudioCallbackThread
 import co.timekettle.translation.enums.TranslationMode
 import co.timekettle.sdk.common.enums.TransModeType
 import co.timekettle.translation.listener.ActionCallback
@@ -53,6 +54,7 @@ class OfflineListenViewModel @Inject constructor(
 
     companion object {
         private const val TAG = "OfflineListenVM"
+        private const val DEFAULT_BUBBLE_RETENTION_LIMIT = 10
         private const val SAMPLE_RATE = 16000
 
         /** 气泡快照重算去抖窗口(毫秒):合并高频 partial,兼顾流畅与实时。 */
@@ -72,7 +74,6 @@ class OfflineListenViewModel @Inject constructor(
         runtime = DemoTtsRuntime.OFFLINE,
         sampleRate = SAMPLE_RATE,
     )
-    private var vadDetector: VadDetector? = null
     @Volatile private var isRecording = false
     @Volatile private var released = false
     @Volatile private var userCancelledDownload = false
@@ -120,7 +121,9 @@ class OfflineListenViewModel @Inject constructor(
     private val _logMessages = MutableStateFlow<List<String>>(emptyList())
     val logMessages: StateFlow<List<String>> = _logMessages.asStateFlow()
 
-    private val bubbleAssembler = DemoConversationBubbleAssembler()
+    private val bubbleAssembler = DemoConversationBubbleAssembler(maxRows = DEFAULT_BUBBLE_RETENTION_LIMIT)
+    private val _bubbleRetentionLimit = MutableStateFlow(DEFAULT_BUBBLE_RETENTION_LIMIT)
+    val bubbleRetentionLimit: StateFlow<Int> = _bubbleRetentionLimit.asStateFlow()
     private val _bubbles = MutableStateFlow<List<DemoConversationBubbleSnapshot>>(emptyList())
     val bubbles: StateFlow<List<DemoConversationBubbleSnapshot>> = _bubbles.asStateFlow()
 
@@ -235,6 +238,9 @@ class OfflineListenViewModel @Inject constructor(
     private val _retryHintAfterDownload = MutableStateFlow<String?>(null)
     val retryHintAfterDownload: StateFlow<String?> = _retryHintAfterDownload.asStateFlow()
 
+    private val _downloadFailureMessage = MutableStateFlow<String?>(null)
+    val downloadFailureMessage: StateFlow<String?> = _downloadFailureMessage.asStateFlow()
+
     // 本次下载若来自引导(切语言/升档触发的确认弹窗),在 confirmPendingDownload 里按来源预置好完整重试文案;
     // 普通"下载当前语言模型"按钮/自动补下载则保持 null。下载完成回调据此提示,且只提示一次(用后清空)。
     // 对齐 iOS 的 isGuidedDownload + guidedDownloadIsUpgrade 语义:非引导下载完成不提示"重试切换"。
@@ -280,6 +286,13 @@ class OfflineListenViewModel @Inject constructor(
     // 请求刷新气泡:仅投递一个合并请求(CONFLATED,不阻塞、不堆积),真正的重算在后台协程去抖后进行。
     // 不再在调用线程(主线程回调)同步做全量 snapshotWithSegments(),消除长时间运行的主线程卡顿。
     private fun publishBubbles() { bubbleRefreshRequests.trySend(Unit) }
+
+    fun setBubbleRetentionLimit(limit: Int) {
+        val bounded = limit.coerceIn(DemoConversationBubbleAssembler.MIN_MAX_ROWS, DemoConversationBubbleAssembler.MAX_MAX_ROWS)
+        bubbleAssembler.setMaxRows(bounded)
+        _bubbleRetentionLimit.value = bounded
+        publishBubbles()
+    }
 
     private fun showConversationErrorPrompt(prompt: OnlineConversationErrorPrompt?) {
         if (prompt == null || _conversationErrorPrompt.value?.id == prompt.id) return
@@ -432,6 +445,7 @@ class OfflineListenViewModel @Inject constructor(
                 override fun onOfflineModelError(code: Int, message: String) {
                     if (released || userCancelledDownload) return
                     addLog("下载失败: [$code] $message")
+                    _downloadFailureMessage.value = "离线模型下载失败：[$code] $message"
                     showConversationErrorPrompt(
                         OnlineConversationErrorPrompts.fromCode(
                             code,
@@ -603,7 +617,13 @@ class OfflineListenViewModel @Inject constructor(
         addLog("创建离线翻译通道...")
 
         try {
-            TmkTranslationSDK.createTmkTranslationRoom(object : CreateRoomCallback {
+            val roomConfig = TmkTranslationRoomConfig.Builder()
+                .setMode(TranslationMode.OFFLINE)
+                .setScenario(Scenario.LISTEN)
+                .setSourceLang(_sourceLang.value)
+                .setTargetLang(_targetLang.value)
+                .build()
+            TmkTranslationSDK.createTmkTranslationRoom(roomConfig, object : CreateRoomCallback {
                 override fun onSuccess(room: TmkTranslationRoom) {
                     if (released) { _isStarting.value = false; return }
                     addLog("创建房间成功: ${room.roomId}")
@@ -623,6 +643,7 @@ class OfflineListenViewModel @Inject constructor(
                             .setSampleRate(SAMPLE_RATE)
                             .setChannelNum(1)
                             .setModelRootDirectory(modelRootDir)
+                            .setTtsAudioCallbackThread(TmkTTSAudioCallbackThread.BACKGROUND)
                             // 离线 Demo 显式开启中间态下发(D1:不设则默认 stable 看不到 MT 中间态)。
                             .setTranslateMode(_translateMode.value)
                             // 能力档位(三档对齐在线):按需加载,recognize 只建 ASR、s2t 建 ASR+MT、s2s 全建。
@@ -882,6 +903,14 @@ class OfflineListenViewModel @Inject constructor(
         _retryHintAfterDownload.value = null
     }
 
+    fun consumeDownloadFailureMessage() {
+        _downloadFailureMessage.value = null
+    }
+
+    fun currentOfflineModelVersionMessage(): String {
+        return DemoOfflineModelSourceInspector.current(application).entryMessage.also(::addLog)
+    }
+
     fun updateSpeaker(gender: SpeakerGender) {
         _speakerGender.value = gender
         val currentChannel = channel
@@ -982,25 +1011,12 @@ class OfflineListenViewModel @Inject constructor(
         audioRecord?.startRecording()
         addLog("录音已开始")
 
-        vadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
-            setCallback(object : VadDetector.Callback {
-                override fun onVadStart() {
-                    addLog("VAD → 开始说话")
-                }
-                override fun onVadEnd() {
-                    addLog("VAD → 停止说话")
-                }
-            })
-            init()
-        }
-
         Thread {
             val buffer = ByteArray(bufferSize)
             while (isRecording) {
                 val read = audioRecord?.read(buffer, 0, buffer.size) ?: -1
                 if (read > 0) {
                     val data = buffer.copyOf(read)
-                    vadDetector?.pushAudioBytes(data)
                     channel?.pushStreamAudioData(data, 1, null)
                 }
             }
@@ -1010,7 +1026,6 @@ class OfflineListenViewModel @Inject constructor(
 
     private fun stopRecording() {
         isRecording = false
-        vadDetector?.release(); vadDetector = null
         try {
             audioRecord?.stop()
             audioRecord?.release()

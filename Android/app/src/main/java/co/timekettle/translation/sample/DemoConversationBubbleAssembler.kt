@@ -224,7 +224,7 @@ object DemoConversationEventAdapter {
     }
 }
 
-class DemoConversationBubbleAssembler(private val maxRows: Int = 500) {
+class DemoConversationBubbleAssembler(maxRows: Int = 500) {
     private data class SessionSegment(
         val text: String,
         val isFinal: Boolean,
@@ -269,6 +269,7 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 500) {
     )
 
     private val lock = Any()
+    private var maxRows = maxOf(1, maxRows)
     private val aggregates = linkedMapOf<String, BubbleAggregate>()
     private val activeBubbleIdByLane = mutableMapOf<DemoConversationLane, String>()
     private val endedBubbleIds = mutableSetOf<String>()
@@ -280,6 +281,13 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 500) {
     }
 
     fun clear() = reset()
+
+    /** 运行时更新 Demo 页面保留气泡数；缩小上限时立刻淘汰最早的聚合状态。 */
+    fun setMaxRows(maxRows: Int): List<BubbleRowData> = synchronized(lock) {
+        this.maxRows = maxRows.coerceIn(MIN_MAX_ROWS, MAX_MAX_ROWS)
+        trimIfNeeded()
+        snapshotLocked()
+    }
 
     fun consume(event: DemoConversationEvent): List<BubbleRowData> = synchronized(lock) {
         val key = rowKey(event.bubbleId, event.lane)
@@ -778,6 +786,9 @@ class DemoConversationBubbleAssembler(private val maxRows: Int = 500) {
     }
 
     companion object {
+        const val MIN_MAX_ROWS = 10
+        const val MAX_MAX_ROWS = 500
+
         fun rowKey(bubbleId: String, lane: DemoConversationLane): String = "${bubbleId}_${lane.rawValue}"
 
         private fun bubbleIdFromRowKey(key: String): String = key.substringBeforeLast("_")

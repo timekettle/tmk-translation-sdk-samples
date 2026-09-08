@@ -29,11 +29,18 @@ final class ConcurrentConversationMapper {
         let lane: Lane
     }
 
-    private let onlineAssembler = DemoConversationBubbleAssembler(maxRows: 200)
-    private let offlineAssembler = DemoConversationBubbleAssembler(maxRows: 200)
+    private let onlineAssembler: DemoConversationBubbleAssembler
+    private let offlineAssembler: DemoConversationBubbleAssembler
     /// 仅用于合并两个独立列表的展示顺序，不参与结果匹配。
     private var rowOrder: [RowKey: Int] = [:]
     private var nextOrder = 0
+
+    /// 默认保留原逐句 fixture；真实离线 Runtime 显式传入累计策略。
+    init(offlineTranslationAssemblyMode: DemoConversationTranslationAssemblyMode = .chunked) {
+        onlineAssembler = DemoConversationBubbleAssembler(maxRows: 20)
+        offlineAssembler = DemoConversationBubbleAssembler(maxRows: 20,
+                                                            translationAssemblyMode: offlineTranslationAssemblyMode)
+    }
 
     /// 将 SDK 结果事件投递到所属 Runtime 的独立气泡聚合器。
     /// 调用方负责使用在线/离线一对一页面相同的 DemoConversationEventAdapter 生成 event。
@@ -56,6 +63,14 @@ final class ConcurrentConversationMapper {
         return rowOrder
             .sorted { $0.value < $1.value }
             .compactMap { current[$0.key] }
+    }
+
+    /// 同一设置同时作用于在线和离线 Runtime；两侧各自保留最新 N 个气泡。
+    @discardableResult
+    func setMaxRows(_ maxRows: Int) -> [Row] {
+        _ = onlineAssembler.setMaxRows(maxRows)
+        _ = offlineAssembler.setMaxRows(maxRows)
+        return rows()
     }
 
     func clear() {

@@ -24,6 +24,8 @@ final class OfflineListenViewModel: NSObject {
     @Published private(set) var modelPackageInfos: [TmkOfflineModelPackageInfo] = []
     @Published private(set) var supportedLanguages: [OfflineLanguageOption] = []
     let runtimePrompt = PassthroughSubject<DemoConversationPrompt, Never>()
+    let offlineModelEntryMessage = PassthroughSubject<String, Never>()
+    let offlineModelDownloadFailureMessage = PassthroughSubject<String, Never>()
     /// 切语言/升档预检未就绪时的"待下载确认"提示;Controller 订阅到即弹确认框。
     let pendingDownloadPrompt = PassthroughSubject<OfflinePendingDownloadPrompt, Never>()
 
@@ -33,9 +35,11 @@ final class OfflineListenViewModel: NSObject {
     private lazy var ttsCoordinator = DemoTtsPlaybackCoordinator(
         scene: .listen,
         onPlaybackChannelsChanged: { [weak self] channels in
-            guard let self, self.lastPlaybackChannels != channels else { return }
-            self.lastPlaybackChannels = channels
-            self.updateStateOnMain { $0.playbackChannels = channels }
+            DispatchQueue.main.async {
+                guard let self, self.lastPlaybackChannels != channels else { return }
+                self.lastPlaybackChannels = channels
+                self.updateStateOnMain { $0.playbackChannels = channels }
+            }
         }
     )
     /// 当前待下载信息(引导下载场景):点"下载"时按此下差量包,点"取消"时清空。
@@ -47,7 +51,8 @@ final class OfflineListenViewModel: NSObject {
 
     private var rows: [NowListeningRowViewData] = []
     private var bubbleIndexMap: [String: Int] = [:]
-    private let bubbleAssembler = DemoConversationBubbleAssembler()
+    private let bubbleAssembler = DemoConversationBubbleAssembler(maxRows: 10,
+                                                                   translationAssemblyMode: .offlineCumulative)
     private var pendingRowsPublishWorkItem: DispatchWorkItem?
     private var lastPublishedRows: [NowListeningRowViewData] = []
     private var selectedSourceLang = "zh"
@@ -57,7 +62,7 @@ final class OfflineListenViewModel: NSObject {
     @Published private(set) var selectedTranslateMode: TmkTranslateDeliveryMode = .partial
     /// 能力档位：默认 toSpeech（完整链路）。
     @Published private(set) var selectedScenarioOption: OfflineScenarioOption = .defaultOption
-    private let maxDisplayedRows = 200
+    private var maxDisplayedRows = 10
     private var downloadStatusHeader = ""
 
     private let stateLock = NSLock()
@@ -84,6 +89,9 @@ final class OfflineListenViewModel: NSObject {
     }
 
     func onViewDidLoad() {
+        let modelMessage = DemoOfflineModelSourceInspector.current().entryMessage
+        NSLog("[OfflineListen] %@", modelMessage)
+        offlineModelEntryMessage.send(modelMessage)
         loadOfflineSupportedLanguages()
         updateStateOnMain {
             $0.sourceLanguage = self.selectedSourceLang
@@ -469,6 +477,19 @@ final class OfflineListenViewModel: NSObject {
     }
 }
 
+extension OfflineListenViewModel {
+    /// 供页面设置菜单展示当前临时保留数量。
+    func currentBubbleRetentionLimit() -> Int { maxDisplayedRows }
+
+    /// 仅作用于当前页面实例；确认后立即裁剪最旧气泡。
+    func setBubbleRetentionLimit(_ limit: Int) {
+        maxDisplayedRows = min(max(limit, DemoConversationBubbleAssembler.minimumMaxRows), DemoConversationBubbleAssembler.maximumMaxRows)
+        _ = bubbleAssembler.setMaxRows(maxDisplayedRows)
+        trimRowsIfNeeded()
+        publishRows()
+    }
+}
+
 private extension OfflineListenViewModel {
     static func makeLanguageOptions(from response: TmkLocaleListResponse) -> [OfflineLanguageOption] {
         response.localeOptions.map {
@@ -605,6 +626,7 @@ private extension OfflineListenViewModel {
             .setTargetLang(selectedTargetLang)
             .setPCMSampleRate(16_000)
             .setPCMChannels(1)
+            .setTTSAudioCallbackThread(.background)
             .setModelRootDirectory(modelRootDirectory)
             .setTranslateMode(selectedTranslateMode)
             .setCapabilityTier(selectedScenarioOption.roomScenario)
@@ -834,7 +856,12 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
                                                isFinal: event.isFinal,
                                                text: event.text,
                                                sourceLangCode: event.sourceLangCode,
-                                               targetLangCode: event.targetLangCode)
+                                               targetLangCode: event.targetLangCode,
+                                               chunkId: event.chunkId,
+                                               sourceSegmentText: event.sourceSegmentText,
+                                               sentenceState: event.sentenceState,
+                                               offset: event.offset,
+                                               duration: event.duration)
         let snapshots = bubbleAssembler.consume(normalized)
         guard snapshots.isEmpty == false else { return }
         snapshots.forEach(applyBubbleSnapshot)
@@ -851,7 +878,13 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
                                                isFinal: event.isFinal,
                                                text: event.text,
                                                sourceLangCode: event.sourceLangCode,
-                                               targetLangCode: event.targetLangCode)
+                                               targetLangCode: event.targetLangCode,
+                                               chunkId: event.chunkId,
+                                     translationSegmentText: event.translationSegmentText,
+                                     sourceSegmentText: event.sourceSegmentText,
+                                     sentenceState: event.sentenceState,
+                                     offset: event.offset,
+                                     duration: event.duration)
         let snapshots = bubbleAssembler.consume(normalized)
         guard snapshots.isEmpty == false else { return }
         snapshots.forEach(applyBubbleSnapshot)
@@ -917,6 +950,11 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
     }
 
     func onOfflineModelError(_ error: TmkTranslationError) {
+        let message = "离线模型下载失败：[\(error.code)] \(error.message)"
+        NSLog("[OfflineListen] %@", message)
+        DispatchQueue.main.async {
+            self.offlineModelDownloadFailureMessage.send(message)
+        }
         onError(error)
     }
 

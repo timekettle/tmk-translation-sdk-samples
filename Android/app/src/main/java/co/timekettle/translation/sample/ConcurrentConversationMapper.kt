@@ -8,7 +8,7 @@ package co.timekettle.translation.sample
  * 这里不创建输入段，两个 Runtime 之间没有显示层关联。
  */
 class ConcurrentConversationMapper(
-    maxRows: Int = 200,
+    maxRows: Int = 20,
 ) {
     enum class Runtime { ONLINE, OFFLINE }
     enum class Kind { ASR, MT }
@@ -30,8 +30,12 @@ class ConcurrentConversationMapper(
         val lane: Lane,
     )
 
-    private val onlineAssembler = DemoConversationBubbleAssembler(maxRows = maxRows)
-    private val offlineAssembler = DemoConversationBubbleAssembler(maxRows = maxRows)
+    private var boundedMaxRows = maxRows.coerceIn(
+        DemoConversationBubbleAssembler.MIN_MAX_ROWS,
+        DemoConversationBubbleAssembler.MAX_MAX_ROWS,
+    )
+    private val onlineAssembler = DemoConversationBubbleAssembler(maxRows = boundedMaxRows)
+    private val offlineAssembler = DemoConversationBubbleAssembler(maxRows = boundedMaxRows)
     /** 只用于两个独立列表合并成快照，不参与结果匹配。 */
     private val rowOrder = linkedMapOf<RowKey, Long>()
     private var nextOrder = 0L
@@ -60,6 +64,17 @@ class ConcurrentConversationMapper(
         return rowOrder.entries
             .sortedBy { it.value }
             .mapNotNull { entry -> current[entry.key] }
+    }
+
+    /** 同一设置同时作用于在线和离线 Runtime；两侧各自保留最新 N 个气泡。 */
+    fun setMaxRows(maxRows: Int): List<Row> {
+        boundedMaxRows = maxRows.coerceIn(
+            DemoConversationBubbleAssembler.MIN_MAX_ROWS,
+            DemoConversationBubbleAssembler.MAX_MAX_ROWS,
+        )
+        onlineAssembler.setMaxRows(boundedMaxRows)
+        offlineAssembler.setMaxRows(boundedMaxRows)
+        return rows()
     }
 
     fun clear() {

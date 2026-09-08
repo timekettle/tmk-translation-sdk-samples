@@ -44,12 +44,16 @@ struct DemoSettingsViewState: Equatable {
     var onlineEngineStatus: DemoSettingsEngineStatus = .checking
     var offlineEngineStatus: DemoSettingsEngineStatus = .checking
     var authInfo: DemoSettingsAuthInfo = .placeholder
+    var activeOfflineModelSource: DemoOfflineModelSourceStatus = DemoOfflineModelSourceInspector.current()
+    var offlineModelProbeResult: DemoOfflineModelProbeResult?
+    var isProbingOfflineModelURL = false
     var isApplying = false
     var versionText = "TmkTranslationSDK v\(TmkTranslationSDK.sdkVersion)"
 
     var isConfirmEnabled: Bool {
         draftConfig != persistedConfig
             && draftConfig.isCustomNetworkBaseURLValid
+            && draftConfig.isOfflineModelBaseURLValid
             && isApplying == false
     }
 }
@@ -62,6 +66,8 @@ struct DemoSettingsConfig: Equatable {
     var networkEnvironment: TmkTranslationNetworkEnvironment
     var customNetworkBaseURLEnabled: Bool
     var customNetworkBaseURL: String
+    var customOfflineModelBaseURLEnabled: Bool
+    var offlineModelBaseURL: String
     var sensitiveWordRedactionEnabled: Bool
     var mockEngineEnabled: Bool
     var schemaVersion: Int
@@ -76,6 +82,19 @@ struct DemoSettingsConfig: Equatable {
         customNetworkBaseURLEnabled == false || normalizedCustomNetworkBaseURL != nil
     }
 
+    var normalizedOfflineModelBaseURL: String? {
+        Self.normalizeOfflineModelBaseURL(offlineModelBaseURL)
+    }
+
+    var isOfflineModelBaseURLValid: Bool {
+        customOfflineModelBaseURLEnabled == false || normalizedOfflineModelBaseURL != nil
+    }
+
+    /// 默认模式或异常的自定义配置都返回 nil，让 SDK 沿用内置下载源。
+    var resolvedOfflineModelBaseURL: String? {
+        customOfflineModelBaseURLEnabled ? normalizedOfflineModelBaseURL : nil
+    }
+
     static var `default`: DemoSettingsConfig {
         DemoSettingsConfig(
             diagnosisEnabled: true,
@@ -85,9 +104,11 @@ struct DemoSettingsConfig: Equatable {
             networkEnvironment: .test,
             customNetworkBaseURLEnabled: false,
             customNetworkBaseURL: rayneoNetworkBaseURL,
+            customOfflineModelBaseURLEnabled: false,
+            offlineModelBaseURL: "",
             sensitiveWordRedactionEnabled: true,
             mockEngineEnabled: false,
-            schemaVersion: 7
+            schemaVersion: 9
         )
     }
 
@@ -112,6 +133,26 @@ struct DemoSettingsConfig: Equatable {
         components.percentEncodedPath = ""
         components.query = nil
         components.fragment = nil
+        return components.string
+    }
+
+    static func normalizeOfflineModelBaseURL(_ rawValue: String?) -> String? {
+        let trimmed = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard trimmed.isEmpty == false,
+              var components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host,
+              host.isEmpty == false,
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil else {
+            return nil
+        }
+        let normalizedPath = components.percentEncodedPath
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        components.percentEncodedPath = normalizedPath.isEmpty ? "" : "/\(normalizedPath)"
         return components.string
     }
 }

@@ -29,6 +29,13 @@ final class DemoSettingsViewController: UIViewController {
     private let customNetworkBaseURLSwitch = UISwitch()
     private let sensitiveWordRedactionSwitch = UISwitch()
     private let networkBaseURLTextField = UITextField()
+    private let offlineModelBaseURLTextField = UITextField()
+    private let offlineModelDefaultSourceButton = UIButton(type: .system)
+    private let offlineModelCustomSourceButton = UIButton(type: .system)
+    private let offlineModelProbeButton = UIButton(type: .system)
+    private let offlineModelProbeStatusLabel = UILabel()
+    private let activeOfflineModelSourceLabel = UILabel()
+    private let offlineModelCustomControls = UIStackView()
     private let rayneoBaseURLButton = UIButton(type: .system)
     private var networkBaseURLRow = UIView()
     private let onlineStatusLabel = UILabel()
@@ -141,6 +148,45 @@ final class DemoSettingsViewController: UIViewController {
         networkBaseURLTextField.addTarget(self, action: #selector(onNetworkBaseURLBeginEditing), for: .editingDidBegin)
         networkBaseURLTextField.addTarget(self, action: #selector(onNetworkBaseURLChanged), for: .editingChanged)
 
+        offlineModelBaseURLTextField.textColor = DemoTheme.text
+        offlineModelBaseURLTextField.tintColor = DemoTheme.primaryLight
+        offlineModelBaseURLTextField.font = .systemFont(ofSize: 12)
+        offlineModelBaseURLTextField.keyboardType = .URL
+        offlineModelBaseURLTextField.autocorrectionType = .no
+        offlineModelBaseURLTextField.autocapitalizationType = .none
+        offlineModelBaseURLTextField.borderStyle = .roundedRect
+        offlineModelBaseURLTextField.backgroundColor = DemoTheme.background
+        offlineModelBaseURLTextField.layer.borderColor = DemoTheme.border.cgColor
+        offlineModelBaseURLTextField.layer.borderWidth = 1 / UIScreen.main.scale
+        offlineModelBaseURLTextField.layer.cornerRadius = 8
+        offlineModelBaseURLTextField.placeholder = "http://192.168.0.56:9999/tmk-models/v3.3/"
+        offlineModelBaseURLTextField.addTarget(self, action: #selector(onOfflineModelBaseURLBeginEditing), for: .editingDidBegin)
+        offlineModelBaseURLTextField.addTarget(self, action: #selector(onOfflineModelBaseURLChanged), for: .editingChanged)
+
+        setupOfflineModelSourceButton(
+            offlineModelDefaultSourceButton,
+            title: "默认\n不设置 URL，使用 SDK 内置下载源",
+            action: #selector(onOfflineModelDefaultSource)
+        )
+        setupOfflineModelSourceButton(
+            offlineModelCustomSourceButton,
+            title: "自定义 URL\n使用指定的 HTTP/HTTPS 模型仓库根地址",
+            action: #selector(onOfflineModelCustomSource)
+        )
+        offlineModelProbeButton.setTitle("检测地址", for: .normal)
+        offlineModelProbeButton.setTitleColor(DemoTheme.primaryLight, for: .normal)
+        offlineModelProbeButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+        offlineModelProbeButton.layer.cornerRadius = 8
+        offlineModelProbeButton.layer.borderWidth = 1
+        offlineModelProbeButton.layer.borderColor = DemoTheme.border.cgColor
+        offlineModelProbeButton.addTarget(self, action: #selector(onProbeOfflineModelBaseURL), for: .touchUpInside)
+
+        offlineModelProbeStatusLabel.font = .systemFont(ofSize: 11)
+        offlineModelProbeStatusLabel.numberOfLines = 0
+        activeOfflineModelSourceLabel.font = .systemFont(ofSize: 11)
+        activeOfflineModelSourceLabel.textColor = DemoTheme.textDim
+        activeOfflineModelSourceLabel.numberOfLines = 0
+
         rayneoBaseURLButton.setTitle("RayNeo", for: .normal)
         rayneoBaseURLButton.setTitleColor(DemoTheme.primaryLight, for: .normal)
         rayneoBaseURLButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
@@ -217,7 +263,8 @@ final class DemoSettingsViewController: UIViewController {
             makeToggleRow(title: "敏感词脱敏", hint: "仅在线翻译生效：对客户端可见文本启用敏感词脱敏", control: sensitiveWordRedactionSwitch),
             makeValueRow(title: "网络环境", hint: "当前 SDK 请求环境", valueView: networkButton),
             makeToggleRow(title: "启用自定义URL", hint: "开启后使用自定义 URL，关闭后使用网络环境枚举", control: customNetworkBaseURLSwitch),
-            makeNetworkBaseURLRow()
+            makeNetworkBaseURLRow(),
+            makeOfflineModelBaseURLRow()
         ])
         let engineSection = makeSection(title: "引擎状态", rows: [
             makeStatusRow(title: "在线引擎", hint: "LingCast + Agora RTC", statusLabel: onlineStatusLabel, detailLabel: onlineStatusHintLabel),
@@ -278,8 +325,27 @@ final class DemoSettingsViewController: UIViewController {
         if networkBaseURLTextField.text != state.draftConfig.customNetworkBaseURL {
             networkBaseURLTextField.text = state.draftConfig.customNetworkBaseURL
         }
+        if offlineModelBaseURLTextField.text != state.draftConfig.offlineModelBaseURL {
+            offlineModelBaseURLTextField.text = state.draftConfig.offlineModelBaseURL
+        }
+        let customOfflineSource = state.draftConfig.customOfflineModelBaseURLEnabled
+        renderOfflineModelSourceButton(offlineModelDefaultSourceButton, selected: !customOfflineSource)
+        renderOfflineModelSourceButton(offlineModelCustomSourceButton, selected: customOfflineSource)
+        offlineModelCustomControls.isHidden = !customOfflineSource
+        offlineModelProbeButton.isEnabled = state.draftConfig.isOfflineModelBaseURLValid
+            && state.isProbingOfflineModelURL == false
+        offlineModelProbeButton.alpha = offlineModelProbeButton.isEnabled ? 1 : 0.5
+        offlineModelProbeButton.setTitle(state.isProbingOfflineModelURL ? "检测中..." : "检测地址", for: .normal)
+        offlineModelProbeStatusLabel.text = state.offlineModelProbeResult?.message
+        offlineModelProbeStatusLabel.textColor = state.offlineModelProbeResult?.available == true
+            ? DemoTheme.success
+            : DemoTheme.danger
+        activeOfflineModelSourceLabel.text = "当前实际生效：\(state.activeOfflineModelSource.summary)"
         networkBaseURLRow.isHidden = state.draftConfig.customNetworkBaseURLEnabled == false
         networkBaseURLTextField.layer.borderColor = state.draftConfig.isCustomNetworkBaseURLValid ? DemoTheme.border.cgColor : DemoTheme.danger.cgColor
+        offlineModelBaseURLTextField.layer.borderColor = state.draftConfig.isOfflineModelBaseURLValid
+            ? DemoTheme.border.cgColor
+            : DemoTheme.danger.cgColor
         apply(status: state.onlineEngineStatus, to: onlineStatusLabel, detailLabel: onlineStatusHintLabel)
         apply(status: state.offlineEngineStatus, to: offlineStatusLabel, detailLabel: offlineStatusHintLabel)
         tokenStatusLabel.text = state.authInfo.tokenSummary
@@ -357,6 +423,30 @@ final class DemoSettingsViewController: UIViewController {
 
     @objc private func onNetworkBaseURLChanged() {
         viewModel.setCustomNetworkBaseURL(networkBaseURLTextField.text ?? "")
+    }
+
+    @objc private func onOfflineModelBaseURLBeginEditing() {
+        scrollTextFieldIntoVisibleArea(offlineModelBaseURLTextField)
+    }
+
+    @objc private func onOfflineModelBaseURLChanged() {
+        viewModel.setOfflineModelBaseURL(offlineModelBaseURLTextField.text ?? "")
+    }
+
+    @objc private func onOfflineModelDefaultSource() {
+        view.endEditing(true)
+        viewModel.setCustomOfflineModelBaseURLEnabled(false)
+    }
+
+    @objc private func onOfflineModelCustomSource() {
+        viewModel.setCustomOfflineModelBaseURLEnabled(true)
+    }
+
+    @objc private func onProbeOfflineModelBaseURL() {
+        view.endEditing(true)
+        viewModel.probeOfflineModelBaseURL { [weak self] result in
+            self?.showDemoToast(result.message)
+        }
     }
 
     @objc private func onRayneoBaseURL() {
@@ -540,6 +630,77 @@ final class DemoSettingsViewController: UIViewController {
         return row
     }
 
+    private func makeOfflineModelBaseURLRow() -> UIView {
+        let row = UIView()
+        let titleLabel = UILabel()
+        titleLabel.text = "离线模型下载源"
+        titleLabel.textColor = DemoTheme.text
+        titleLabel.font = .systemFont(ofSize: 14, weight: .medium)
+
+        let hintLabel = UILabel()
+        hintLabel.text = "进入离线翻译时按已应用的选项加载"
+        hintLabel.textColor = DemoTheme.textDim
+        hintLabel.font = .systemFont(ofSize: 11)
+        hintLabel.numberOfLines = 2
+
+        offlineModelCustomControls.axis = .vertical
+        offlineModelCustomControls.spacing = 8
+        offlineModelCustomControls.addArrangedSubview(offlineModelBaseURLTextField)
+        offlineModelCustomControls.addArrangedSubview(offlineModelProbeButton)
+        offlineModelCustomControls.addArrangedSubview(offlineModelProbeStatusLabel)
+        offlineModelBaseURLTextField.snp.makeConstraints { $0.height.equalTo(40) }
+        offlineModelProbeButton.snp.makeConstraints { $0.height.equalTo(38) }
+
+        let replacementHintLabel = UILabel()
+        replacementHintLabel.text = "地址检测仅验证仓库连通性；模型包校验成功后才会替换对应旧资源"
+        replacementHintLabel.textColor = DemoTheme.textDim
+        replacementHintLabel.font = .systemFont(ofSize: 10)
+        replacementHintLabel.numberOfLines = 0
+
+        let contentStack = UIStackView(arrangedSubviews: [
+            titleLabel,
+            hintLabel,
+            offlineModelDefaultSourceButton,
+            offlineModelCustomSourceButton,
+            offlineModelCustomControls,
+            activeOfflineModelSourceLabel,
+            replacementHintLabel
+        ])
+        contentStack.axis = .vertical
+        contentStack.spacing = 8
+        let separator = UIView()
+        separator.backgroundColor = DemoTheme.border
+        row.addSubview(contentStack)
+        row.addSubview(separator)
+        contentStack.snp.makeConstraints { make in
+            make.top.equalToSuperview().offset(16)
+            make.left.right.equalToSuperview().inset(14)
+            make.bottom.equalToSuperview().inset(16)
+        }
+        separator.snp.makeConstraints { make in
+            make.left.right.bottom.equalToSuperview()
+            make.height.equalTo(1 / UIScreen.main.scale)
+        }
+        return row
+    }
+
+    private func setupOfflineModelSourceButton(_ button: UIButton, title: String, action: Selector) {
+        button.setTitle(title, for: .normal)
+        button.setTitleColor(DemoTheme.text, for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 13)
+        button.titleLabel?.numberOfLines = 2
+        button.titleLabel?.textAlignment = .left
+        button.contentHorizontalAlignment = .left
+        button.tintColor = DemoTheme.primaryLight
+        button.addTarget(self, action: action, for: .touchUpInside)
+        button.snp.makeConstraints { $0.height.greaterThanOrEqualTo(46) }
+    }
+
+    private func renderOfflineModelSourceButton(_ button: UIButton, selected: Bool) {
+        button.setImage(UIImage(systemName: selected ? "largecircle.fill.circle" : "circle"), for: .normal)
+        button.accessibilityTraits = selected ? [.button, .selected] : [.button]
+    }
+
     private func makeStatusRow(title: String, hint: String, statusLabel: UILabel, detailLabel: UILabel) -> UIView {
         let row = UIView()
         let leftTitle = UILabel()
@@ -621,12 +782,18 @@ final class DemoSettingsViewController: UIViewController {
         } completion: { _ in
             if self.networkBaseURLTextField.isFirstResponder {
                 self.scrollNetworkBaseURLTextFieldIntoVisibleArea()
+            } else if self.offlineModelBaseURLTextField.isFirstResponder {
+                self.scrollTextFieldIntoVisibleArea(self.offlineModelBaseURLTextField)
             }
         }
     }
 
     private func scrollNetworkBaseURLTextFieldIntoVisibleArea() {
-        let targetRect = networkBaseURLTextField.convert(networkBaseURLTextField.bounds.insetBy(dx: 0, dy: -16), to: scrollView)
+        scrollTextFieldIntoVisibleArea(networkBaseURLTextField)
+    }
+
+    private func scrollTextFieldIntoVisibleArea(_ textField: UITextField) {
+        let targetRect = textField.convert(textField.bounds.insetBy(dx: 0, dy: -16), to: scrollView)
         scrollView.scrollRectToVisible(targetRect, animated: true)
     }
 }
