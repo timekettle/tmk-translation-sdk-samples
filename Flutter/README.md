@@ -1,125 +1,34 @@
-# Flutter 模块架构说明
+# Flutter 示例与公开 API 边界
 
-本目录承载 TMK Translation SDK 的 Flutter 接入示例，整体采用 Flutter 官方推荐的插件分层：应用层只依赖 Flutter 插件 API，平台接口层定义稳定契约，插件实现层负责通过 MethodChannel/EventChannel 适配 iOS/Android 原生 SDK。
-
-## 目录结构
-
-```text
-Flutter/
-├── apps/
-│   └── tmk_translation_demo/              # Flutter 示例 App
-└── packages/
-    ├── tmk_translation_flutter/           # Flutter 插件实现包
-    └── tmk_translation_platform_interface/# 平台接口与数据模型包
-```
-
-## 模块职责
-
-### `apps/tmk_translation_demo`
-
-示例 App，展示 SDK 在 Flutter 侧的典型使用方式：
-
-- 初始化 SDK、读取和应用调试配置。
-- 加载在线/离线语言列表。
-- 创建收听或一对一会话。
-- 启停翻译会话、下载离线模型、切换一对一播放声道。
-- 订阅插件事件并将 ASR/MT 结果聚合为会话气泡。
-
-应用层入口是 `lib/main.dart` 和 `lib/src/app.dart`，核心页面在 `lib/src/screens/`，气泡聚合逻辑在 `lib/src/conversation_bubbles.dart`。
-
-### `packages/tmk_translation_platform_interface`
-
-平台接口包，负责定义 Flutter 侧稳定契约，不包含具体原生 SDK 调用。
-
-它的作用是：
-
-- 定义 `TmkTranslationPlatform` 抽象接口。
-- 定义 Dart 数据模型和枚举，例如 `TmkSettingsDraft`、`TmkRuntimeStatus`、`TmkSessionConfig`、`TmkPluginEvent`。
-- 通过 `plugin_platform_interface` 保护平台实现注册，避免非授权实现绕过接口约束。
-- 作为 App、插件实现、测试替身之间共享的 API 边界。
-
-这个包应该保持轻量、稳定、无平台代码。新增 Flutter API 时通常先在这里扩展接口和模型，再由具体插件实现补齐。
-
-### `packages/tmk_translation_flutter`
-
-Flutter 插件实现包，是 Dart API 与 iOS/Android 原生 TMK SDK 之间的桥接层。
-
-它包含两部分：
-
-1. Dart facade 和 channel 实现
-   - `lib/src/tmk_translation_flutter.dart` 提供业务方调用的静态 API。
-   - `lib/src/method_channel_tmk_translation_platform.dart` 实现 `TmkTranslationPlatform`，通过 MethodChannel 调用原生方法，通过 EventChannel 接收原生事件。
-
-2. 原生平台实现
-   - iOS: `ios/Classes/TmkTranslationFlutterPlugin.swift`
-   - Android: `android/src/main/kotlin/co/timekettle/translation/flutter/TmkTranslationFlutterPlugin.kt`
-
-原生实现负责：
-
-- 注册 Flutter method/event channel。
-- 初始化 TMK Translation SDK。
-- 从 Flutter 入参或平台配置中解析 AppID/AppSecret。
-- 处理鉴权、语言列表、运行状态、诊断日志等通用能力。
-- 管理翻译 session 的生命周期。
-- 将原生 SDK 的 ASR、翻译、状态、指标、下载进度、错误等事件转换成 Flutter 事件。
-
-## 调用链路
-
-```text
-Flutter Demo UI
-  ↓
-TmkTranslationFlutter 静态 API
-  ↓
-TmkTranslationPlatform 抽象接口
-  ↓
-MethodChannelTmkTranslationPlatform
-  ↓ MethodChannel / EventChannel
-TmkTranslationFlutterPlugin 原生实现
-  ↓
-TMK Translation SDK for iOS / Android
-```
-
-同步请求类能力走 MethodChannel，例如初始化、创建会话、启动/停止会话。持续回调类能力走 EventChannel，例如识别文本、翻译文本、会话状态、音频指标和错误事件。
-
-## 主要接口边界
-
-| 层级 | 负责内容 | 不应该负责 |
-| --- | --- | --- |
-| Demo App | UI、页面状态、用户交互、事件展示 | 直接调用原生 SDK |
-| platform_interface | Dart 契约、模型、枚举、测试替身边界 | MethodChannel 细节、平台实现 |
-| tmk_translation_flutter Dart 层 | 对外 API、MethodChannel/EventChannel 适配 | UI 展示、业务页面状态 |
-| tmk_translation_flutter 原生层 | SDK 初始化、鉴权、session 管理、音频/模型/事件适配 | Flutter 页面逻辑 |
-| TMK 原生 SDK | 实际翻译、鉴权、通道、模型和底层能力 | Flutter API 稳定性 |
-
-## 新增能力时的推荐流程
-
-1. 在 `tmk_translation_platform_interface` 中新增或调整接口、模型、枚举。
-2. 在 `tmk_translation_flutter` 的 Dart channel 实现中实现该接口。
-3. 在 iOS/Android 原生插件中添加对应 method 或 event 映射。
-4. 在 `tmk_translation_demo` 中接入新能力并验证用户流程。
-5. 补充平台接口测试、插件测试或 Demo widget 测试。
-
-## 配置说明
-
-示例 App 通过平台配置提供 SDK 凭证：
-
-- iOS Demo: `apps/tmk_translation_demo/ios/Runner/Info.plist` 读取 `TMKSampleAppID` 和 `TMKSampleAppSecret`，实际值来自 xcconfig 中的 `TMK_SAMPLE_APP_ID`、`TMK_SAMPLE_APP_SECRET`。
-- Android Demo: 原生插件从 manifest metadata 中读取 `TMK_SAMPLE_APP_ID`、`TMK_SAMPLE_APP_SECRET`。
-
-也可以在 Flutter 初始化时显式传入：
+本目录只验证 Flutter 应用作为第三方消费者接入 `tmk_translation_flutter`。
+公共入口固定为：
 
 ```dart
-await TmkTranslationFlutter.initialize(
-  appId: 'your_app_id',
-  appSecret: 'your_app_secret',
-  settings: settings,
-);
+import 'package:tmk_translation_flutter/tmk_translation_flutter.dart';
 ```
 
-注意不要把真实凭证提交到仓库。
+## 目录职责
 
-## 相关 README
+- `apps/tmk_translation_demo`：Sample UI、页面状态、录音/权限、固定 PCM、系统播放和演示业务。
+- `packages/`：仅保留仓库已有的 Flutter 示例基础设施；Sample 不依赖 SDK 的 platform interface、Pigeon 或任何内部路径。
 
-- [`apps/tmk_translation_demo/README.md`](apps/tmk_translation_demo/README.md)
-- [`packages/tmk_translation_flutter/README.md`](packages/tmk_translation_flutter/README.md)
-- [`packages/tmk_translation_platform_interface/README.md`](packages/tmk_translation_platform_interface/README.md)
+Sample 内的 `tmk_translation_adapter.dart` 只是页面模型到公开 Session API 的适配层，不能成为公共 API 的需求来源。公共 API 以 SDK 仓内的 API Reference、iOS/Android 共同稳定能力、Flutter 通用使用方式和三端语义对照记录为准。
+
+## 会话接入约束
+
+Sample 只使用高层 SDK 能力：初始化、鉴权、语言、模型、诊断、`createSession()`、PCM 输入、翻译事件、运行时更新和幂等释放。创建成功即自动启动；Sample 不调用 `start()`、`stop()`，也不接触 Room、Channel、Listener、MethodChannel、EventChannel 或 Pigeon 类型。
+
+录音、权限申请、固定 PCM、播放路由、页面状态、导航和 UI 全部留在 Sample。SDK Stream 是广播流，`createSession()` 操作和成功 Session 共享同一 Streams 实例；Sample 不依赖固定翻译文本。
+
+## 依赖与验收
+
+正式验收依赖目标制品 `tmk_translation_flutter: 1.3.1-rc.3`，Sample 的正式 `pubspec.lock` 保持 hosted RC3 及其校验和。开发联调可在本机创建未跟踪的 `pubspec_overrides.yaml` 使用相对 path 依赖，但不得提交该文件或绝对路径。
+
+执行公开边界门禁：
+
+```bash
+cd apps/tmk_translation_demo
+./tool/verify_public_api_boundary.sh
+```
+
+门禁会拒绝内部包/生成代码导入、直接通道调用、绝对路径依赖和被跟踪的开发覆盖文件。Sample 的 SDK 修复必须回到 `tmk-translation-sdk`；本仓只提交接入 Adapter、演示逻辑和对应测试。

@@ -31,7 +31,11 @@ dependencies:
   flutter:
     sdk: flutter
 
-  tmk_translation_flutter: ^1.2.1
+  flutter_pcm_sound: 3.3.3
+  record: 6.1.2
+  record_android: 1.4.3
+  shared_preferences: 2.5.5
+  tmk_translation_flutter: 1.3.1-rc.3
 
 dev_dependencies:
   flutter_test:
@@ -54,6 +58,10 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    - assets/audio/fixed_android_en_us_16k16.pcm
+    - assets/audio/fixed_ios_en_us_16k16.pcm
 
   # To add assets to your application, add an assets section, like this:
   # assets:

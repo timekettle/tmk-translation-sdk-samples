@@ -1,6 +1,10 @@
-import 'package:flutter/material.dart';
-import 'package:tmk_translation_flutter/tmk_translation_flutter.dart';
+import 'dart:async';
 
+import 'package:flutter/material.dart';
+import 'package:tmk_translation_flutter/tmk_translation_flutter.dart' as api;
+import '../tmk_translation_adapter.dart';
+
+import '../sample_settings_store.dart';
 import '../theme.dart';
 import 'session_screen.dart';
 import 'settings_screen.dart';
@@ -13,6 +17,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+  final SampleSettingsStore _settingsStore = SampleSettingsStore();
   TmkScenario _scenario = TmkScenario.listen;
   TmkTranslationMode _mode = TmkTranslationMode.online;
   List<TmkLanguageOption> _languages = const [];
@@ -39,6 +44,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    unawaited(api.TmkTranslationSdk.instance.destroy());
     super.dispose();
   }
 
@@ -74,8 +80,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _bootstrapError = null;
     });
     try {
-      final settings = await TmkTranslationFlutter.getCurrentSettings();
-      final runtimeStatus = await TmkTranslationFlutter.initialize(settings: settings);
+      final settings = await _settingsStore.load();
+      final runtimeStatus = await initializeSampleSdk(settings: settings);
       if (!mounted) {
         return;
       }
@@ -114,7 +120,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           : '正在准备离线语言列表...';
     });
     try {
-      final languages = await TmkTranslationFlutter.getSupportedLanguages(languageSource);
+      final languages = await loadSampleLanguages(
+        api.TmkTranslationSdk.instance,
+        languageSource,
+      );
       if (!mounted || requestId != _languageRequestId) {
         return;
       }
@@ -124,18 +133,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
       final source = _preferredLanguage(
         languages,
-        exact: _sourceLanguage?.code ?? (languageSource == TmkLanguageSource.online ? 'zh-CN' : 'zh'),
+        exact:
+            _sourceLanguage?.code ??
+            (languageSource == TmkLanguageSource.online ? 'zh-CN' : 'zh'),
         family: _sourceLanguage?.familyCode ?? 'zh',
       );
       final preferredTarget = _preferredLanguage(
         languages,
-        exact: _targetLanguage?.code ?? (languageSource == TmkLanguageSource.online ? 'en-US' : 'en'),
+        exact:
+            _targetLanguage?.code ??
+            (languageSource == TmkLanguageSource.online ? 'en-US' : 'en'),
         family: _targetLanguage?.familyCode ?? 'en',
       );
       setState(() {
         _languages = languages;
         _sourceLanguage = source;
-        if (source != null && preferredTarget != null && preferredTarget.code != source.code) {
+        if (source != null &&
+            preferredTarget != null &&
+            preferredTarget.code != source.code) {
           _targetLanguage = preferredTarget;
         } else {
           _targetLanguage = _firstLanguageDifferentFrom(source);
@@ -260,13 +275,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         return SafeArea(
           child: ListView.separated(
             itemCount: _languages.length,
-            separatorBuilder: (_, _) => const Divider(height: 1, color: appBorder),
+            separatorBuilder: (_, _) =>
+                const Divider(height: 1, color: appBorder),
             itemBuilder: (context, index) {
               final item = _languages[index];
               final isSelected = item.code == currentOption?.code;
               return ListTile(
                 title: Text(item.title),
-                subtitle: Text(item.code, style: const TextStyle(color: appTextMuted)),
+                subtitle: Text(
+                  item.code,
+                  style: const TextStyle(color: appTextMuted),
+                ),
                 trailing: isSelected
                     ? const Icon(Icons.check_circle_rounded, color: appAccent)
                     : null,
@@ -302,7 +321,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _sourceLanguage != null &&
       _targetLanguage != null &&
       _sourceLanguage!.code != _targetLanguage!.code &&
-      (_mode == TmkTranslationMode.online || _mode == TmkTranslationMode.offline);
+      (_mode == TmkTranslationMode.online ||
+          _mode == TmkTranslationMode.offline);
 
   Future<void> _openSession() async {
     await Navigator.of(context).push(
@@ -362,9 +382,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       const SizedBox(height: 20),
                       Text(
                         '翻译中台',
-                        style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                              fontWeight: FontWeight.w700,
-                            ),
+                        style: Theme.of(context).textTheme.headlineMedium
+                            ?.copyWith(fontWeight: FontWeight.w700),
                       ),
                       const SizedBox(height: 6),
                       const Text(
@@ -379,7 +398,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         subtitle: '收听外语内容，实时翻译',
                         icon: Icons.hearing_rounded,
                         selected: _scenario == TmkScenario.listen,
-                        onTap: () => setState(() => _scenario = TmkScenario.listen),
+                        onTap: () =>
+                            setState(() => _scenario = TmkScenario.listen),
                       ),
                       const SizedBox(height: 10),
                       _ScenarioCard(
@@ -387,16 +407,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         subtitle: '双人面对面，双声道分离',
                         icon: Icons.forum_rounded,
                         selected: _scenario == TmkScenario.oneToOne,
-                        onTap: () => setState(() => _scenario = TmkScenario.oneToOne),
+                        onTap: () =>
+                            setState(() => _scenario = TmkScenario.oneToOne),
                       ),
                       const SizedBox(height: 28),
                       Row(
                         children: const [
                           _SectionLabel('② 翻译模式'),
                           SizedBox(width: 8),
-                          Text(
-                            '智能切换和双引擎竞速暂不支持，已保留入口样式',
-                            style: TextStyle(color: appPrimarySoft, fontSize: 12),
+                          Expanded(
+                            child: Text(
+                              '智能切换和双引擎竞速暂不支持，已保留入口样式',
+                              style: TextStyle(
+                                color: appPrimarySoft,
+                                fontSize: 12,
+                              ),
+                            ),
                           ),
                         ],
                       ),
@@ -412,7 +438,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             color: appAccent,
                             selected: _mode == TmkTranslationMode.online,
                             enabled: true,
-                            onTap: () => _onSelectMode(TmkTranslationMode.online),
+                            onTap: () =>
+                                _onSelectMode(TmkTranslationMode.online),
                           ),
                           _ModeCard(
                             title: '离线翻译',
@@ -421,7 +448,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             color: appOffline,
                             selected: _mode == TmkTranslationMode.offline,
                             enabled: true,
-                            onTap: () => _onSelectMode(TmkTranslationMode.offline),
+                            onTap: () =>
+                                _onSelectMode(TmkTranslationMode.offline),
                           ),
                           const _ModeCard(
                             title: '智能切换',
@@ -498,7 +526,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       backgroundColor: appPrimary,
                       disabledBackgroundColor: appBorder,
                       foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(18),
+                      ),
                     ),
                     child: _isBootstrapping
                         ? const SizedBox(
@@ -563,7 +593,10 @@ class _ScenarioCard extends StatelessWidget {
         decoration: BoxDecoration(
           color: selected ? appAccent.withValues(alpha: 0.12) : appCard,
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: selected ? appAccent : appBorder, width: 1.5),
+          border: Border.all(
+            color: selected ? appAccent : appBorder,
+            width: 1.5,
+          ),
         ),
         child: Row(
           children: [
@@ -573,14 +606,22 @@ class _ScenarioCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                   const SizedBox(height: 4),
                   Text(subtitle, style: const TextStyle(color: appTextMuted)),
                 ],
               ),
             ),
             Icon(
-              selected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
+              selected
+                  ? Icons.check_circle_rounded
+                  : Icons.radio_button_unchecked_rounded,
               color: selected ? appAccent : appTextMuted,
             ),
           ],
@@ -622,7 +663,10 @@ class _ModeCard extends StatelessWidget {
           decoration: BoxDecoration(
             color: enabled ? appCard : appCard.withValues(alpha: 0.5),
             borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: selected ? color : appBorder, width: selected ? 1.5 : 1),
+            border: Border.all(
+              color: selected ? color : appBorder,
+              width: selected ? 1.5 : 1,
+            ),
           ),
           child: Opacity(
             opacity: enabled ? 1 : 0.45,
@@ -630,20 +674,36 @@ class _ModeCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
                   decoration: BoxDecoration(
                     color: color.withValues(alpha: 0.14),
                     borderRadius: BorderRadius.circular(999),
                   ),
                   child: Text(
                     badge,
-                    style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w700),
+                    style: TextStyle(
+                      color: color,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 14),
-                Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
                 const SizedBox(height: 6),
-                Text(subtitle, style: const TextStyle(color: appTextMuted, height: 1.4)),
+                Text(
+                  subtitle,
+                  style: const TextStyle(color: appTextMuted, height: 1.4),
+                ),
               ],
             ),
           ),
@@ -725,9 +785,7 @@ class _LanguageCard extends StatelessWidget {
 }
 
 class _SwapLanguageButton extends StatelessWidget {
-  const _SwapLanguageButton({
-    required this.onTap,
-  });
+  const _SwapLanguageButton({required this.onTap});
 
   final VoidCallback onTap;
 
@@ -758,10 +816,7 @@ class _SwapLanguageButton extends StatelessWidget {
 }
 
 class SettingsResult {
-  const SettingsResult({
-    required this.settings,
-    required this.runtimeStatus,
-  });
+  const SettingsResult({required this.settings, required this.runtimeStatus});
 
   final TmkSettingsDraft settings;
   final TmkRuntimeStatus runtimeStatus;
