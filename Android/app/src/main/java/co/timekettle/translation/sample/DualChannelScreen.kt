@@ -293,6 +293,14 @@ data class DualChannelScreen(
                 initialTargetLang = lockedLeftLang,
                 languageOptions = onlineLanguageOptions,
                 onDismiss = { showLocaleDialog = false },
+                canConfirm = { source, target ->
+                    OneToOneSameLanguagePolicy.isOnlineLanguagePairAllowed(
+                        sourceLang = source,
+                        targetLang = target,
+                        roomScenario = roomScenarioOption.roomScenario,
+                    )
+                },
+                validationMessage = OneToOneSameLanguagePolicy.REQUIRES_RECOGNIZE_MESSAGE,
                 onConfirm = { source, target ->
                     showLocaleDialog = false
                     viewModel.updateRoomLocale(leftLang = target, rightLang = source)

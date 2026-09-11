@@ -61,6 +61,8 @@ private val OnlineColor = Color(0xFF00B894)
 private val WarningColor = Color(0xFFFFC857)
 private val DangerColor = Color(0xFFFF6B6B)
 
+internal fun settingsSdkVersionLabel(version: String): String = "TmkTranslationSDK v$version"
+
 class SettingsScreen : Screen {
 
     @OptIn(ExperimentalFoundationApi::class)
@@ -569,7 +571,7 @@ class SettingsScreen : Screen {
             }
 
             Spacer(Modifier.height(32.dp))
-            Text("TmkTranslationSDK v${TmkTranslationSDK.sdkVersion}", fontSize = 11.sp, color = TextDim,
+            Text(settingsSdkVersionLabel(TmkTranslationSDK.sdkVersion), fontSize = 11.sp, color = TextDim,
                 modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
             Spacer(Modifier.height(16.dp))
             } // 可滚动内容区结束

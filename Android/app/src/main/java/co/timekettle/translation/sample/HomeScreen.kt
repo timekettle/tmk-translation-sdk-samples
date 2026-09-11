@@ -93,6 +93,42 @@ internal fun isHomeModeEnabled(allowedModes: List<String>, modeId: String): Bool
 internal fun String.baseLanguageCode(): String =
     trim().substringBefore('-').substringBefore('_').lowercase()
 
+/** 首页的一对一默认档位均为语音到语音，进入页面前不能传入无效的同语言配置。 */
+internal fun isHomeOneToOneLanguagePairAllowed(
+    isOneToOne: Boolean,
+    modeId: String,
+    sourceLang: String,
+    targetLang: String,
+): Boolean {
+    if (!isOneToOne) return true
+    return when (modeId) {
+        ModeId.ONLINE -> OneToOneSameLanguagePolicy.isOnlineLanguagePairAllowed(
+            sourceLang,
+            targetLang,
+            OnlineRoomScenarioOption.defaultOption.roomScenario,
+        )
+        ModeId.OFFLINE -> OneToOneSameLanguagePolicy.isOfflineLanguagePairAllowed(
+            sourceLang,
+            targetLang,
+            OfflineScenarioOption.defaultOption.roomScenario,
+        )
+        ModeId.CONCURRENT_ONE_TO_ONE -> {
+            val onlineAllowed = OneToOneSameLanguagePolicy.isOnlineLanguagePairAllowed(
+                sourceLang,
+                targetLang,
+                OneToOneDemoDefaults.concurrentOnline.roomScenario,
+            )
+            val offlineAllowed = OneToOneSameLanguagePolicy.isOfflineLanguagePairAllowed(
+                sourceLang,
+                targetLang,
+                OneToOneDemoDefaults.concurrentOffline.roomScenario,
+            )
+            onlineAllowed && offlineAllowed
+        }
+        else -> true
+    }
+}
+
 class HomeScreen : Screen {
 
     @Composable
@@ -130,8 +166,17 @@ class HomeScreen : Screen {
 
         val ready = langUiState.state as? LanguageOptionsState.Ready
         val langOptions = ready?.options ?: emptyMap()
+        val oneToOneLanguagePairAllowed = isHomeOneToOneLanguagePairAllowed(
+            isOneToOne = scenario == ScenarioType.ONE_TO_ONE,
+            modeId = effectiveModeId,
+            sourceLang = sourceLang,
+            targetLang = targetLang,
+        )
         // 列表就绪且源/目标语言均在列表中，才允许开始翻译
-        val canStart = ready != null && sourceLang in langOptions && targetLang in langOptions
+        val canStart = ready != null &&
+            sourceLang in langOptions &&
+            targetLang in langOptions &&
+            oneToOneLanguagePairAllowed
 
         // 场景切换或语言对离线支持变化导致允许列表变化时，若当前 mode 不在允许列表则自动切到第一个。
         LaunchedEffect(allowedModes) {
@@ -209,6 +254,17 @@ class HomeScreen : Screen {
                     onTargetChange = { targetLang = it },
                     onSwap = { val t = sourceLang; sourceLang = targetLang; targetLang = t }
                 )
+
+                if (ready != null && !oneToOneLanguagePairAllowed) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "相同语言仅支持单识别。当前模式默认语音到语音，请选择不同语言后再进入。",
+                        fontSize = 12.sp,
+                        color = OfflineColor,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center,
+                    )
+                }
 
                 // 语言列表加载态/失败态提示
                 when (langUiState.state) {

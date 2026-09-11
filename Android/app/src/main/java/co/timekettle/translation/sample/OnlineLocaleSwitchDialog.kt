@@ -30,9 +30,12 @@ fun OnlineLocaleSwitchDialog(
     languageOptions: Map<String, String>,
     onDismiss: () -> Unit,
     onConfirm: (String, String) -> Unit,
+    canConfirm: (String, String) -> Boolean = { _, _ -> true },
+    validationMessage: String? = null,
 ) {
     var sourceLang by remember(initialSourceLang) { mutableStateOf(initialSourceLang) }
     var targetLang by remember(initialTargetLang) { mutableStateOf(initialTargetLang) }
+    val isSelectionAllowed = canConfirm(sourceLang, targetLang)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -52,10 +55,19 @@ fun OnlineLocaleSwitchDialog(
                     onSelected = { targetLang = it },
                     modifier = Modifier.padding(top = 12.dp),
                 )
+                if (!isSelectionAllowed && validationMessage != null) {
+                    Text(
+                        text = validationMessage,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
             }
         },
         confirmButton = {
-            Button(onClick = { onConfirm(sourceLang, targetLang) }) {
+            Button(
+                enabled = isSelectionAllowed,
+                onClick = { onConfirm(sourceLang, targetLang) },
+            ) {
                 Text("更新")
             }
         },

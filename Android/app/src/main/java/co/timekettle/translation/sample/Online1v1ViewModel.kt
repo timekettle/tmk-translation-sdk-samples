@@ -612,6 +612,16 @@ class Online1v1ViewModel @Inject constructor(
     }
 
     fun updateRoomLocale(leftLang: String, rightLang: String) {
+        if (!OneToOneSameLanguagePolicy.isOnlineLanguagePairAllowed(
+                rightLang,
+                leftLang,
+                _roomScenarioOption.value.roomScenario,
+            )
+        ) {
+            _statusText.value = OneToOneSameLanguagePolicy.REQUIRES_RECOGNIZE_MESSAGE
+            addLog(OneToOneSameLanguagePolicy.REQUIRES_RECOGNIZE_MESSAGE)
+            return
+        }
         val sessionId = pageSessionId.get()
         val currentRoom = room
         if (currentRoom == null || channel == null || !isSdkChannelReady()) {
@@ -683,6 +693,16 @@ class Online1v1ViewModel @Inject constructor(
     }
 
     fun updateRoomScenario(option: OnlineRoomScenarioOption) {
+        if (!OneToOneSameLanguagePolicy.isOnlineLanguagePairAllowed(
+                _rightLang.value,
+                _leftLang.value,
+                option.roomScenario,
+            )
+        ) {
+            _statusText.value = OneToOneSameLanguagePolicy.REQUIRES_RECOGNIZE_MESSAGE
+            addLog(OneToOneSameLanguagePolicy.REQUIRES_RECOGNIZE_MESSAGE)
+            return
+        }
         val sessionId = pageSessionId.get()
         val currentRoom = room
         if (currentRoom == null) {

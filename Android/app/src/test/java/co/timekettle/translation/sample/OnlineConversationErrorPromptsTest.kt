@@ -1,5 +1,6 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.TmkTranslationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test

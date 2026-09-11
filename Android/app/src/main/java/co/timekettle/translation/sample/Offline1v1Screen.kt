@@ -371,6 +371,14 @@ data class Offline1v1Screen(
                 initialTargetLang = targetLang,
                 languageOptions = offlineLanguageOptions,
                 onDismiss = { showLocaleDialog = false },
+                canConfirm = { source, target ->
+                    OneToOneSameLanguagePolicy.isOfflineLanguagePairAllowed(
+                        sourceLang = source,
+                        targetLang = target,
+                        roomScenario = scenarioOption.roomScenario,
+                    )
+                },
+                validationMessage = OneToOneSameLanguagePolicy.REQUIRES_RECOGNIZE_MESSAGE,
                 onConfirm = { source, target ->
                     showLocaleDialog = false
                     // 离线一对一双向:UI 仍选 source/target 一对,SDK 内部处理左右双向。

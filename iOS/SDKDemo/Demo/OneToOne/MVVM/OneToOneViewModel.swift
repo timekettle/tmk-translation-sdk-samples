@@ -69,6 +69,9 @@ final class OneToOneViewModel: NSObject {
     private var selectedRecognizeEngine: TmkOnlineRecognizeEngine = .default
     private var selectedTranslateMode: TmkTranslateDeliveryMode = .default
     private var selectedScenarioOption: OneToOneScenarioOption = .defaultOption
+    private var isScenarioUpdating = false
+    private var pendingScenarioOption: OneToOneScenarioOption?
+    private var pendingSourceLanguage: String?
     private var selectedChannelModeConfiguration: OneToOneChannelModeConfiguration = OneToOneStandardChannelModeConfiguration()
     private var selectedDialogConversationAudioMode: TmkDialogConversationAudioMode {
         selectedChannelModeConfiguration.audioMode
@@ -263,13 +266,30 @@ final class OneToOneViewModel: NSObject {
         }
     }
 
+    func isSourceLanguageSelectable(_ source: String) -> Bool {
+        OneToOneSameLanguagePolicy.isOnlineLanguageSelectable(
+            source: source,
+            target: selectedTargetLang,
+            currentRoomScenario: selectedScenarioOption.roomScenario,
+            pendingRoomScenario: pendingScenarioOption?.roomScenario
+        )
+    }
+
     func applySourceLanguage(_ source: String) {
         guard supportedLanguages.contains(source) else {
             updateStatus("语言不在支持列表中")
             return
         }
-        guard source.lowercased().hasPrefix(targetLanguagePrefix()) == false else {
-            updateStatus("源语言不能与目标语言一致")
+        if deferLanguageChangeIfScenarioUpdating(source: source, target: selectedTargetLang) {
+            return
+        }
+        if let errorMessage = OneToOneSameLanguagePolicy.onlineLanguageChangeErrorMessage(
+            source: source,
+            target: selectedTargetLang,
+            roomScenario: selectedScenarioOption.roomScenario,
+            isScenarioUpdating: isScenarioUpdating
+        ) {
+            updateStatus(errorMessage)
             return
         }
         guard source != selectedSourceLang else { return }
@@ -343,6 +363,18 @@ final class OneToOneViewModel: NSObject {
 
     func updateScenarioOption(_ option: OneToOneScenarioOption) {
         guard selectedScenarioOption != option else { return }
+        guard !isScenarioUpdating else {
+            updateStatus(OneToOneSameLanguagePolicy.scenarioUpdatingMessage)
+            return
+        }
+        guard OneToOneSameLanguagePolicy.isOnlineAllowed(
+            source: selectedSourceLang,
+            target: selectedTargetLang,
+            roomScenario: option.roomScenario
+        ) else {
+            updateStatus(OneToOneSameLanguagePolicy.requiresRecognizeMessage)
+            return
+        }
         guard let room else {
             selectedScenarioOption = option
             updateStateOnMain {
@@ -352,8 +384,12 @@ final class OneToOneViewModel: NSObject {
             return
         }
         updateStatus("正在切换房间能力为\(option.title)...")
+        isScenarioUpdating = true
+        pendingScenarioOption = option
         _ = room.updateScenario(option.roomScenario) { [weak self] result in
             guard let self else { return }
+            self.isScenarioUpdating = false
+            self.pendingScenarioOption = nil
             switch result {
             case .success:
                 self.selectedScenarioOption = option
@@ -361,10 +397,31 @@ final class OneToOneViewModel: NSObject {
                     $0.scenarioOption = option
                 }
                 self.updateStatus("房间能力已切换为\(option.title)，下一句话生效")
+                if let source = self.pendingSourceLanguage {
+                    self.pendingSourceLanguage = nil
+                    self.applySourceLanguage(source)
+                }
             case .failure(let error):
+                self.pendingSourceLanguage = nil
                 self.updateStatus("房间能力切换失败：\(error.localizedDescription)")
             }
         }
+    }
+
+    private func deferLanguageChangeIfScenarioUpdating(source: String, target: String) -> Bool {
+        guard isScenarioUpdating else { return false }
+        guard let pendingScenarioOption,
+              OneToOneSameLanguagePolicy.canQueueOnlineLanguageChange(
+                  source: source,
+                  target: target,
+                  pendingRoomScenario: pendingScenarioOption.roomScenario
+              ) else {
+            updateStatus(OneToOneSameLanguagePolicy.scenarioUpdatingMessage)
+            return true
+        }
+        pendingSourceLanguage = source
+        updateStatus("房间能力切换中，完成后将自动切换语言")
+        return true
     }
 
     func updateDialogConversationAudioMode(_ mode: TmkDialogConversationAudioMode) {
@@ -395,6 +452,72 @@ final class OneToOneViewModel: NSObject {
             $0.translateMode = translateMode
         }
         recreateRoomAndChannel(statusText: "在线一对一翻译下发模式已切换，重新创建通道中...")
+    }
+}
+
+enum OneToOneSameLanguagePolicy {
+    static let requiresRecognizeMessage = "相同语言仅支持单识别，请先切换房间能力"
+    static let scenarioUpdatingMessage = "房间能力切换中，请完成后再切换语言"
+
+    static func isOfflineAllowed(source: String, target: String, roomScenario: TmkRoomScenario) -> Bool {
+        normalizedLanguageCode(source) != normalizedLanguageCode(target) || roomScenario == .recognize
+    }
+
+    static func isOnlineAllowed(source: String, target: String, roomScenario: TmkRoomScenario) -> Bool {
+        source.caseInsensitiveCompare(target) != .orderedSame || roomScenario == .recognize
+    }
+
+    static func isOnlineLanguageSelectable(source: String,
+                                           target: String,
+                                           currentRoomScenario: TmkRoomScenario,
+                                           pendingRoomScenario: TmkRoomScenario?) -> Bool {
+        isOnlineAllowed(
+            source: source,
+            target: target,
+            roomScenario: pendingRoomScenario ?? currentRoomScenario
+        )
+    }
+
+    static func offlineLanguageChangeErrorMessage(source: String,
+                                                  target: String,
+                                                  roomScenario: TmkRoomScenario,
+                                                  isScenarioUpdating: Bool) -> String? {
+        if isScenarioUpdating {
+            return scenarioUpdatingMessage
+        }
+        return isOfflineAllowed(source: source, target: target, roomScenario: roomScenario)
+            ? nil
+            : requiresRecognizeMessage
+    }
+
+    static func onlineLanguageChangeErrorMessage(source: String,
+                                                 target: String,
+                                                 roomScenario: TmkRoomScenario,
+                                                 isScenarioUpdating: Bool) -> String? {
+        if isScenarioUpdating {
+            return scenarioUpdatingMessage
+        }
+        return isOnlineAllowed(source: source, target: target, roomScenario: roomScenario)
+            ? nil
+            : requiresRecognizeMessage
+    }
+
+    static func canQueueOfflineLanguageChange(source: String,
+                                              target: String,
+                                              pendingRoomScenario: TmkRoomScenario) -> Bool {
+        isOfflineAllowed(source: source, target: target, roomScenario: pendingRoomScenario)
+    }
+
+    static func canQueueOnlineLanguageChange(source: String,
+                                             target: String,
+                                             pendingRoomScenario: TmkRoomScenario) -> Bool {
+        isOnlineAllowed(source: source, target: target, roomScenario: pendingRoomScenario)
+    }
+
+    private static func normalizedLanguageCode(_ code: String) -> String {
+        let trimmedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        let separator = trimmedCode.firstIndex(where: { $0 == "-" || $0 == "_" })
+        return (separator.map { String(trimmedCode[..<$0]) } ?? trimmedCode).lowercased()
     }
 }
 
