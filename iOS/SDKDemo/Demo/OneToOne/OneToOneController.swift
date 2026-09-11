@@ -761,7 +761,9 @@ private extension OneToOneController {
             switch result {
             case .success(let response):
                 self.supportedSourceLanguageOptions = response.localeOptions
-                    .filter { $0.code.lowercased().hasPrefix(self.state.targetLanguage.lowercased()) == false }
+                    .filter {
+                        self.viewModel.isSourceLanguageSelectable($0.code)
+                    }
                     .map { LanguageOption(code: $0.code, title: self.languageTitle(for: $0)) }
                     .sorted { $0.title < $1.title }
                 self.showSourceLanguagePicker()

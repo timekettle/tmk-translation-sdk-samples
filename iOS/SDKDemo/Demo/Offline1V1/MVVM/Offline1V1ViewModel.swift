@@ -147,6 +147,9 @@ final class Offline1V1ViewModel: NSObject {
     @Published private(set) var selectedTranslateMode: TmkTranslateDeliveryMode = .partial
     /// 能力档位：默认 toSpeech（完整链路）。
     @Published private(set) var selectedScenarioOption: OfflineScenarioOption = .defaultOption
+    private var isScenarioUpdating = false
+    private var pendingScenarioOption: OfflineScenarioOption?
+    private var pendingLanguageChange: (source: String, target: String)?
     private var selectedChannelModeConfiguration: OneToOneChannelModeConfiguration = OneToOneStandardChannelModeConfiguration()
     private var maxDisplayedRows = 20
     private var downloadStatusHeader = ""
@@ -421,16 +424,32 @@ final class Offline1V1ViewModel: NSObject {
     }
 
     func applySourceLanguage(_ code: String) {
-        guard code != selectedTargetLang else {
-            updateStatus("源语言和目标语言不能相同")
+        if deferLanguageChangeIfScenarioUpdating(source: code, target: selectedTargetLang) {
+            return
+        }
+        if let errorMessage = OneToOneSameLanguagePolicy.offlineLanguageChangeErrorMessage(
+            source: code,
+            target: selectedTargetLang,
+            roomScenario: selectedScenarioOption.roomScenario,
+            isScenarioUpdating: isScenarioUpdating
+        ) {
+            updateStatus(errorMessage)
             return
         }
         applyLanguages(source: code, target: selectedTargetLang)
     }
 
     func applyTargetLanguage(_ code: String) {
-        guard code != selectedSourceLang else {
-            updateStatus("源语言和目标语言不能相同")
+        if deferLanguageChangeIfScenarioUpdating(source: selectedSourceLang, target: code) {
+            return
+        }
+        if let errorMessage = OneToOneSameLanguagePolicy.offlineLanguageChangeErrorMessage(
+            source: selectedSourceLang,
+            target: code,
+            roomScenario: selectedScenarioOption.roomScenario,
+            isScenarioUpdating: isScenarioUpdating
+        ) {
+            updateStatus(errorMessage)
             return
         }
         applyLanguages(source: selectedSourceLang, target: code)
@@ -444,6 +463,18 @@ final class Offline1V1ViewModel: NSObject {
     /// 离线切换语言不可取消、无超时，仅在真正开始 native 重建前做检查（语言支持 / 模型就绪 /
     /// 通道须已 running）失败即回错；一旦开始重建即承诺走到成功（含秒级模型重载耗时）。
     func applyLanguages(source: String, target: String) {
+        if deferLanguageChangeIfScenarioUpdating(source: source, target: target) {
+            return
+        }
+        if let errorMessage = OneToOneSameLanguagePolicy.offlineLanguageChangeErrorMessage(
+            source: source,
+            target: target,
+            roomScenario: selectedScenarioOption.roomScenario,
+            isScenarioUpdating: isScenarioUpdating
+        ) {
+            updateStatus(errorMessage)
+            return
+        }
         // 通道尚未创建：保存选择，等通道创建后按新语言生效。
         guard let channel else {
             selectedSourceLang = source
@@ -516,6 +547,19 @@ final class Offline1V1ViewModel: NSObject {
     /// 升档（needsMT/needsTTS 相对当前档位从无到有）时若目标档位所需模型未就绪，
     /// 不下发、弹确认框引导下载，`selectedScenarioOption` 保持旧值（成功回调才落地）。
     func updateScenario(_ option: OfflineScenarioOption) {
+        guard selectedScenarioOption != option else { return }
+        guard !isScenarioUpdating else {
+            updateStatus(OneToOneSameLanguagePolicy.scenarioUpdatingMessage)
+            return
+        }
+        guard OneToOneSameLanguagePolicy.isOfflineAllowed(
+            source: selectedSourceLang,
+            target: selectedTargetLang,
+            roomScenario: option.roomScenario
+        ) else {
+            updateStatus(OneToOneSameLanguagePolicy.requiresRecognizeMessage)
+            return
+        }
         // 通道尚未创建：仅保存，等通道创建后按新档位生效。
         guard let channel else {
             selectedScenarioOption = option
@@ -540,17 +584,43 @@ final class Offline1V1ViewModel: NSObject {
             return
         }
         updateStatus("正在切换能力档位为 \(option.title)...")
+        isScenarioUpdating = true
+        pendingScenarioOption = option
         channel.updateScenario(option.roomScenario) { [weak self] result in
             guard let self else { return }
+            self.isScenarioUpdating = false
+            self.pendingScenarioOption = nil
             switch result {
             case .success:
                 // 切换成功后才落地档位，保证 UI 与底层一致。
                 self.selectedScenarioOption = option
                 self.updateStatus("能力档位已切换为 \(option.title)")
+                if let pendingLanguageChange = self.pendingLanguageChange {
+                    self.pendingLanguageChange = nil
+                    self.applyLanguages(source: pendingLanguageChange.source,
+                                        target: pendingLanguageChange.target)
+                }
             case .failure(let error):
+                self.pendingLanguageChange = nil
                 self.updateStatus("能力档位切换失败：\(error.message)")
             }
         }
+    }
+
+    private func deferLanguageChangeIfScenarioUpdating(source: String, target: String) -> Bool {
+        guard isScenarioUpdating else { return false }
+        guard let pendingScenarioOption,
+              OneToOneSameLanguagePolicy.canQueueOfflineLanguageChange(
+                  source: source,
+                  target: target,
+                  pendingRoomScenario: pendingScenarioOption.roomScenario
+              ) else {
+            updateStatus(OneToOneSameLanguagePolicy.scenarioUpdatingMessage)
+            return true
+        }
+        pendingLanguageChange = (source, target)
+        updateStatus("能力档位切换中，完成后将自动切换语言")
+        return true
     }
 
     func updateSpeaker(channel speakerChannel: TmkSpeakerChannel, gender: TmkSpeakerGender) {
