@@ -175,6 +175,16 @@ class Offline1v1ViewModel @Inject constructor(
      * (升档做前置就绪检查、当场补建 MT/TTS session;降档立即释放),成功后刷新模型就绪状态(needMt/needTts 随档位变)。
      */
     fun updateScenario(option: OfflineScenarioOption) {
+        if (!OneToOneSameLanguagePolicy.isOfflineLanguagePairAllowed(
+                _sourceLang.value,
+                _targetLang.value,
+                option.roomScenario,
+            )
+        ) {
+            _localeSwitchError.value = OneToOneSameLanguagePolicy.REQUIRES_RECOGNIZE_MESSAGE
+            addLog(OneToOneSameLanguagePolicy.REQUIRES_RECOGNIZE_MESSAGE)
+            return
+        }
         val currentChannel = channel
         if (currentChannel == null) {
             _scenarioOption.value = option
@@ -276,6 +286,16 @@ class Offline1v1ViewModel @Inject constructor(
      * 离线一对一为双向,但对外仍传 source/target 一对(SDK 内部处理左右双向),与收听/建通道一致。
      */
     fun updateLanguages(sourceLang: String, targetLang: String) {
+        if (!OneToOneSameLanguagePolicy.isOfflineLanguagePairAllowed(
+                sourceLang,
+                targetLang,
+                _scenarioOption.value.roomScenario,
+            )
+        ) {
+            _localeSwitchError.value = OneToOneSameLanguagePolicy.REQUIRES_RECOGNIZE_MESSAGE
+            addLog(OneToOneSameLanguagePolicy.REQUIRES_RECOGNIZE_MESSAGE)
+            return
+        }
         val currentChannel = channel
         if (currentChannel == null || !_isChannelReady.value) {
             _sourceLang.value = sourceLang

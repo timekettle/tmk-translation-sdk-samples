@@ -11,7 +11,7 @@ import TmkTranslationSDK
 
 final class SDKDemoTests: XCTestCase {
 
-    func testDiagnosisConfigMapsEnabledLevelAndAudioCapture() {
+    func testDiagnosisConfigUsesTraceAudioOnlyAndNilRootDirectory() {
         let config = DemoSettingsConfig(
             diagnosisEnabled: true,
             diagnosisLevel: .trace,
@@ -20,16 +20,18 @@ final class SDKDemoTests: XCTestCase {
             networkEnvironment: .test,
             customNetworkBaseURLEnabled: false,
             customNetworkBaseURL: DemoSettingsConfig.rayneoNetworkBaseURL,
+            customOfflineModelBaseURLEnabled: false,
+            offlineModelBaseURL: "",
             sensitiveWordRedactionEnabled: true,
             mockEngineEnabled: false,
-            schemaVersion: 7
+            schemaVersion: DemoSettingsConfig.default.schemaVersion
         )
 
-        let diagnosisConfig = DemoSDKConfigurationFactory.makeDiagnosisConfig(from: config)
+        let globalConfig = DemoSDKConfigurationFactory.makeGlobalConfig(from: config)
 
-        XCTAssertTrue(diagnosisConfig.enabled)
-        XCTAssertEqual(diagnosisConfig.level, .trace)
-        XCTAssertTrue(diagnosisConfig.audioCaptureEnabled)
+        XCTAssertEqual(globalConfig.diagnosisConfig.level, .trace)
+        XCTAssertTrue(globalConfig.diagnosisConfig.audioCaptureEnabled)
+        XCTAssertNil(globalConfig.diagnosisConfig.rootDirectory)
     }
 
     override func setUpWithError() throws {
