@@ -57,14 +57,18 @@ final class SampleSettingsStore {
       consoleLogEnabled:
           await _resolvedStorage.getBool(_consoleLogEnabled) ??
           defaults.consoleLogEnabled,
-      networkEnvironment:
-          await _resolvedStorage.getString(_networkEnvironment) ??
-          defaults.networkEnvironment,
+      networkEnvironment: _supportedNetworkEnvironment(
+        await _resolvedStorage.getString(_networkEnvironment),
+        defaults.networkEnvironment,
+      ),
       mockEngineEnabled:
           await _resolvedStorage.getBool(_mockEngineEnabled) ??
           defaults.mockEngineEnabled,
     );
   }
+
+  String _supportedNetworkEnvironment(String? value, String fallback) =>
+      sampleNetworkEnvironmentOptions.contains(value) ? value! : fallback;
 
   Future<void> save(TmkSettingsDraft settings) async {
     await Future.wait<void>([

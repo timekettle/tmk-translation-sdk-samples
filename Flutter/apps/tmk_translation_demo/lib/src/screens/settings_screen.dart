@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:tmk_translation_flutter/tmk_translation_flutter.dart' as api;
+
 import '../tmk_translation_adapter.dart';
 
 import '../sample_settings_store.dart';
@@ -21,15 +22,6 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  static const _networkOptions = [
-    'dev',
-    'test',
-    'uat',
-    'pre',
-    'pre_jp',
-    'pre_us',
-  ];
-
   late TmkSettingsDraft _draft;
   final SampleSettingsStore _settingsStore = SampleSettingsStore();
   TmkRuntimeStatus? _runtimeStatus;
@@ -54,16 +46,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return;
       }
       setState(() => _runtimeStatus = runtimeStatus);
-      Navigator.of(
-        context,
-      ).pop(SettingsResult(settings: _draft, runtimeStatus: runtimeStatus));
+      Navigator.of(context)
+          .pop(SettingsResult(settings: _draft, runtimeStatus: runtimeStatus));
     } catch (error) {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('设置应用失败：$error')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('设置应用失败：$error')));
     } finally {
       if (mounted) {
         setState(() => _isApplying = false);
@@ -120,7 +110,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   value: _draft.networkEnvironment,
                   dropdownColor: appSurface,
                   underline: const SizedBox.shrink(),
-                  items: _networkOptions
+                  items: sampleNetworkEnvironmentOptions
                       .map(
                         (value) => DropdownMenuItem<String>(
                           value: value,

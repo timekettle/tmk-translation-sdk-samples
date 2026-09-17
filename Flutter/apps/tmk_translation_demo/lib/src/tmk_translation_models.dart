@@ -30,6 +30,8 @@ enum TmkEngineStatusKind { checking, available, unavailable, placeholder }
 
 enum TmkLogLevel { info, warning, error }
 
+const sampleNetworkEnvironmentOptions = <String>['dev', 'test', 'pre'];
+
 @immutable
 class TmkSettingsDraft {
   const TmkSettingsDraft({

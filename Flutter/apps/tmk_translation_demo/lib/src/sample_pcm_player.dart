@@ -170,7 +170,7 @@ final class SamplePcmPlayer {
       return Future<void>.error(StateError('PCM 播放器已释放'));
     }
     final completer = Completer<void>();
-    _tail = _tail.then((_) async {
+    _tail = _tail.catchError((Object _) {}).then((_) async {
       try {
         await _enqueueNow(frame);
         completer.complete();
@@ -186,7 +186,7 @@ final class SamplePcmPlayer {
       return Future<void>.error(StateError('PCM 播放器已释放'));
     }
     final completer = Completer<void>();
-    _tail = _tail.then((_) async {
+    _tail = _tail.catchError((Object _) {}).then((_) async {
       try {
         await _prepareNow(sampleRate, channelCount);
         completer.complete();
@@ -221,22 +221,32 @@ final class SamplePcmPlayer {
         _sampleRate != sampleRate || _channelCount != channelCount;
     if (formatChanged) {
       await _releaseNow();
-      await _backend.setup(
-        sampleRate: sampleRate,
-        channelCount: channelCount,
-        onRemainingFrames: (remainingFrames) {
-          _estimatedQueuedFrames = remainingFrames < 0 ? 0 : remainingFrames;
-          _remainingFramesRevision++;
-        },
-      );
-      await _onFormatSetup?.call();
-      _sampleRate = sampleRate;
-      _channelCount = channelCount;
+      try {
+        await _backend.setup(
+          sampleRate: sampleRate,
+          channelCount: channelCount,
+          onRemainingFrames: (remainingFrames) {
+            _estimatedQueuedFrames = remainingFrames < 0 ? 0 : remainingFrames;
+            _remainingFramesRevision++;
+          },
+        );
+        await _onFormatSetup?.call();
+        _sampleRate = sampleRate;
+        _channelCount = channelCount;
+      } catch (_) {
+        // setup may have activated native output before the route restore failed.
+        try {
+          await _backend.release();
+        } catch (_) {
+          // Preserve the original setup error for the caller.
+        }
+        rethrow;
+      }
     }
   }
 
   Future<void> clear() {
-    _tail = _tail.then((_) => _releaseNow());
+    _tail = _tail.catchError((Object _) {}).then((_) => _releaseNow());
     return _tail;
   }
 

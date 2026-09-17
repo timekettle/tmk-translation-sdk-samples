@@ -21,7 +21,7 @@ void main() {
     const expected = TmkSettingsDraft(
       diagnosisEnabled: true,
       consoleLogEnabled: false,
-      networkEnvironment: 'pre_jp',
+      networkEnvironment: 'pre',
       mockEngineEnabled: true,
     );
 
@@ -33,6 +33,18 @@ void main() {
     expect(actual.networkEnvironment, expected.networkEnvironment);
     expect(actual.mockEngineEnabled, expected.mockEngineEnabled);
   });
+
+  test(
+    'falls back to test for a previously saved unsupported environment',
+    () async {
+      final storage = _MemorySettingsStorage();
+      await storage.setString('sample.network_environment', 'pre_jp');
+
+      final settings = await SampleSettingsStore(storage: storage).load();
+
+      expect(settings.networkEnvironment, 'test');
+    },
+  );
 
   test('maps unsupported legacy environment to public unknown enum', () {
     final config = sampleGlobalConfig(

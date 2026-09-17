@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:tmk_translation_flutter/tmk_translation_flutter.dart' as api;
+
 import '../tmk_translation_adapter.dart';
 
 import '../conversation_bubbles.dart';
@@ -36,6 +37,7 @@ class _SessionScreenState extends State<SessionScreen> {
   final api.TmkTranslationSdk _sdk = api.TmkTranslationSdk.instance;
   StreamSubscription<api.TmkTranslationSessionEvent>? _eventsSubscription;
   api.TmkTranslationSession? _session;
+  api.TmkTranslationSessionCreationOperation? _creationOperation;
   api.TmkOfflineModelDownloadOperation? _downloadOperation;
   late TmkSessionConfig _sessionConfig;
   late ConversationBubbleRenderPipeline _bubbleRenderPipeline;
@@ -52,6 +54,8 @@ class _SessionScreenState extends State<SessionScreen> {
   List<TmkLanguageOption> _supportedLanguageOptions = const [];
   TmkOneToOnePlaybackMode _playbackMode = TmkOneToOnePlaybackMode.left;
   int _sessionGeneration = 0;
+  int _captureGeneration = 0;
+  bool _captureFailureInProgress = false;
 
   @override
   void initState() {
@@ -111,6 +115,10 @@ class _SessionScreenState extends State<SessionScreen> {
     if (invalidateGeneration) {
       _sessionGeneration++;
     }
+    _captureGeneration++;
+    _captureFailureInProgress = false;
+    final creation = _creationOperation;
+    _creationOperation = null;
     final session = _session;
     _session = null;
     // Invalidate event routing before the first await. Native audio/text may
@@ -121,6 +129,7 @@ class _SessionScreenState extends State<SessionScreen> {
     _downloadOperation = null;
     final eventsSubscription = _eventsSubscription;
     _eventsSubscription = null;
+    await creation?.cancel().catchError((_) {});
     await _pcmCapture.stop().catchError((_) {});
     _fixedPcmSource.reset();
     await download?.cancel().catchError((_) {});
@@ -155,6 +164,7 @@ class _SessionScreenState extends State<SessionScreen> {
     });
     try {
       final operation = _sdk.createSession(toSdkSessionConfig(_sessionConfig));
+      _creationOperation = operation;
       // Subscribe before awaiting creation: native events may be emitted as
       // soon as the Pigeon create operation has allocated its session.
       final pendingEvents = <api.TmkTranslationSessionEvent>[];
@@ -170,8 +180,14 @@ class _SessionScreenState extends State<SessionScreen> {
       try {
         session = await operation.result;
       } catch (_) {
+        if (identical(_creationOperation, operation)) {
+          _creationOperation = null;
+        }
         await subscription.cancel();
         rethrow;
+      }
+      if (identical(_creationOperation, operation)) {
+        _creationOperation = null;
       }
       if (!mounted || generation != _sessionGeneration) {
         await subscription.cancel();
@@ -257,9 +273,10 @@ class _SessionScreenState extends State<SessionScreen> {
 
   Future<void> _startListening() async {
     final session = _session;
-    if (session == null) {
+    if (session == null || !_canStartListening) {
       return;
     }
+    final captureGeneration = ++_captureGeneration;
     setState(() {
       _isStarting = true;
       _statusText = '正在启动收听...';
@@ -281,30 +298,69 @@ class _SessionScreenState extends State<SessionScreen> {
       );
       await _pcmCapture.start(
         onFrame: (pcm) => _pushAudioFrame(session, pcm),
-        onError: (error) {
-          if (!mounted || !identical(_session, session)) return;
-          setState(() {
-            _isStarted = false;
-            _isStarting = false;
-            _statusText = '开始收听失败：$error';
-          });
-        },
+        onError: (error) => _handleCaptureError(session, error),
       );
+      if (!mounted ||
+          captureGeneration != _captureGeneration ||
+          !identical(_session, session)) {
+        return;
+      }
       await _pcmCapture.restoreDuplexAudioSession();
-      if (!mounted) return;
+      if (!mounted ||
+          captureGeneration != _captureGeneration ||
+          !identical(_session, session)) {
+        return;
+      }
       setState(() {
         _isStarted = true;
         _isStarting = false;
         _statusText = '翻译中...';
       });
     } catch (error) {
-      if (!mounted) return;
+      if (captureGeneration != _captureGeneration ||
+          !identical(_session, session)) {
+        return;
+      }
+      _captureGeneration++;
+      await _pcmCapture.stop().catchError((_) {});
+      await _pcmPlayer.clear().catchError((_) {});
+      if (!mounted || !identical(_session, session)) return;
       setState(() {
         _isStarted = false;
         _isStarting = false;
         _statusText = '开始收听失败：$error';
       });
     }
+  }
+
+  void _handleCaptureError(api.TmkTranslationSession session, Object error) {
+    if (!mounted ||
+        !identical(_session, session) ||
+        _captureFailureInProgress) {
+      return;
+    }
+    _captureFailureInProgress = true;
+    _captureGeneration++;
+    setState(() {
+      _isStarted = false;
+      _isStarting = true;
+      _statusText = '录音错误，正在停止：$error';
+    });
+    unawaited(_stopCaptureAfterError(session, error));
+  }
+
+  Future<void> _stopCaptureAfterError(
+    api.TmkTranslationSession session,
+    Object error,
+  ) async {
+    await _pcmCapture.stop().catchError((_) {});
+    await _pcmPlayer.clear().catchError((_) {});
+    if (!mounted || !identical(_session, session)) return;
+    _captureFailureInProgress = false;
+    setState(() {
+      _isStarting = false;
+      _statusText = '收听已停止：$error';
+    });
   }
 
   Future<void> _pushAudioFrame(
@@ -607,15 +663,23 @@ class _SessionScreenState extends State<SessionScreen> {
     }
     switch (event) {
       case TmkSessionStateEvent():
+        final terminalState =
+            event.snapshot.state == api.TmkTranslationChannelState.stopped ||
+            event.snapshot.state == api.TmkTranslationChannelState.failed;
         setState(() {
           // The public Session is already native-running after creation, but
           // the Sample must keep its original capture-owned start/stop UI.
           if (_isStarted && event.statusText.isNotEmpty) {
             _statusText = event.statusText;
           }
+          if (terminalState) {
+            _isStarting = false;
+            _isStarted = false;
+            _isDownloading = false;
+          }
           // Native creation is already started when createSession completes.
-          // These flags belong to Sample-owned microphone capture, so native
-          // lifecycle callbacks must not disable the capture button.
+          // Capture flags remain Sample-owned except for a terminal channel
+          // state, which must stop capture and recreate the session.
           if (event.isModelReady == true) {
             _offlineModelStatus = TmkOfflineModelStatus(
               isReady: true,
@@ -630,6 +694,14 @@ class _SessionScreenState extends State<SessionScreen> {
             _isDownloading = false;
           }
         });
+        if (terminalState) {
+          unawaited(
+            _recoverSessionAfterError(
+              event.sessionId,
+              event.statusText.isNotEmpty ? event.statusText : '通道已停止',
+            ),
+          );
+        }
       case TmkBubbleEvent():
       case TmkRecognizedEvent():
       case TmkTranslatedEvent():

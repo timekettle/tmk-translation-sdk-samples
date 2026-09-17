@@ -208,6 +208,43 @@ void main() {
       expect(backend.releaseCount, 1);
       await player.dispose();
     });
+
+    test('releases output when duplex route setup fails', () async {
+      final backend = _FakePlaybackBackend();
+      var failRouteSetup = true;
+      final player = SamplePcmPlayer(
+        backend: backend,
+        onFormatSetup: () async {
+          if (failRouteSetup) {
+            failRouteSetup = false;
+            throw StateError('route setup failed');
+          }
+        },
+      );
+
+      await expectLater(
+        player.prepare(sampleRate: 16000, channelCount: 1),
+        throwsStateError,
+      );
+      expect(backend.releaseCount, 1);
+      await player.prepare(sampleRate: 16000, channelCount: 1);
+      expect(backend.formats, [(16000, 1), (16000, 1)]);
+      await player.dispose();
+    });
+
+    test('recovers its queue after one native release failure', () async {
+      final backend = _FakePlaybackBackend();
+      final player = SamplePcmPlayer(backend: backend);
+      await player.prepare(sampleRate: 16000, channelCount: 1);
+      backend.releaseFailuresRemaining = 1;
+
+      await expectLater(player.clear(), throwsStateError);
+      await player
+          .prepare(sampleRate: 8000, channelCount: 1)
+          .timeout(const Duration(seconds: 1));
+      expect(backend.formats, [(16000, 1), (8000, 1)]);
+      await player.dispose();
+    });
   });
 }
 
@@ -235,6 +272,7 @@ final class _FakePlaybackBackend implements SamplePcmPlaybackBackend {
   final List<(int, int)> formats = [];
   final List<List<int>> frames = [];
   int releaseCount = 0;
+  int releaseFailuresRemaining = 0;
 
   @override
   Future<void> setup({
@@ -253,5 +291,9 @@ final class _FakePlaybackBackend implements SamplePcmPlaybackBackend {
   @override
   Future<void> release() async {
     releaseCount++;
+    if (releaseFailuresRemaining > 0) {
+      releaseFailuresRemaining--;
+      throw StateError('release failed');
+    }
   }
 }

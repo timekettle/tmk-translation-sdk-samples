@@ -10,6 +10,7 @@ final class SamplePcmCapture {
 
   final AudioRecorder _recorder;
   StreamSubscription<Uint8List>? _subscription;
+  Future<void>? _startTask;
   Future<void> _pushTail = Future<void>.value();
 
   bool get isRecording => _subscription != null;
@@ -17,8 +18,21 @@ final class SamplePcmCapture {
   Future<void> start({
     required Future<void> Function(Uint8List frame) onFrame,
     required void Function(Object error) onError,
+  }) {
+    if (_startTask case final pending?) return pending;
+    if (isRecording) return Future<void>.value();
+    late final Future<void> task;
+    task = _startNow(onFrame: onFrame, onError: onError).whenComplete(() {
+      if (identical(_startTask, task)) _startTask = null;
+    });
+    _startTask = task;
+    return task;
+  }
+
+  Future<void> _startNow({
+    required Future<void> Function(Uint8List frame) onFrame,
+    required void Function(Object error) onError,
   }) async {
-    if (isRecording) return;
     if (!await _recorder.hasPermission()) {
       throw StateError('麦克风权限未授权');
     }
@@ -48,6 +62,12 @@ final class SamplePcmCapture {
   }
 
   Future<void> stop() async {
+    // A stop can race startStream; do not leave a late subscription attached.
+    try {
+      await _startTask;
+    } catch (_) {
+      // Still ask the recorder to stop after a failed start.
+    }
     final subscription = _subscription;
     _subscription = null;
     await subscription?.cancel();
@@ -75,6 +95,6 @@ final class SamplePcmCapture {
 
   Future<void> dispose() async {
     await stop();
-    _recorder.dispose();
+    await _recorder.dispose();
   }
 }

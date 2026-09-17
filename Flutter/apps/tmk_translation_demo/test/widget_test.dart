@@ -26,7 +26,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('settings keeps the original controls and network options', (
+  testWidgets('settings shows only SDK-supported network options', (
     tester,
   ) async {
     await tester.binding.setSurfaceSize(const Size(800, 1600));
@@ -45,5 +45,13 @@ void main() {
     expect(find.text('网络环境'), findsOneWidget);
     expect(find.text('确认并重新应用'), findsOneWidget);
     expect(find.byType(HomeScreen), findsNothing);
+
+    await tester.tap(find.byType(DropdownButton<String>));
+    await tester.pumpAndSettle();
+    expect(find.text('DEV'), findsOneWidget);
+    expect(find.text('PRE'), findsOneWidget);
+    expect(find.text('UAT'), findsNothing);
+    expect(find.text('PRE_JP'), findsNothing);
+    expect(find.text('PRE_US'), findsNothing);
   });
 }
