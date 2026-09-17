@@ -1,5 +1,7 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 /**
  * Demo 侧进房 bootstrap 链路：鉴权 → 建房 → 建通道 → 通道就绪。
  * 段耗时与总耗时均由宿主本地打点，不依赖 SDK 额外 API。

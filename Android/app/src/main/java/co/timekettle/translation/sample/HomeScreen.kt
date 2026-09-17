@@ -1,5 +1,7 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -53,34 +55,81 @@ private data class ModeOption(
     val label: String,
     val icon: String,
     val desc: String,
+    val badge: String,
     val badgeColor: Color,
 )
 
 private object ModeId {
     const val ONLINE = "ONLINE"
     const val OFFLINE = "OFFLINE"
+    const val CONCURRENT_ONE_TO_ONE = "CONCURRENT_ONE_TO_ONE"
     const val AUTO = "AUTO"
     const val MIX = "MIX"
 }
 
 private val MODE_OPTIONS = listOf(
-    ModeOption(ModeId.ONLINE, "在线翻译", "☁️", "云端引擎，43语种90方言", OnlineColor),
-    ModeOption(ModeId.OFFLINE, "离线翻译", "📱", "本地引擎，无需网络", OfflineColor),
-    ModeOption(ModeId.AUTO, "智能切换", "🔄", "断网自动降级离线", AutoColor),
-    ModeOption(ModeId.MIX, "双引擎竞速", "⚡", "在线+离线择优输出", MixColor),
+    ModeOption(ModeId.ONLINE, "在线翻译", "☁️", "云端引擎，43语种90方言", "ONLINE", OnlineColor),
+    ModeOption(ModeId.OFFLINE, "离线翻译", "📱", "本地引擎，无需网络", "OFFLINE", OfflineColor),
+    ModeOption(ModeId.CONCURRENT_ONE_TO_ONE, "在线&离线", "🔀", "在线和离线同时翻译，对比输出", "CONCURRENT", AccentColor),
+    ModeOption(ModeId.AUTO, "智能切换", "🔄", "断网自动降级离线", "AUTO", AutoColor),
+    ModeOption(ModeId.MIX, "双引擎竞速", "⚡", "在线+离线择优输出", "MIX", MixColor),
 )
 
 private val MODE_OPTION_BY_ID = MODE_OPTIONS.associateBy { it.id }
 
 private val SCENARIO_MODES = mapOf(
     ScenarioType.LISTEN to listOf(ModeId.ONLINE, ModeId.OFFLINE),
-    ScenarioType.ONE_TO_ONE to listOf(ModeId.ONLINE, ModeId.OFFLINE),
+    ScenarioType.ONE_TO_ONE to listOf(ModeId.ONLINE, ModeId.OFFLINE, ModeId.CONCURRENT_ONE_TO_ONE),
 )
 
 private val SCENARIO_HINTS = mapOf(
     ScenarioType.LISTEN to "支持在线/离线模式",
     ScenarioType.ONE_TO_ONE to "支持在线/离线模式",
 )
+
+internal fun isHomeModeEnabled(allowedModes: List<String>, modeId: String): Boolean {
+    return modeId in allowedModes
+}
+
+/** 取语言 code 的主标签（如 "zh-CN" → "zh"），与 SDK 离线语言码归一化语义一致。 */
+internal fun String.baseLanguageCode(): String =
+    trim().substringBefore('-').substringBefore('_').lowercase()
+
+internal fun hasDistinctLanguageCodes(firstCode: String, secondCode: String): Boolean =
+    !firstCode.equals(secondCode, ignoreCase = true)
+
+internal const val HOME_SAME_LANGUAGE_SELECTION_MESSAGE = "不能选择相同的语言"
+
+internal fun isHomeLanguageSelectionAllowed(candidateCode: String, oppositeSelectedCode: String): Boolean =
+    hasDistinctLanguageCodes(candidateCode, oppositeSelectedCode)
+
+internal fun isHomeLanguagePairReady(
+    sourceLang: String,
+    targetLang: String,
+    options: Map<String, String>,
+): Boolean {
+    return sourceLang in options &&
+        targetLang in options &&
+        hasDistinctLanguageCodes(sourceLang, targetLang)
+}
+
+internal fun normalizeHomeLanguagePair(
+    sourceLang: String,
+    targetLang: String,
+    options: Map<String, String>,
+): Pair<String, String> {
+    if (options.isEmpty()) return sourceLang to targetLang
+
+    val normalizedSource = sourceLang.takeIf { it in options } ?: options.keys.first()
+    val normalizedTarget = targetLang.takeIf { it in options } ?: normalizedSource
+    val resolvedTarget = if (hasDistinctLanguageCodes(normalizedSource, normalizedTarget)) {
+        normalizedTarget
+    } else {
+        options.keys.firstOrNull { code -> hasDistinctLanguageCodes(normalizedSource, code) }
+            ?: normalizedTarget
+    }
+    return normalizedSource to resolvedTarget
+}
 
 class HomeScreen : Screen {
 
@@ -91,54 +140,75 @@ class HomeScreen : Screen {
         var modeId by rememberSaveable { mutableStateOf(ModeId.ONLINE) }
         var sourceLang by rememberSaveable { mutableStateOf("zh-CN") }
         var targetLang by rememberSaveable { mutableStateOf("en-US") }
+        var showSameLanguageSelectionDialog by rememberSaveable { mutableStateOf(false) }
         val scenario = ScenarioType.entries.firstOrNull { it.name == scenarioName } ?: ScenarioType.LISTEN
-        val allowedModes = SCENARIO_MODES[scenario] ?: listOf(ModeId.ONLINE)
-        val effectiveModeId = modeId.takeIf { it in allowedModes } ?: allowedModes.firstOrNull() ?: ModeId.ONLINE
-        val effectiveMode = MODE_OPTION_BY_ID[effectiveModeId] ?: MODE_OPTIONS.first()
-        val startLabel = "开始${effectiveMode.label}"
 
-        // 按需加载：默认在线；离线模式才请求离线列表（智能/竞速沿用在线）
-        val langUiState = if (effectiveModeId == ModeId.OFFLINE) {
+        // 语言选择：并发模式用在线列表（BCP-47）；离线单模式用离线列表；其余用在线列表。
+        // 一对一场景额外请求离线列表，用于判断 base code 是否支持离线（不受当前 mode 影响，避免死锁）。
+        val langUiState = if (modeId == ModeId.OFFLINE) {
             rememberOfflineLanguageOptions()
         } else {
             rememberOnlineLanguageOptions()
         }
+        val offlineUiState = if (scenario == ScenarioType.ONE_TO_ONE) {
+            rememberOfflineLanguageOptions()
+        } else null
+
+        // 离线列表就绪后，判断当前语言对的 base code 是否同时支持离线（未加载完成视为暂不可选）。
+        val offlineReady = offlineUiState?.state as? LanguageOptionsState.Ready
+        val offlineBaseCodes = offlineReady?.options?.keys?.map { it.baseLanguageCode() }?.toSet() ?: emptySet()
+        val concurrentSupported = offlineReady != null &&
+            sourceLang.baseLanguageCode() in offlineBaseCodes &&
+            targetLang.baseLanguageCode() in offlineBaseCodes
+
+        val allowedModes = (SCENARIO_MODES[scenario] ?: listOf(ModeId.ONLINE))
+            .filterNot { it == ModeId.CONCURRENT_ONE_TO_ONE && !concurrentSupported }
+        val effectiveModeId = modeId.takeIf { it in allowedModes } ?: allowedModes.firstOrNull() ?: ModeId.ONLINE
+        val effectiveMode = MODE_OPTION_BY_ID[effectiveModeId] ?: MODE_OPTIONS.first()
+        val startLabel = "开始${effectiveMode.label}"
+
         val ready = langUiState.state as? LanguageOptionsState.Ready
         val langOptions = ready?.options ?: emptyMap()
         // 列表就绪且源/目标语言均在列表中，才允许开始翻译
-        val canStart = ready != null && sourceLang in langOptions && targetLang in langOptions
+        val canStart = ready != null && isHomeLanguagePairReady(sourceLang, targetLang, langOptions)
 
-        // 如果当前 mode 不在允许列表，自动切到第一个
-        LaunchedEffect(scenarioName) {
-            val allowed = SCENARIO_MODES[scenario] ?: listOf(ModeId.ONLINE)
-            if (modeId !in allowed) {
-                modeId = allowed.first()
+        // 场景切换或语言对离线支持变化导致允许列表变化时，若当前 mode 不在允许列表则自动切到第一个。
+        LaunchedEffect(allowedModes) {
+            if (modeId !in allowedModes) {
+                modeId = allowedModes.first()
             }
         }
 
         // 切换在线/离线模式或语言列表变化时，确保当前语言仍然在可选列表中(空列表跳过，避免崩溃)
         LaunchedEffect(effectiveModeId, langOptions) {
             if (langOptions.isNotEmpty()) {
-                if (sourceLang !in langOptions) {
-                    sourceLang = langOptions.keys.first()
-                }
-                if (targetLang !in langOptions) {
-                    targetLang = langOptions.keys.firstOrNull { it != sourceLang } ?: sourceLang
-                }
+                val (normalizedSource, normalizedTarget) = normalizeHomeLanguagePair(
+                    sourceLang = sourceLang,
+                    targetLang = targetLang,
+                    options = langOptions,
+                )
+                if (sourceLang != normalizedSource) sourceLang = normalizedSource
+                if (targetLang != normalizedTarget) targetLang = normalizedTarget
             }
         }
 
-        Box(
+        // 与设置页相同：滚动区 weight(1f) + 底栏占固有高度，避免 overlay 挡住语言选择。
+        // targetSdk 36 + enableEdgeToEdge 下手势导航的 navigationBars 常为 0，只补
+        // mandatorySystemGestures 多出来的那一段，避免三键导航下和 Scaffold innerPadding 叠两次。
+        val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        val gestureBottom = WindowInsets.mandatorySystemGestures.asPaddingValues().calculateBottomPadding()
+        val gestureClearance = (gestureBottom - navBottom).coerceAtLeast(0.dp)
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .background(BgColor),
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 20.dp, vertical = 16.dp)
-                    .padding(bottom = 120.dp)
-                    .verticalScroll(rememberScrollState()),
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 16.dp),
             ) {
                 Spacer(Modifier.height(24.dp))
 
@@ -167,14 +237,28 @@ class HomeScreen : Screen {
                     Text("· ${SCENARIO_HINTS[scenario]}", fontSize = 11.sp, color = AccentColor)
                 }
                 Spacer(Modifier.height(10.dp))
-                ModeGrid(allowedModes, effectiveModeId) { modeId = it }
+                ModeGrid(allowedModes, effectiveModeId) {
+                    modeId = it
+                }
 
                 Spacer(Modifier.height(20.dp))
 
                 // 语言选择
                 LangRow(sourceLang, targetLang, langOptions,
-                    onSourceChange = { sourceLang = it },
-                    onTargetChange = { targetLang = it },
+                    onSourceChange = { candidate ->
+                        if (isHomeLanguageSelectionAllowed(candidate, targetLang)) {
+                            sourceLang = candidate
+                        } else {
+                            showSameLanguageSelectionDialog = true
+                        }
+                    },
+                    onTargetChange = { candidate ->
+                        if (isHomeLanguageSelectionAllowed(candidate, sourceLang)) {
+                            targetLang = candidate
+                        } else {
+                            showSameLanguageSelectionDialog = true
+                        }
+                    },
                     onSwap = { val t = sourceLang; sourceLang = targetLang; targetLang = t }
                 )
 
@@ -210,77 +294,94 @@ class HomeScreen : Screen {
                     is LanguageOptionsState.Ready -> Unit
                 }
 
-                TextButton(
-                    onClick = { navigator.push(ChannelRaceStressScreen(sourceLang, targetLang)) },
-                ) {
-                    Text("🧪 建连竞态压测", color = OfflineColor, fontSize = 13.sp)
-                }
                 Spacer(Modifier.height(20.dp))
             }
 
-            Box(
+            Column(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .background(BgColor)
-                    .padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 10.dp),
+                    .padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 16.dp + gestureClearance),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Button(
-                        onClick = {
-                            if (canStart) {
-                                navigator.push(resolveScreen(scenario, effectiveModeId, sourceLang, targetLang))
-                            }
-                        },
-                        enabled = canStart,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(52.dp),
-                        shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color.Transparent,
-                            disabledContainerColor = Color.Transparent,
-                        ),
-                        contentPadding = PaddingValues(0.dp),
-                    ) {
-                        Box(
-                            Modifier.fillMaxSize()
-                                .then(if (canStart) Modifier else Modifier.alpha(.4f))
-                                .background(
-                                    Brush.linearGradient(listOf(PrimaryColor, Color(0xFF8B5CF6))),
-                                    RoundedCornerShape(10.dp)
-                                ), contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                startLabel,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color.White,
-                            )
+                Button(
+                    onClick = {
+                        if (canStart) {
+                            navigator.push(resolveScreen(scenario, effectiveModeId, sourceLang, targetLang))
                         }
-                    }
-                    TextButton(
-                        onClick = { navigator.push(SettingsScreen()) },
-                        modifier = Modifier.padding(top = 4.dp),
+                    },
+                    enabled = canStart,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                    ),
+                    contentPadding = PaddingValues(0.dp),
+                ) {
+                    Box(
+                        Modifier.fillMaxSize()
+                            .then(if (canStart) Modifier else Modifier.alpha(.4f))
+                            .background(
+                                Brush.linearGradient(listOf(PrimaryColor, Color(0xFF8B5CF6))),
+                                RoundedCornerShape(10.dp)
+                            ), contentAlignment = Alignment.Center
                     ) {
+                        Text(
+                            startLabel,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White,
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = { navigator.push(SettingsScreen()) }) {
                         Text("⚙️ 设置", color = TextDim, fontSize = 13.sp)
                     }
                     TextButton(
-                        onClick = { navigator.push(ChannelRaceStressScreen(sourceLang, targetLang)) },
+                        onClick = {
+                            if (canStart) {
+                                navigator.push(ChannelRaceStressScreen(sourceLang, targetLang))
+                            }
+                        },
+                        enabled = canStart,
                     ) {
                         Text("🧪 建链竞态压测", color = OfflineColor, fontSize = 13.sp)
                     }
                 }
             }
         }
+
+        if (showSameLanguageSelectionDialog) {
+            AlertDialog(
+                onDismissRequest = { showSameLanguageSelectionDialog = false },
+                title = { Text("无法选择语言") },
+                text = { Text(text = HOME_SAME_LANGUAGE_SELECTION_MESSAGE) },
+                confirmButton = {
+                    TextButton(onClick = { showSameLanguageSelectionDialog = false }) {
+                        Text("确定")
+                    }
+                },
+            )
+        }
     }
 }
 
 private fun resolveScreen(scenario: ScenarioType, modeId: String, srcLang: String, tgtLang: String): Screen {
     return when {
+        modeId == ModeId.CONCURRENT_ONE_TO_ONE && scenario == ScenarioType.ONE_TO_ONE ->
+            ConcurrentOneToOneScreen(leftLang = tgtLang, rightLang = srcLang)
         modeId == ModeId.OFFLINE && scenario == ScenarioType.LISTEN -> OfflineListenScreen(srcLang, tgtLang)
         modeId == ModeId.OFFLINE && scenario == ScenarioType.ONE_TO_ONE -> Offline1v1Screen(srcLang, tgtLang)
-        scenario == ScenarioType.ONE_TO_ONE -> DualChannelScreen(srcLang, tgtLang)
+        scenario == ScenarioType.ONE_TO_ONE ->
+            DualChannelScreen(leftLang = tgtLang, rightLang = srcLang)
         else -> ListenModeScreen(srcLang, tgtLang)
     }
 }
@@ -345,7 +446,7 @@ private fun ModeGrid(allowed: List<String>, selected: String, onSelect: (String)
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 row.forEach { m ->
-                    val enabled = m.id in allowed
+                    val enabled = isHomeModeEnabled(allowed, m.id)
                     val isSel = m.id == selected && enabled
                     ModeCard(m, isSel, enabled, Modifier.weight(1f)) { onSelect(m.id) }
                 }
@@ -362,7 +463,8 @@ private fun ModeCard(m: ModeOption, selected: Boolean, enabled: Boolean, modifie
     val shape = RoundedCornerShape(12.dp)
     Box(
         modifier = modifier
-            .heightIn(min = 128.dp)
+            // 所有模式卡片使用同一固定高度，避免 Concurrent 文案较长时把首页网格撑高。
+            .height(146.dp)
             .then(if (!enabled) Modifier.alpha(.35f) else Modifier)
             .clip(shape)
             .background(if (enabled) bg else CardColor)
@@ -384,7 +486,7 @@ private fun ModeCard(m: ModeOption, selected: Boolean, enabled: Boolean, modifie
             Text(m.desc, fontSize = 10.sp, color = TextDim, textAlign = TextAlign.Center, lineHeight = 13.sp)
             Spacer(Modifier.height(6.dp))
             Surface(shape = RoundedCornerShape(4.dp), color = m.badgeColor.copy(alpha = .15f)) {
-                Text(m.id, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = m.badgeColor,
+                Text(m.badge, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = m.badgeColor,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
             }
         }

@@ -1,5 +1,7 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -9,6 +11,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -30,9 +33,12 @@ fun OnlineLocaleSwitchDialog(
     languageOptions: Map<String, String>,
     onDismiss: () -> Unit,
     onConfirm: (String, String) -> Unit,
+    canConfirm: (String, String) -> Boolean = { _, _ -> true },
+    validationMessage: String? = null,
 ) {
     var sourceLang by remember(initialSourceLang) { mutableStateOf(initialSourceLang) }
     var targetLang by remember(initialTargetLang) { mutableStateOf(initialTargetLang) }
+    val isSelectionAllowed = canConfirm(sourceLang, targetLang)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -52,10 +58,20 @@ fun OnlineLocaleSwitchDialog(
                     onSelected = { targetLang = it },
                     modifier = Modifier.padding(top = 12.dp),
                 )
+                if (!isSelectionAllowed && validationMessage != null) {
+                    Text(
+                        text = validationMessage,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
             }
         },
         confirmButton = {
-            Button(onClick = { onConfirm(sourceLang, targetLang) }) {
+            Button(
+                enabled = isSelectionAllowed,
+                onClick = { onConfirm(sourceLang, targetLang) },
+            ) {
                 Text("更新")
             }
         },

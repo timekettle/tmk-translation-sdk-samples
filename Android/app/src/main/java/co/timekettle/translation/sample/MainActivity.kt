@@ -1,5 +1,7 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle

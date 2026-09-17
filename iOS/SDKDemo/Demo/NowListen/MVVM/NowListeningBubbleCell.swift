@@ -57,7 +57,10 @@ final class NowListeningBubbleCell: UITableViewCell {
             targetLangCode: row.targetLangCode,
             translatedSegments: row.translatedSegments,
             translatedFallbackText: row.translatedText,
-            font: contentLabel.font
+            font: contentLabel.font,
+            timeRangeText: DemoBubbleTimeRangeFormatter.text(isBubbleEnded: row.isBubbleEnded,
+                                                             bOffset: row.bOffset,
+                                                             bDuration: row.bDuration)
         )
 
         bubbleView.snp.remakeConstraints { make in

@@ -1,5 +1,7 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 enum class DemoEngineStatusKind {
     CHECKING,
     AVAILABLE,

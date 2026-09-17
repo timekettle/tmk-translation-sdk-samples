@@ -1,5 +1,7 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 data class DemoLocalAudioLoopChunk(
     val data: ByteArray,
     val startsNewCycle: Boolean,

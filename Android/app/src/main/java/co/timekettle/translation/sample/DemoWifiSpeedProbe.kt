@@ -1,5 +1,7 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL

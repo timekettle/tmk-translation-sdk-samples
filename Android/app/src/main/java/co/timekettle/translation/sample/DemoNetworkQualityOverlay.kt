@@ -1,5 +1,7 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,9 +20,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -39,7 +41,6 @@ private val OverlayOk = Color(0xFF2ECC71)
 private val OverlayRun = Color(0xFFF1C40F)
 private val OverlayFail = Color(0xFFE74C3C)
 
-/** Places the overlay at the top end and keeps it recoverable while dragging. */
 @Composable
 fun DraggableDemoNetworkQualityOverlay(
     snapshot: DemoOnlineNetworkStatsSnapshot,

@@ -1,5 +1,7 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -21,6 +23,7 @@ data class ListenModeScreen(
     override fun Content() {
         val navigator = LocalNavigator.currentOrThrow
         val viewModel: OnlineListenViewModel = getViewModel()
+        val memoryMonitor = rememberDemoAppMemoryMonitor("online_listen", visibleByDefault = false)
         val isInitialized by viewModel.isInitialized.collectAsState()
         val initErrorMessage by viewModel.initErrorMessage.collectAsState()
         val isStarted by viewModel.isStarted.collectAsState()
@@ -44,12 +47,18 @@ data class ListenModeScreen(
         val lockedTargetLang by viewModel.targetLang.collectAsState()
         val speakerGender by viewModel.speakerGender.collectAsState()
         val onlineTranslateEngine by viewModel.onlineTranslateEngine.collectAsState()
+        val onlineRecognizeEngine by viewModel.onlineRecognizeEngine.collectAsState()
+        val translateMode by viewModel.translateMode.collectAsState()
         val roomScenarioOption by viewModel.roomScenarioOption.collectAsState()
+        val bubbleRetentionLimit by viewModel.bubbleRetentionLimit.collectAsState()
         var settingsExpanded by remember { mutableStateOf(false) }
         var showLocaleDialog by remember { mutableStateOf(false) }
         var showSpeakerDialog by remember { mutableStateOf(false) }
         var showTranslateEngineDialog by remember { mutableStateOf(false) }
+        var showRecognizeEngineDialog by remember { mutableStateOf(false) }
+        var showTranslateModeDialog by remember { mutableStateOf(false) }
         var showRoomScenarioDialog by remember { mutableStateOf(false) }
+        var showBubbleRetentionLimitDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
         val onlineLanguageOptions = (rememberOnlineLanguageOptions().state
             as? LanguageOptionsState.Ready)?.options ?: emptyMap()
@@ -58,8 +67,10 @@ data class ListenModeScreen(
             viewModel.setLanguagesIfNeeded(sourceLang, targetLang)
             viewModel.initSDK()
         }
+        LaunchedEffect(isChannelReady) { if (isChannelReady) memoryMonitor.markRuntimeReady() }
         BackHandler(enabled = true) { navigator.pop() }
         DisposableEffect(Unit) { onDispose { viewModel.stopTranslation() } }
+        DemoAppMemoryOverlay(memoryMonitor)
 
         if (initErrorMessage != null) {
             SampleInitErrorDialog(
@@ -70,15 +81,14 @@ data class ListenModeScreen(
 
         if (conversationErrorPrompt != null || remoteCloseRoomPromptVisible) {
             val prompt = conversationErrorPrompt ?: OnlineConversationErrorPrompts.fromCloseRoom()
-            val isReconnectTimeout = prompt.action == OnlineConversationPromptAction.RECONNECT_TIMEOUT
             AlertDialog(
                 onDismissRequest = {},
                 title = { Text(prompt.title) },
                 text = { Text(prompt.message) },
                 confirmButton = {
                     TextButton(onClick = {
-                        if (isReconnectTimeout) {
-                            viewModel.recreateAfterReconnectTimeout()
+                        if (prompt.id == "reconnect_timeout") {
+                            viewModel.recreateChannelAfterReconnectTimeout()
                         } else {
                             viewModel.recreateChannelAfterRemoteClose()
                         }
@@ -88,8 +98,8 @@ data class ListenModeScreen(
                 },
                 dismissButton = {
                     TextButton(onClick = {
-                        if (isReconnectTimeout) {
-                            viewModel.continueWaitingForReconnect()
+                        if (prompt.id == "reconnect_timeout") {
+                            viewModel.continueWaitingAfterReconnectTimeout()
                         } else {
                             viewModel.dismissRemoteCloseRoomPrompt()
                             viewModel.stopTranslation(prompt.title)
@@ -125,6 +135,18 @@ data class ListenModeScreen(
                         onDismissRequest = { settingsExpanded = false },
                     ) {
                         DropdownMenuItem(
+                            text = { Text("鉴权方式：${viewModel.authVerifyMode.name.lowercase()}") },
+                            enabled = false,
+                            onClick = {},
+                        )
+                        DropdownMenuItem(
+                            text = { Text("保留气泡数量：$bubbleRetentionLimit") },
+                            onClick = {
+                                settingsExpanded = false
+                                showBubbleRetentionLimitDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
                             text = { Text(if (isLocaleUpdating) "切换中..." else "切换语言") },
                             enabled = !isLocaleUpdating,
                             onClick = {
@@ -148,6 +170,20 @@ data class ListenModeScreen(
                             },
                         )
                         DropdownMenuItem(
+                            text = { Text("识别引擎设置") },
+                            onClick = {
+                                settingsExpanded = false
+                                showRecognizeEngineDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("翻译下发模式") },
+                            onClick = {
+                                settingsExpanded = false
+                                showTranslateModeDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
                             text = { Text(if (isScenarioUpdating) "房间能力切换中..." else "房间能力设置") },
                             enabled = !isScenarioUpdating,
                             onClick = {
@@ -155,6 +191,7 @@ data class ListenModeScreen(
                                 showRoomScenarioDialog = true
                             },
                         )
+                        DemoMemoryMonitorSettingsItem(memoryMonitor) { settingsExpanded = false }
                     }
                 }
             }
@@ -183,6 +220,7 @@ data class ListenModeScreen(
                         "连接：$connectionState",
                         "房间：$currentRoomNo",
                         "能力：${roomScenarioOption.title}",
+                        "下发：${OnlineTranslateModeOption.from(translateMode).title}",
                         "通道：listen/online",
                         "采样：配置16000Hz/1ch  采集$captureInfo  回放$playbackInfo",
                     ),
@@ -194,8 +232,8 @@ data class ListenModeScreen(
                 stopText = "停止收听",
                 startEnabled = isChannelReady && !isStarted && !isStarting,
                 stopEnabled = isStarted,
-                onStart = { viewModel.startTranslation() },
-                onStop = { viewModel.stopListening() },
+                onStart = { memoryMonitor.markRunStarted(); viewModel.startTranslation() },
+                onStop = { memoryMonitor.markRunStopped(); viewModel.stopListening() },
             )
 
             Spacer(Modifier.height(6.dp))
@@ -222,6 +260,16 @@ data class ListenModeScreen(
             )
         }
 
+        if (showBubbleRetentionLimitDialog) {
+            BubbleRetentionLimitDialog(
+                initialLimit = bubbleRetentionLimit,
+                onDismiss = { showBubbleRetentionLimitDialog = false },
+                onConfirm = {
+                    showBubbleRetentionLimitDialog = false
+                    viewModel.setBubbleRetentionLimit(it)
+                },
+            )
+        }
         if (showLocaleDialog) {
             OnlineLocaleSwitchDialog(
                 title = "切换旁听语言",
@@ -256,6 +304,28 @@ data class ListenModeScreen(
                 onConfirm = {
                     showTranslateEngineDialog = false
                     viewModel.updateTranslateEngine(it)
+                },
+            )
+        }
+
+        if (showRecognizeEngineDialog) {
+            OnlineRecognizeEngineDialog(
+                initialEngine = onlineRecognizeEngine,
+                onDismiss = { showRecognizeEngineDialog = false },
+                onConfirm = {
+                    showRecognizeEngineDialog = false
+                    viewModel.setOnlineRecognizeEngine(it)
+                },
+            )
+        }
+
+        if (showTranslateModeDialog) {
+            OnlineTranslateModeDialog(
+                initialMode = translateMode,
+                onDismiss = { showTranslateModeDialog = false },
+                onConfirm = {
+                    showTranslateModeDialog = false
+                    viewModel.setTranslateMode(it)
                 },
             )
         }

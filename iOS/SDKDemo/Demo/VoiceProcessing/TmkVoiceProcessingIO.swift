@@ -41,7 +41,6 @@ final class TmkVoiceProcessingIO {
 
     // 录音数据回调（业务层拿到后自行处理）
     typealias InputPCMHandler = (_ pcmData: Data, _ format: AudioStreamBasicDescription, _ vadState: VADState) -> Void
-
     // 记录最近一次激活会话所用参数，用于中断结束后由自身重新激活会话。
     private struct AudioSessionSetup {
         let sampleRate: Double
