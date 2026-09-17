@@ -22,7 +22,7 @@ Sample 只使用高层 SDK 能力：初始化、鉴权、语言、模型、诊�
 
 ## 依赖与验收
 
-目标依赖为 `tmk_translation_flutter: 1.3.1-rc.4`。该制品发布后，需重新生成并提交 hosted RC4 的 `pubspec.lock`（含校验和）及对应的 iOS `Podfile.lock`，再进行正式验收；当前提交的锁文件仍记录旧版 RC2，不能用于 RC4 验收。开发联调可在本机创建未跟踪的 `pubspec_overrides.yaml` 使用相对 path 依赖，但不得提交该文件或绝对路径。
+目标依赖为 `tmk_translation_flutter: 1.3.1-rc.4`。Sample 的 `pubspec.lock`（含校验和）已锁定 pub.dev 发布的 RC4，iOS `Podfile.lock` 已锁定对应的原生 RC4。开发联调可在本机创建未跟踪的 `pubspec_overrides.yaml` 使用相对 path 依赖，但不得提交该文件或绝对路径；正式验收应使用发布制品。
 
 执行公开边界门禁：
 

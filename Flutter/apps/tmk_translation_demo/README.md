@@ -19,8 +19,8 @@ Demo 是独立第三方黑盒消费者。它只通过
 
 ## 公开依赖
 
-目标制品为 `1.3.1-rc.4`。发布后需重新生成并提交 hosted RC4 的 `pubspec.lock`
-和对应的 iOS `Podfile.lock`，再进行正式验收；当前锁文件仍记录旧版 RC2。
+目标制品为 `1.3.1-rc.4`。`pubspec.lock` 锁定 pub.dev 发布的 RC4，
+iOS `Podfile.lock` 锁定对应的原生 RC4；验证时不使用本地 path 覆盖。
 开发联调可以在本机使用未提交的 `pubspec_overrides.yaml` path 依赖；该文件不得提交。
 Android 原生依赖从 Maven Central 和公共 Jiagouyun Maven 解析，iOS 原生依赖从 CocoaPods
 CDN/Trunk 解析；凭据只通过本地构建环境注入。
