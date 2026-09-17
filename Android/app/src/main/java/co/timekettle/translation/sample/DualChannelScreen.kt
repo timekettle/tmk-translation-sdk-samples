@@ -1,5 +1,7 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -13,14 +15,15 @@ import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 
 data class DualChannelScreen(
-    val sourceLang: String,
-    val targetLang: String,
+    val leftLang: String,
+    val rightLang: String,
 ) : Screen {
 
     @Composable
     override fun Content() {
         val navigator = LocalNavigator.currentOrThrow
         val viewModel: Online1v1ViewModel = getViewModel()
+        val memoryMonitor = rememberDemoAppMemoryMonitor("online_one_to_one", visibleByDefault = false)
         val initErrorMessage by viewModel.initErrorMessage.collectAsState()
         val isStarted by viewModel.isStarted.collectAsState()
         val isChannelReady by viewModel.isChannelReady.collectAsState()
@@ -39,27 +42,39 @@ data class DualChannelScreen(
         val captureSampleRate by viewModel.captureSampleRate.collectAsState()
         val captureChannels by viewModel.captureChannels.collectAsState()
         val playbackChannels by viewModel.playbackChannels.collectAsState()
-        val lockedSourceLang by viewModel.sourceLang.collectAsState()
-        val lockedTargetLang by viewModel.targetLang.collectAsState()
+        val lockedLeftLang by viewModel.leftLang.collectAsState()
+        val lockedRightLang by viewModel.rightLang.collectAsState()
         val leftSpeakerGender by viewModel.leftSpeakerGender.collectAsState()
         val rightSpeakerGender by viewModel.rightSpeakerGender.collectAsState()
         val onlineTranslateEngine by viewModel.onlineTranslateEngine.collectAsState()
+        val onlineRecognizeEngine by viewModel.onlineRecognizeEngine.collectAsState()
+        val translateMode by viewModel.translateMode.collectAsState()
         val roomScenarioOption by viewModel.roomScenarioOption.collectAsState()
+        val audioMode by viewModel.audioMode.collectAsState()
+        val playbackMode by viewModel.playbackMode.collectAsState()
+        val bubbleRetentionLimit by viewModel.bubbleRetentionLimit.collectAsState()
         var settingsExpanded by remember { mutableStateOf(false) }
         var showLocaleDialog by remember { mutableStateOf(false) }
         var showSpeakerDialog by remember { mutableStateOf(false) }
         var showTranslateEngineDialog by remember { mutableStateOf(false) }
+        var showRecognizeEngineDialog by remember { mutableStateOf(false) }
+        var showTranslateModeDialog by remember { mutableStateOf(false) }
         var showRoomScenarioDialog by remember { mutableStateOf(false) }
+        var showChannelAudioModeDialog by remember { mutableStateOf(false) }
+        var showPlaybackModeDialog by remember { mutableStateOf(false) }
+        var showBubbleRetentionLimitDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
         val onlineLanguageOptions = (rememberOnlineLanguageOptions().state
             as? LanguageOptionsState.Ready)?.options ?: emptyMap()
 
-        LaunchedEffect(viewModel, sourceLang, targetLang) {
-            viewModel.setLanguagesIfNeeded(sourceLang, targetLang)
+        LaunchedEffect(viewModel, leftLang, rightLang) {
+            viewModel.setLanguagesIfNeeded(leftLang, rightLang)
             viewModel.initSDK()
         }
+        LaunchedEffect(isChannelReady) { if (isChannelReady) memoryMonitor.markRuntimeReady() }
         BackHandler(enabled = true) { navigator.pop() }
         DisposableEffect(Unit) { onDispose { viewModel.stopTranslation() } }
+        DemoAppMemoryOverlay(memoryMonitor)
 
         if (initErrorMessage != null) {
             SampleInitErrorDialog(
@@ -70,15 +85,14 @@ data class DualChannelScreen(
 
         if (conversationErrorPrompt != null || remoteCloseRoomPromptVisible) {
             val prompt = conversationErrorPrompt ?: OnlineConversationErrorPrompts.fromCloseRoom()
-            val isReconnectTimeout = prompt.action == OnlineConversationPromptAction.RECONNECT_TIMEOUT
             AlertDialog(
                 onDismissRequest = {},
                 title = { Text(prompt.title) },
                 text = { Text(prompt.message) },
                 confirmButton = {
                     TextButton(onClick = {
-                        if (isReconnectTimeout) {
-                            viewModel.recreateAfterReconnectTimeout()
+                        if (prompt.id == "reconnect_timeout") {
+                            viewModel.recreateChannelAfterReconnectTimeout()
                         } else {
                             viewModel.recreateChannelAfterRemoteClose()
                         }
@@ -88,8 +102,8 @@ data class DualChannelScreen(
                 },
                 dismissButton = {
                     TextButton(onClick = {
-                        if (isReconnectTimeout) {
-                            viewModel.continueWaitingForReconnect()
+                        if (prompt.id == "reconnect_timeout") {
+                            viewModel.continueWaitingAfterReconnectTimeout()
                         } else {
                             viewModel.dismissRemoteCloseRoomPrompt()
                             viewModel.stopTranslation(prompt.title)
@@ -125,6 +139,18 @@ data class DualChannelScreen(
                         onDismissRequest = { settingsExpanded = false },
                     ) {
                         DropdownMenuItem(
+                            text = { Text("鉴权方式：${viewModel.authVerifyMode.name.lowercase()}") },
+                            enabled = false,
+                            onClick = {},
+                        )
+                        DropdownMenuItem(
+                            text = { Text("保留气泡数量：$bubbleRetentionLimit") },
+                            onClick = {
+                                settingsExpanded = false
+                                showBubbleRetentionLimitDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
                             text = { Text(if (isLocaleUpdating) "切换中..." else "切换语言") },
                             enabled = !isLocaleUpdating,
                             onClick = {
@@ -148,6 +174,20 @@ data class DualChannelScreen(
                             },
                         )
                         DropdownMenuItem(
+                            text = { Text("识别引擎设置") },
+                            onClick = {
+                                settingsExpanded = false
+                                showRecognizeEngineDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("翻译下发模式") },
+                            onClick = {
+                                settingsExpanded = false
+                                showTranslateModeDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
                             text = { Text(if (isScenarioUpdating) "房间能力切换中..." else "房间能力设置") },
                             enabled = !isScenarioUpdating,
                             onClick = {
@@ -155,6 +195,21 @@ data class DualChannelScreen(
                                 showRoomScenarioDialog = true
                             },
                         )
+                        DropdownMenuItem(
+                            text = { Text("通道模式") },
+                            onClick = {
+                                settingsExpanded = false
+                                showChannelAudioModeDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("播放音源") },
+                            onClick = {
+                                settingsExpanded = false
+                                showPlaybackModeDialog = true
+                            },
+                        )
+                        DemoMemoryMonitorSettingsItem(memoryMonitor) { settingsExpanded = false }
                     }
                 }
             }
@@ -169,8 +224,9 @@ data class DualChannelScreen(
             }
             TranslationStatusLine(statusText)
             TranslationLanguageLine(
-                sourceLang = lockedSourceLang,
-                targetLang = lockedTargetLang,
+                // 通用语言行仍按 source→target 展示；一对一内部字段明确为右路→左路。
+                sourceLang = lockedRightLang,
+                targetLang = lockedLeftLang,
                 showDetailInfo = showDetailInfo,
                 onToggleDetail = { showDetailInfo = !showDetailInfo },
                 displayNames = onlineLanguageOptions,
@@ -182,7 +238,10 @@ data class DualChannelScreen(
                         "连接：$connectionState",
                         "房间：$currentRoomNo",
                         "能力：${roomScenarioOption.title}",
+                        "下发：${OnlineTranslateModeOption.from(translateMode).title}",
                         "通道：one_to_one/online",
+                        "模式：${co.timekettle.translation.sample.OnlineChannelAudioModeOption.from(audioMode).title}",
+                        "播放：${playbackMode.title}",
                         "采样：配置16000Hz/2ch  采集$captureInfo  回放$playbackInfo",
                         "输入：左声道固定PCM / 右声道麦克风",
                     ),
@@ -194,8 +253,8 @@ data class DualChannelScreen(
                 stopText = "停止收听",
                 startEnabled = isChannelReady && !isStarted && !isStarting,
                 stopEnabled = isStarted,
-                onStart = { viewModel.startTranslation() },
-                onStop = { viewModel.stopListening() },
+                onStart = { memoryMonitor.markRunStarted(); viewModel.startTranslation() },
+                onStop = { memoryMonitor.markRunStopped(); viewModel.stopListening() },
             )
 
             Spacer(Modifier.height(6.dp))
@@ -222,18 +281,36 @@ data class DualChannelScreen(
             )
         }
 
+        if (showBubbleRetentionLimitDialog) {
+            BubbleRetentionLimitDialog(
+                initialLimit = bubbleRetentionLimit,
+                onDismiss = { showBubbleRetentionLimitDialog = false },
+                onConfirm = {
+                    showBubbleRetentionLimitDialog = false
+                    viewModel.setBubbleRetentionLimit(it)
+                },
+            )
+        }
         if (showLocaleDialog) {
             OnlineLocaleSwitchDialog(
                 title = "切换 1v1 语言",
                 sourceLabel = "源语言（右声道）",
                 targetLabel = "目标语言（左声道）",
-                initialSourceLang = lockedSourceLang,
-                initialTargetLang = lockedTargetLang,
+                initialSourceLang = lockedRightLang,
+                initialTargetLang = lockedLeftLang,
                 languageOptions = onlineLanguageOptions,
                 onDismiss = { showLocaleDialog = false },
+                canConfirm = { source, target ->
+                    OneToOneSameLanguagePolicy.isOnlineLanguagePairAllowed(
+                        sourceLang = source,
+                        targetLang = target,
+                        roomScenario = roomScenarioOption.roomScenario,
+                    )
+                },
+                validationMessage = OneToOneSameLanguagePolicy.REQUIRES_RECOGNIZE_MESSAGE,
                 onConfirm = { source, target ->
                     showLocaleDialog = false
-                    viewModel.updateRoomLocale(source, target)
+                    viewModel.updateRoomLocale(leftLang = target, rightLang = source)
                 },
             )
         }
@@ -261,6 +338,28 @@ data class DualChannelScreen(
             )
         }
 
+        if (showRecognizeEngineDialog) {
+            OnlineRecognizeEngineDialog(
+                initialEngine = onlineRecognizeEngine,
+                onDismiss = { showRecognizeEngineDialog = false },
+                onConfirm = {
+                    showRecognizeEngineDialog = false
+                    viewModel.setOnlineRecognizeEngine(it)
+                },
+            )
+        }
+
+        if (showTranslateModeDialog) {
+            OnlineTranslateModeDialog(
+                initialMode = translateMode,
+                onDismiss = { showTranslateModeDialog = false },
+                onConfirm = {
+                    showTranslateModeDialog = false
+                    viewModel.setTranslateMode(it)
+                },
+            )
+        }
+
         if (showRoomScenarioDialog) {
             OnlineRoomScenarioDialog(
                 title = "设置在线一对一房间能力",
@@ -269,6 +368,30 @@ data class DualChannelScreen(
                 onConfirm = {
                     showRoomScenarioDialog = false
                     viewModel.updateRoomScenario(it)
+                },
+            )
+        }
+
+        if (showChannelAudioModeDialog) {
+            OnlineChannelAudioModeDialog(
+                initialMode = audioMode,
+                onDismiss = { showChannelAudioModeDialog = false },
+                onConfirm = {
+                    showChannelAudioModeDialog = false
+                    // 切换通道模式:收听中也可切,切换后自动重建翻译引擎(房间+通道)使新模式生效。
+                    viewModel.setAudioMode(it)
+                },
+            )
+        }
+
+        if (showPlaybackModeDialog) {
+            OneToOnePlaybackModeDialog(
+                initialMode = playbackMode,
+                onDismiss = { showPlaybackModeDialog = false },
+                onConfirm = {
+                    showPlaybackModeDialog = false
+                    // 切换本机播放身份:只播本机那一路 TTS,丢弃对侧(对齐 iOS)。热切换,清空播放缓冲。
+                    viewModel.setPlaybackMode(it)
                 },
             )
         }

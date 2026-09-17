@@ -10,7 +10,7 @@ final class DemoLanguagePickerViewController: UIViewController, UIPickerViewData
     private let titleText: String
     private let options: [DemoLanguageOption]
     private let selectedCode: String?
-    private let onConfirm: (DemoLanguageOption) -> Void
+    private let onConfirm: (DemoLanguageOption) -> String?
 
     private let maskView = UIView()
     private let containerView = UIView()
@@ -20,7 +20,7 @@ final class DemoLanguagePickerViewController: UIViewController, UIPickerViewData
     init(title: String,
          options: [DemoLanguageOption],
          selectedCode: String?,
-         onConfirm: @escaping (DemoLanguageOption) -> Void) {
+         onConfirm: @escaping (DemoLanguageOption) -> String?) {
         self.titleText = title
         self.options = options
         self.selectedCode = selectedCode
@@ -146,8 +146,18 @@ final class DemoLanguagePickerViewController: UIViewController, UIPickerViewData
             onCancel()
             return
         }
-        onConfirm(options[pickerView.selectedRow(inComponent: 0)])
+        let option = options[pickerView.selectedRow(inComponent: 0)]
+        if let message = onConfirm(option) {
+            presentSelectionError(message)
+            return
+        }
         onCancel()
+    }
+
+    private func presentSelectionError(_ message: String) {
+        let alert = UIAlertController(title: "无法选择语言", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "确定", style: .default))
+        present(alert, animated: true)
     }
 
     func numberOfComponents(in pickerView: UIPickerView) -> Int { 1 }

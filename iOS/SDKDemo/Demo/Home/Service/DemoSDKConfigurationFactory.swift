@@ -15,28 +15,37 @@ enum DemoSDKConfigurationFactory {
     private static let credentialKeys = ["TMK_SAMPLE_APP_ID", "TMK_SAMPLE_APP_SECRET"]
     private static let defaultTenantId = "timekettle"
 
-    /// 非 nil 时覆盖环境默认业务地址；与 `makeGlobalConfig` / 测速延迟共用。
-    static let networkBaseURLOverride: URL? = URL(string: "https://api-rayneo.timekettle.co")
-
     static func makeGlobalConfig(from config: DemoSettingsConfig) -> TmkTranslationGlobalConfig {
         let credentials = resolveCredentials()
-        var builder = TmkTranslationGlobalConfig.Builder()
+        let builder = TmkTranslationGlobalConfig.Builder()
             .setAuth(appId: credentials.appId, secret: credentials.appSecret)
             .setOnlineAuthContext(tenantId: defaultTenantId)
-            .setLogEnabled(config.consoleLogEnabled)
+            .setDiagnosisConsoleEnabled(config.consoleLogEnabled)
             .setNetworkEnvironment(config.networkEnvironment)
-            .setDiagnosisEnabled(config.diagnosisEnabled)
+            .setDiagnosisConfig(
+                TmkDiagnosisConfig(
+                    enabled: config.diagnosisEnabled,
+                    level: config.diagnosisLevel,
+                    rootDirectory: nil,
+                    audioCaptureEnabled: config.diagnosisLevel == .trace && config.diagnosisAudioCaptureEnabled
+                )
+            )
             .setNetworkTimeout(networkTimeoutSeconds)
-        if let override = networkBaseURLOverride {
-            builder = builder.setNetworkBaseURL(override)
+        if config.customNetworkBaseURLEnabled,
+           let baseURLString = config.normalizedCustomNetworkBaseURL,
+           let baseURL = URL(string: baseURLString) {
+            _ = builder.setNetworkBaseURL(baseURL)
         }
+        _ = builder.setOfflineModelBaseURL(config.resolvedOfflineModelBaseURL)
         return builder.build()
     }
 
     /// 业务延迟探测用 baseURL，与 `makeGlobalConfig` 实际生效地址一致（不读 SDK internal 字段）。
     static func resolvedBusinessBaseURL(from config: DemoSettingsConfig) -> URL {
-        if let override = networkBaseURLOverride {
-            return override
+        if config.customNetworkBaseURLEnabled,
+           let baseURLString = config.normalizedCustomNetworkBaseURL,
+           let baseURL = URL(string: baseURLString) {
+            return baseURL
         }
         switch config.networkEnvironment {
         case .dev:
@@ -50,16 +59,23 @@ enum DemoSDKConfigurationFactory {
 
     static func onlineAuthFailureMessage(_ error: Error) -> String {
         """
-        在线鉴权失败：\(error.localizedDescription)
+        在线鉴权失败：\(diagnosticMessage(for: error))
         请在 \(localSecretsPath) 中配置：\(credentialKeys.joined(separator: " / "))
         """
     }
 
     static func authFailureMessage(_ error: Error) -> String {
         """
-        鉴权失败：\(error.localizedDescription)
+        鉴权失败：\(diagnosticMessage(for: error))
         请在 \(localSecretsPath) 中配置：\(credentialKeys.joined(separator: " / "))
         """
+    }
+
+    private static func diagnosticMessage(for error: Error) -> String {
+        guard let translationError = error as? TmkTranslationError else {
+            return error.localizedDescription
+        }
+        return DemoConversationRuntimePolicy.diagnosticMessage(for: translationError)
     }
 
     private static func resolveCredentials() -> (appId: String, appSecret: String) {

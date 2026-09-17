@@ -1,5 +1,7 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 object TranslationLanguages {
 
     val online = linkedMapOf(

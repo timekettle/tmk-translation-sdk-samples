@@ -1,8 +1,9 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 import android.app.Application
 import android.util.Log
-import co.timekettle.translation.TmkTranslationSDK
 import dagger.hilt.android.HiltAndroidApp
 
 @HiltAndroidApp

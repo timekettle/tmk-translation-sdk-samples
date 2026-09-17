@@ -1,5 +1,7 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 import co.timekettle.translation.model.Result
 
 object DemoTmkResultLogFormatter {
@@ -8,7 +10,7 @@ object DemoTmkResultLogFormatter {
         return "[$scene][$stage][TmkResult] " +
             "channel=${channel(extraData)} " +
             "lane=${lane(extraData)} " +
-            "sessionId=${result?.sessionId.orEmpty()} " +
+            "sessionID=${result?.sessionID.orEmpty()} " +
             "bubbleId=${bubbleId(result)} " +
             "srcCode=${result?.srcCode.orEmpty()} " +
             "dstCode=${result?.dstCode.orEmpty()} " +
@@ -23,7 +25,7 @@ object DemoTmkResultLogFormatter {
         return "[$scene][BubbleEnd][TmkResult] " +
             "channel=${channel(extraData)} " +
             "lane=${lane(extraData)} " +
-            "sessionId=${result?.sessionId.orEmpty()} " +
+            "sessionID=${result?.sessionID.orEmpty()} " +
             "bubbleId=${bubbleId(result)} " +
             "srcCode=${result?.srcCode.orEmpty()} " +
             "dstCode=${result?.dstCode.orEmpty()} " +
@@ -38,7 +40,7 @@ object DemoTmkResultLogFormatter {
         return stringExtra(extraData, "bubble_id")
             ?: stringExtra(extraData, "bubbleId")
             ?: result?.bubbleId?.takeIf { it.isNotEmpty() }
-            ?: "sid_${result?.sessionId.orEmpty()}"
+            ?: "sid_${result?.sessionID.orEmpty()}"
     }
 
     private fun channel(extraData: Map<String, Any?>?): String {

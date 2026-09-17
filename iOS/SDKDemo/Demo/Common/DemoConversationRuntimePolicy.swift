@@ -13,138 +13,47 @@ struct DemoConversationPrompt: Equatable {
     let style: Style
 }
 
-enum DemoConversationPromptPresentationPolicy {
-    static func shouldReplace(current: DemoConversationPrompt?,
-                              with incoming: DemoConversationPrompt) -> Bool {
-        guard let current else { return true }
-        guard current != incoming else { return false }
-        if current.style == .reconnectTimeout { return true }
-        return incoming.style != .reconnectTimeout
-    }
-}
-
-protocol DemoReconnectTimeoutTask: AnyObject {
-    func cancel()
-}
-
-protocol DemoReconnectTimeoutScheduling {
-    func schedule(after delay: TimeInterval,
-                  action: @escaping () -> Void) -> DemoReconnectTimeoutTask
-}
-
-private final class DemoDispatchReconnectTimeoutTask: DemoReconnectTimeoutTask {
-    private let workItem: DispatchWorkItem
-
-    init(workItem: DispatchWorkItem) {
-        self.workItem = workItem
-    }
-
-    func cancel() {
-        workItem.cancel()
-    }
-}
-
-private struct DemoDispatchReconnectTimeoutScheduler: DemoReconnectTimeoutScheduling {
-    func schedule(after delay: TimeInterval,
-                  action: @escaping () -> Void) -> DemoReconnectTimeoutTask {
-        let workItem = DispatchWorkItem(block: action)
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
-        return DemoDispatchReconnectTimeoutTask(workItem: workItem)
-    }
-}
-
-/// Demo 侧持续重连超时监控：只观察 SDK 状态，不主动干预 SDK 重连。
+/// Demo 观察 SDK 的 reconnecting 状态；超时提示属于页面交互，不改变 SDK 状态。
 final class DemoReconnectTimeoutMonitor {
-    var onPromptRequired: (() -> Void)?
-    var onPromptDismissRequired: (() -> Void)?
+    private static let defaultTimeout: TimeInterval = 60
 
+    private var workItem: DispatchWorkItem?
+    private var reconnecting = false
     private let timeout: TimeInterval
-    private let scheduler: DemoReconnectTimeoutScheduling
-    private var timeoutTask: DemoReconnectTimeoutTask?
-    private var isReconnecting = false
-    private var isPromptVisible = false
 
-    init(timeout: TimeInterval = 60,
-         scheduler: DemoReconnectTimeoutScheduling? = nil) {
-        self.timeout = timeout
-        self.scheduler = scheduler ?? DemoDispatchReconnectTimeoutScheduler()
+    init(timeout: TimeInterval? = nil) {
+        self.timeout = max(0, timeout ?? Self.defaultTimeout)
     }
 
-    func handle(isRTMReconnecting: Bool) {
-        performOnMain { [weak self] in
-            self?.handleOnMain(isRTMReconnecting: isRTMReconnecting)
-        }
-    }
-
-    func continueWaiting() {
-        performOnMain { [weak self] in
-            guard let self else { return }
-            self.isPromptVisible = false
-            self.cancelTimer()
-            self.scheduleTimerIfNeeded()
-        }
-    }
-
-    func confirmRecreation() {
-        performOnMain { [weak self] in
-            self?.reset(dismissPrompt: false)
-        }
-    }
-
-    func cancel() {
-        performOnMain { [weak self] in
-            self?.reset(dismissPrompt: true)
-        }
-    }
-
-    private func handleOnMain(isRTMReconnecting: Bool) {
-        if isRTMReconnecting {
-            isReconnecting = true
-            scheduleTimerIfNeeded()
+    func onStateChanged(_ state: TmkTranslationChannelState, onTimeout: @escaping () -> Void) {
+        guard state == .reconnecting else {
+            cancel()
             return
         }
-
-        isReconnecting = false
-        cancelTimer()
-        if isPromptVisible {
-            isPromptVisible = false
-            onPromptDismissRequired?()
-        }
+        guard reconnecting == false else { return }
+        reconnecting = true
+        schedule(onTimeout)
     }
 
-    private func scheduleTimerIfNeeded() {
-        guard isReconnecting, isPromptVisible == false, timeoutTask == nil else { return }
-        timeoutTask = scheduler.schedule(after: timeout) { [weak self] in
-            guard let self else { return }
-            self.timeoutTask = nil
-            guard self.isReconnecting, self.isPromptVisible == false else { return }
-            self.isPromptVisible = true
-            self.onPromptRequired?()
-        }
+    func continueWaiting(onTimeout: @escaping () -> Void) {
+        guard reconnecting else { return }
+        workItem?.cancel()
+        schedule(onTimeout)
     }
 
-    private func cancelTimer() {
-        timeoutTask?.cancel()
-        timeoutTask = nil
+    func cancel() {
+        reconnecting = false
+        workItem?.cancel()
+        workItem = nil
     }
 
-    private func reset(dismissPrompt: Bool) {
-        isReconnecting = false
-        cancelTimer()
-        if isPromptVisible {
-            isPromptVisible = false
-            if dismissPrompt {
-                onPromptDismissRequired?()
-            }
+    private func schedule(_ onTimeout: @escaping () -> Void) {
+        let item = DispatchWorkItem { [weak self] in
+            guard self?.reconnecting == true else { return }
+            onTimeout()
         }
-    }
-
-    private func performOnMain(_ action: @escaping () -> Void) {
-        if Thread.isMainThread {
-            action()
-        } else {
-            DispatchQueue.main.async(execute: action)
-        }
+        workItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: item)
     }
 }
 
@@ -155,19 +64,6 @@ enum DemoConversationRuntimeAction: Equatable {
     case weakNetwork(String)
     case reconnecting(String)
     case prompt(DemoConversationPrompt)
-}
-
-enum DemoRTMReconnectTimeoutStatePolicy {
-    static func reconnecting(from snapshot: TmkTranslationChannelStateSnapshot) -> Bool? {
-        if snapshot.reason == .messageChannelFailure {
-            if snapshot.state == .reconnecting { return true }
-            if snapshot.state == .failed { return false }
-        }
-        if snapshot.message.hasPrefix("rtm connected") {
-            return false
-        }
-        return nil
-    }
 }
 
 enum DemoConversationRuntimePolicy {
@@ -225,6 +121,20 @@ enum DemoConversationRuntimePolicy {
                actualMessage: error.actualErrorMessage)
     }
 
+    /// 生成 Demo 统一诊断文案：展示 SDK 统一码，并在存在时保留底层系统错误码/错误域信息。
+    /// 不包含密钥、License 或原始音频等敏感内容。
+    static func diagnosticMessage(for error: TmkTranslationError) -> String {
+        var parts = ["错误[\(error.code) \(error.constantName)]：\(error.message)"]
+        if let actualCode = error.actualErrorCode {
+            let domain = error.actualErrorDomain.map { " \($0)" } ?? ""
+            let actualMessage = error.actualErrorMessage ?? ""
+            parts.append("底层错误[\(actualCode)\(domain)]：\(actualMessage)")
+        } else if let actualMessage = error.actualErrorMessage, actualMessage.isEmpty == false {
+            parts.append("底层错误：\(actualMessage)")
+        }
+        return parts.joined(separator: "\n")
+    }
+
     static func action(forCode code: Int, message: String) -> DemoConversationRuntimeAction {
         action(forCode: code,
                message: message,
@@ -258,6 +168,34 @@ enum DemoConversationRuntimePolicy {
             }
             return .prompt(.init(title: "鉴权失败",
                                  message: "请重新鉴权后再创建对话。\n\n\(detail)",
+                                 style: .leaveOnly))
+        case TmkSDKErrorCode.deviceKeyReadFailed.rawValue:
+            return .prompt(.init(title: "设备密钥读取失败",
+                                 message: "设备密钥无法读取，请检查设备 Keychain 状态后重试。\n\n\(detail)",
+                                 style: .restart))
+        case TmkSDKErrorCode.deviceKeyCreationFailed.rawValue:
+            return .prompt(.init(title: "设备密钥创建失败",
+                                 message: "设备密钥无法创建，请检查系统 Security.framework 能力后重试。\n\n\(detail)",
+                                 style: .restart))
+        case TmkSDKErrorCode.deviceKeyInvalid.rawValue:
+            return .prompt(.init(title: "设备密钥无效",
+                                 message: "设备密钥或系统参数无效，请更新配置后重新鉴权。\n\n\(detail)",
+                                 style: .leaveOnly))
+        case TmkSDKErrorCode.deviceKeyAccessDenied.rawValue:
+            return .prompt(.init(title: "设备密钥访问失败",
+                                 message: "系统拒绝访问设备密钥，请检查 Keychain 访问条件、设备锁定状态和应用签名配置。\n\n\(detail)",
+                                 style: .leaveOnly))
+        case TmkSDKErrorCode.deviceKeyUnavailable.rawValue:
+            return .prompt(.init(title: "设备密钥暂不可用",
+                                 message: "设备密钥服务或所需系统交互暂不可用，请稍后重试。\n\n\(detail)",
+                                 style: .restart))
+        case TmkSDKErrorCode.deviceKeyStorageFailed.rawValue:
+            return .prompt(.init(title: "设备密钥存储失败",
+                                 message: "设备密钥所在 Keychain 存储操作失败，请检查系统存储状态后重试。\n\n\(detail)",
+                                 style: .restart))
+        case TmkSDKErrorCode.deviceKeyOperationFailed.rawValue:
+            return .prompt(.init(title: "设备密钥操作失败",
+                                 message: "设备密钥操作失败，请保留底层错误码并导出诊断日志后排查。\n\n\(detail)",
                                  style: .leaveOnly))
         case TmkSDKErrorCode.ttsSynthesisError.rawValue,
              TmkSDKErrorCode.translationError.rawValue,
@@ -434,6 +372,13 @@ enum DemoConversationRuntimePolicy {
         switch code {
         case TmkSDKErrorCode.requestCancelled.rawValue,
              TmkSDKErrorCode.authenticationFailed.rawValue,
+             TmkSDKErrorCode.deviceKeyReadFailed.rawValue,
+             TmkSDKErrorCode.deviceKeyCreationFailed.rawValue,
+             TmkSDKErrorCode.deviceKeyInvalid.rawValue,
+             TmkSDKErrorCode.deviceKeyAccessDenied.rawValue,
+             TmkSDKErrorCode.deviceKeyUnavailable.rawValue,
+             TmkSDKErrorCode.deviceKeyStorageFailed.rawValue,
+             TmkSDKErrorCode.deviceKeyOperationFailed.rawValue,
              TmkSDKErrorCode.sessionExpired.rawValue,
              TmkSDKErrorCode.offlineModelNotReady.rawValue,
              TmkSDKErrorCode.networkInvalidURL.rawValue,

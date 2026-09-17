@@ -1,14 +1,12 @@
 package co.timekettle.translation.sample
 
+import co.timekettle.translation.*
+
 import android.app.Application
 import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import co.timekettle.translation.Cancelable
-import co.timekettle.translation.TmkTranslationChannel
-import co.timekettle.translation.TmkTranslationException
-import co.timekettle.translation.TmkTranslationSDK
 import co.timekettle.translation.config.TmkCreateChannelOptions
 import co.timekettle.translation.config.TmkTransChannelConfig
 import co.timekettle.translation.config.TmkTranslationRoomConfig
@@ -17,15 +15,14 @@ import co.timekettle.translation.enums.Scenario
 import co.timekettle.translation.enums.TmkOnlineRecognizeEngine
 import co.timekettle.translation.enums.TmkOnlineTranslateEngine
 import co.timekettle.translation.enums.TranslationMode
-import co.timekettle.translation.lingcast.common.enums.TransModeType
 import co.timekettle.translation.listener.AuthCallback
 import co.timekettle.translation.listener.CreateChannelCallback
 import co.timekettle.translation.listener.CreateRoomCallback
 import co.timekettle.translation.listener.TmkTranslationListener
 import co.timekettle.translation.model.Result
-import co.timekettle.translation.model.SpeakerChannel
-import co.timekettle.translation.model.SpeakerGender
-import co.timekettle.translation.model.TmkSpeaker
+import co.timekettle.sdk.common.models.SpeakerChannel
+import co.timekettle.sdk.common.models.SpeakerGender
+import co.timekettle.sdk.common.models.TmkSpeaker
 import co.timekettle.translation.model.TmkTranslationChannelStateSnapshot
 import co.timekettle.translation.model.TmkTranslationRoom
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -259,7 +256,7 @@ class ChannelRaceStressViewModel @Inject constructor(
             targetLang = config.targetLang,
         )
         val roomConfig = TmkTranslationRoomConfig.Builder()
-            .setScenario(Scenario.ONE_TO_ONE)
+            .setChannelScenario(Scenario.ONE_TO_ONE)
             .setSourceLang(languages.leftLang)
             .setTargetLang(languages.rightLang)
             .setSpeakers(defaultSpeakers())
@@ -308,7 +305,6 @@ class ChannelRaceStressViewModel @Inject constructor(
             .setRoom(room)
             .setMode(TranslationMode.ONLINE)
             .setScenario(Scenario.ONE_TO_ONE)
-            .setTransModeType(TransModeType.ONE_TO_ONE)
             .setSourceLang(languages.leftLang)
             .setTargetLang(languages.rightLang)
             .setSpeakers(defaultSpeakers())

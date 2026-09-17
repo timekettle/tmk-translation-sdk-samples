@@ -11,11 +11,8 @@ final class OneToOneController: UIViewController {
 
     private let statusLabel = UILabel()
     private let infoLabel = UILabel()
-    private let captureLabel = UILabel()
-    private let captureSwitch = UISwitch()
     private let startListeningButton = UIButton(type: .system)
     private let stopListeningButton = UIButton(type: .system)
-    private let sharePCMButton = UIButton(type: .system)
     private let tableView = UITableView(frame: .zero, style: .plain)
     private let networkOverlayView = NetworkQualityOverlayView()
     private var networkOverlayTopConstraint: Constraint?
@@ -35,10 +32,6 @@ final class OneToOneController: UIViewController {
     private let allModes = OneToOnePlaybackMode.allCases
     private var supportedSourceLanguageOptions: [LanguageOption] = []
     private let zhLocale = Locale(identifier: "zh-Hans-CN")
-    private weak var conversationPromptAlert: UIAlertController?
-    private var activeConversationPrompt: DemoConversationPrompt?
-    private var pendingConversationPrompt: DemoConversationPrompt?
-    private var isDismissingConversationPrompt = false
     private let sourceLangMaskView = UIView()
     private let sourceLangContainerView = UIView()
     private let sourceLangPickerView = UIPickerView()
@@ -63,6 +56,7 @@ final class OneToOneController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
+        installDemoMemoryMonitor(mode: "online_one_to_one", visibleByDefault: false)
         bindViewModel()
         viewModel.configureInitialLanguages(source: initialSourceLanguage, target: initialTargetLanguage)
         viewModel.onViewDidLoad()
@@ -70,10 +64,48 @@ final class OneToOneController: UIViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        if isBeingDismissed || navigationController?.isBeingDismissed == true {
+        if isBeingDismissed || isMovingFromParent || navigationController?.isBeingDismissed == true {
+            demoMemoryPageExit()
             viewModel.onViewWillClose()
         }
     }
+}
+
+/// 气泡数量仅属于当前页面实例；滑块草稿在“确定”前不会改变聚合器。
+func presentBubbleRetentionLimitPicker(from presenter: UIViewController,
+                                      current: Int,
+                                      onConfirm: @escaping (Int) -> Void) {
+    let alert = UIAlertController(title: "保留气泡数量", message: "仅保留最新的气泡，范围 10～500", preferredStyle: .alert)
+    let content = UIViewController()
+    let valueLabel = UILabel()
+    let slider = UISlider()
+    let bounded = min(max(current, DemoConversationBubbleAssembler.minimumMaxRows), DemoConversationBubbleAssembler.maximumMaxRows)
+    valueLabel.text = "当前：\(bounded)"
+    valueLabel.textAlignment = .center
+    slider.minimumValue = Float(DemoConversationBubbleAssembler.minimumMaxRows)
+    slider.maximumValue = Float(DemoConversationBubbleAssembler.maximumMaxRows)
+    slider.value = Float(bounded)
+    slider.addAction(UIAction { _ in valueLabel.text = "当前：\(Int(slider.value.rounded()))" }, for: .valueChanged)
+    content.view.addSubview(valueLabel)
+    content.view.addSubview(slider)
+    valueLabel.translatesAutoresizingMaskIntoConstraints = false
+    slider.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+        valueLabel.topAnchor.constraint(equalTo: content.view.topAnchor),
+        valueLabel.leadingAnchor.constraint(equalTo: content.view.leadingAnchor),
+        valueLabel.trailingAnchor.constraint(equalTo: content.view.trailingAnchor),
+        slider.topAnchor.constraint(equalTo: valueLabel.bottomAnchor, constant: 12),
+        slider.leadingAnchor.constraint(equalTo: content.view.leadingAnchor),
+        slider.trailingAnchor.constraint(equalTo: content.view.trailingAnchor),
+        slider.bottomAnchor.constraint(equalTo: content.view.bottomAnchor),
+        content.view.widthAnchor.constraint(equalToConstant: 240),
+    ])
+    alert.setValue(content, forKey: "contentViewController")
+    alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+    alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in
+        onConfirm(Int(slider.value.rounded()))
+    })
+    presenter.present(alert, animated: true)
 }
 
 private extension OneToOneController {
@@ -94,14 +126,9 @@ private extension OneToOneController {
         infoLabel.numberOfLines = 2
         infoLabel.font = .systemFont(ofSize: 12)
         infoLabel.textColor = .secondaryLabel
-        captureLabel.text = "翻译音频采集"
-        captureLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        captureLabel.textColor = .secondaryLabel
-        captureSwitch.addTarget(self, action: #selector(onCaptureSwitchChanged), for: .valueChanged)
 
         setupButton(startListeningButton, title: "开始收听", action: #selector(onTapStartListening))
         setupButton(stopListeningButton, title: "停止收听", action: #selector(onTapStopListening))
-        setupButton(sharePCMButton, title: "分享PCM", action: #selector(onTapSharePCM))
         speakerMaskView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(hideSpeakerPicker)))
 
         tableView.register(OneToOneBubbleCell.self, forCellReuseIdentifier: OneToOneBubbleCell.reuseId)
@@ -113,11 +140,8 @@ private extension OneToOneController {
 
         view.addSubview(statusLabel)
         view.addSubview(infoLabel)
-        view.addSubview(captureLabel)
-        view.addSubview(captureSwitch)
         view.addSubview(startListeningButton)
         view.addSubview(stopListeningButton)
-        view.addSubview(sharePCMButton)
         view.addSubview(tableView)
 
         statusLabel.snp.makeConstraints { make in
@@ -128,35 +152,20 @@ private extension OneToOneController {
             make.top.equalTo(statusLabel.snp.bottom).offset(4)
             make.left.right.equalToSuperview().inset(16)
         }
-        captureLabel.snp.makeConstraints { make in
+        startListeningButton.snp.makeConstraints { make in
             make.top.equalTo(infoLabel.snp.bottom).offset(8)
             make.left.equalToSuperview().offset(12)
             make.height.equalTo(32)
-        }
-        captureSwitch.snp.makeConstraints { make in
-            make.centerY.equalTo(captureLabel)
-            make.left.equalTo(captureLabel.snp.right).offset(6)
-        }
-        startListeningButton.snp.makeConstraints { make in
-            make.top.equalTo(captureLabel)
-            make.left.equalTo(captureSwitch.snp.right).offset(8)
-            make.height.equalTo(captureLabel)
             make.width.equalTo(stopListeningButton)
         }
         stopListeningButton.snp.makeConstraints { make in
-            make.top.equalTo(captureLabel)
+            make.top.equalTo(startListeningButton)
             make.left.equalTo(startListeningButton.snp.right).offset(8)
-            make.height.equalTo(captureLabel)
-            make.width.equalTo(sharePCMButton)
-        }
-        sharePCMButton.snp.makeConstraints { make in
-            make.top.equalTo(captureLabel)
-            make.left.equalTo(stopListeningButton.snp.right).offset(8)
             make.right.equalToSuperview().inset(12)
-            make.height.equalTo(captureLabel)
+            make.height.equalTo(startListeningButton)
         }
         tableView.snp.makeConstraints { make in
-            make.top.equalTo(captureLabel.snp.bottom).offset(8)
+            make.top.equalTo(startListeningButton.snp.bottom).offset(8)
             make.left.right.bottom.equalToSuperview()
         }
 
@@ -247,10 +256,12 @@ private extension OneToOneController {
             }
             .store(in: &cancellables)
 
-        viewModel.reconnectTimeoutPromptDismiss
+        viewModel.dismissReconnectTimeoutPrompt
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in
-                self?.dismissReconnectTimeoutPromptIfNeeded(animated: true)
+                guard let alert = self?.presentedViewController as? UIAlertController,
+                      alert.title == "连接恢复超时" else { return }
+                alert.dismiss(animated: true)
             }
             .store(in: &cancellables)
     }
@@ -262,11 +273,9 @@ private extension OneToOneController {
         let sourceName = localizedLanguageName(for: state.sourceLanguage)
         let targetName = localizedLanguageName(for: state.targetLanguage)
         infoLabel.text = "房间:\(state.currentRoomNo)  能力:\(state.scenarioOption.title)  语言:\(sourceName)→\(targetName)  采集:\(capture)  回放:\(playback)  播放:\(state.playbackMode.title)"
-        captureSwitch.isOn = state.isCaptureEnabled
         startListeningButton.isEnabled = state.canStartListening
+        if state.canStartListening { demoMemoryRuntimeReady() }
         stopListeningButton.isEnabled = state.canStopListening
-        sharePCMButton.isEnabled = state.canSharePCM
-
         networkOverlayView.update(network: state.networkStats, bootstrap: state.bootstrapStats, wifiSpeed: state.wifiSpeed)
     }
 
@@ -290,7 +299,10 @@ private extension OneToOneController {
                        translatedText: row.translatedText,
                        translatedSegments: row.translatedSegments,
                        isRightBubble: row.lane == .right,
-                       isBubbleEnded: row.isBubbleEnded)
+                       isBubbleEnded: row.isBubbleEnded,
+                       timeRangeText: DemoBubbleTimeRangeFormatter.text(isBubbleEnded: row.isBubbleEnded,
+                                                                        bOffset: row.bOffset,
+                                                                        bDuration: row.bDuration))
     }
 
     func refreshVisibleCells() {
@@ -313,21 +325,13 @@ private extension OneToOneController {
     }
 
     @objc func onTapStartListening() {
+        demoMemoryRunStarted()
         viewModel.startListening()
     }
 
     @objc func onTapStopListening() {
+        demoMemoryRunStopped()
         viewModel.stopListening()
-    }
-
-    @objc func onTapSharePCM() {
-        let urls = viewModel.currentPCMURLs
-        guard urls.isEmpty == false else { return }
-        presentShareActivityForFileURLs(urls, sourceView: sharePCMButton)
-    }
-
-    @objc func onCaptureSwitchChanged() {
-        viewModel.setCaptureEnabled(captureSwitch.isOn)
     }
 
     @objc func onClose() {
@@ -336,21 +340,11 @@ private extension OneToOneController {
     }
 
     func presentConversationPrompt(_ prompt: DemoConversationPrompt) {
-        if let activeConversationPrompt {
-            guard DemoConversationPromptPresentationPolicy.shouldReplace(
-                current: activeConversationPrompt,
-                with: prompt
-            ) else { return }
-            pendingConversationPrompt = prompt
-            dismissActiveConversationPrompt(animated: false)
-            return
-        }
-        if isDismissingConversationPrompt {
-            if DemoConversationPromptPresentationPolicy.shouldReplace(
-                current: pendingConversationPrompt,
-                with: prompt
-            ) {
-                pendingConversationPrompt = prompt
+        if let alert = presentedViewController as? UIAlertController,
+           alert.title == "连接恢复超时",
+           prompt.style != .reconnectTimeout {
+            alert.dismiss(animated: true) { [weak self] in
+                self?.presentConversationPrompt(prompt)
             }
             return
         }
@@ -358,65 +352,28 @@ private extension OneToOneController {
         let alert = UIAlertController(title: prompt.title,
                                       message: prompt.message,
                                       preferredStyle: .alert)
-        activeConversationPrompt = prompt
-        conversationPromptAlert = alert
         if prompt.style == .reconnectTimeout {
             alert.addAction(UIAlertAction(title: "继续等待", style: .cancel) { [weak self] _ in
-                self?.completeActiveConversationPrompt()
-                self?.viewModel.continueWaitingForReconnect()
+                self?.viewModel.continueWaitingAfterReconnectTimeout()
             })
             alert.addAction(UIAlertAction(title: "重新创建", style: .default) { [weak self] _ in
-                self?.completeActiveConversationPrompt()
                 self?.viewModel.recreateAfterReconnectTimeout()
             })
         } else {
             alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
-                self?.completeActiveConversationPrompt()
                 self?.onClose()
             })
-            if prompt.style == .restart {
-                alert.addAction(UIAlertAction(title: "重新创建", style: .default) { [weak self] _ in
-                    self?.completeActiveConversationPrompt()
-                    self?.viewModel.recreateAfterRemoteClose()
-                })
-            }
+        }
+        if prompt.style == .restart {
+            alert.addAction(UIAlertAction(title: "重新创建", style: .default) { [weak self] _ in
+                self?.viewModel.recreateAfterRemoteClose()
+            })
         }
         present(alert, animated: true)
     }
 
-    func dismissReconnectTimeoutPromptIfNeeded(animated: Bool) {
-        guard activeConversationPrompt?.style == .reconnectTimeout else { return }
-        dismissActiveConversationPrompt(animated: animated)
-    }
-
-    func dismissActiveConversationPrompt(animated: Bool) {
-        guard isDismissingConversationPrompt == false else { return }
-        guard let alert = conversationPromptAlert else {
-            completeActiveConversationPrompt()
-            presentPendingConversationPromptIfNeeded()
-            return
-        }
-        isDismissingConversationPrompt = true
-        alert.dismiss(animated: animated) { [weak self] in
-            guard let self else { return }
-            self.completeActiveConversationPrompt()
-            self.isDismissingConversationPrompt = false
-            self.presentPendingConversationPromptIfNeeded()
-        }
-    }
-
-    func completeActiveConversationPrompt() {
-        activeConversationPrompt = nil
-        conversationPromptAlert = nil
-    }
-
-    func presentPendingConversationPromptIfNeeded() {
-        guard let prompt = pendingConversationPrompt else { return }
-        pendingConversationPrompt = nil
-        presentConversationPrompt(prompt)
-    }
-
     func makeSettingsMenu() -> UIMenu {
+        let authModeAction = UIAction(title: "鉴权方式：\(viewModel.authVerifyMode.demoDisplayName)", attributes: .disabled) { _ in }
         let languageAction = UIAction(title: "切换语言") { [weak self] _ in
             self?.loadSupportedLanguagesAndShowPicker()
         }
@@ -425,6 +382,12 @@ private extension OneToOneController {
         }
         let translateEngineAction = UIAction(title: "翻译引擎") { [weak self] _ in
             self?.showTranslateEngineMenu()
+        }
+        let recognizeEngineAction = UIAction(title: "识别引擎") { [weak self] _ in
+            self?.showRecognizeEngineMenu()
+        }
+        let translateModeAction = UIAction(title: "翻译下发模式") { [weak self] _ in
+            self?.showTranslateModeMenu()
         }
         let scenarioAction = UIAction(title: "房间能力") { [weak self] _ in
             self?.showScenarioMenu()
@@ -435,7 +398,13 @@ private extension OneToOneController {
         let speakerAction = UIAction(title: "音色") { [weak self] _ in
             self?.showSpeakerPicker()
         }
-        return UIMenu(title: "", children: [languageAction, playbackAction, translateEngineAction, scenarioAction, channelModeAction, speakerAction])
+        let bubbleRetentionAction = UIAction(title: "保留气泡数量：\(viewModel.currentBubbleRetentionLimit())") { [weak self] _ in
+            guard let self else { return }
+            presentBubbleRetentionLimitPicker(from: self,
+                                              current: self.viewModel.currentBubbleRetentionLimit(),
+                                              onConfirm: self.viewModel.setBubbleRetentionLimit)
+        }
+        return UIMenu(title: "", children: [authModeAction, bubbleRetentionAction, languageAction, playbackAction, translateEngineAction, recognizeEngineAction, translateModeAction, scenarioAction, channelModeAction, speakerAction, demoMemoryMonitorMenuAction(visibleByDefault: false)])
     }
 
     func showScenarioMenu() {
@@ -498,6 +467,49 @@ private extension OneToOneController {
         let displayTitle = state.translateEngine == engine ? "✓ \(title)" : title
         let action = UIAlertAction(title: displayTitle, style: .default) { [weak self] _ in
             self?.viewModel.updateTranslateEngine(engine)
+        }
+        alert.addAction(action)
+    }
+
+    func showRecognizeEngineMenu() {
+        let alert = UIAlertController(title: "识别引擎",
+                                      message: "切换后将重新创建房间和通道。",
+                                      preferredStyle: .actionSheet)
+        addRecognizeEngineAction(title: "默认", engine: .default, to: alert)
+        addRecognizeEngineAction(title: "端到端", engine: .endToEnd, to: alert)
+        addRecognizeEngineAction(title: "三段式", engine: .threeStage, to: alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
+        present(alert, animated: true)
+    }
+
+    private func addRecognizeEngineAction(title: String,
+                                          engine: TmkOnlineRecognizeEngine,
+                                          to alert: UIAlertController) {
+        let displayTitle = state.recognizeEngine == engine ? "✓ \(title)" : title
+        let action = UIAlertAction(title: displayTitle, style: .default) { [weak self] _ in
+            self?.viewModel.updateRecognizeEngine(engine)
+        }
+        alert.addAction(action)
+    }
+
+    func showTranslateModeMenu() {
+        let alert = UIAlertController(title: "翻译下发模式",
+                                      message: "切换后将重新创建房间和通道。",
+                                      preferredStyle: .actionSheet)
+        addTranslateModeAction(mode: .default, to: alert)
+        addTranslateModeAction(mode: .partial, to: alert)
+        addTranslateModeAction(mode: .stable, to: alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
+        present(alert, animated: true)
+    }
+
+    private func addTranslateModeAction(mode: TmkTranslateDeliveryMode,
+                                        to alert: UIAlertController) {
+        let title = mode == state.translateMode ? "\(mode.onlineDemoTitle)（当前）" : mode.onlineDemoTitle
+        let action = UIAlertAction(title: title, style: .default) { [weak self] _ in
+            self?.viewModel.updateTranslateMode(mode)
         }
         alert.addAction(action)
     }
@@ -750,7 +762,13 @@ private extension OneToOneController {
             switch result {
             case .success(let response):
                 self.supportedSourceLanguageOptions = response.localeOptions
-                    .filter { $0.code.lowercased().hasPrefix(self.state.targetLanguage.lowercased()) == false }
+                    .filter {
+                        OneToOneSameLanguagePolicy.isOnlineAllowed(
+                            source: $0.code,
+                            target: self.state.targetLanguage,
+                            roomScenario: self.state.scenarioOption.roomScenario
+                        )
+                    }
                     .map { LanguageOption(code: $0.code, title: self.languageTitle(for: $0)) }
                     .sorted { $0.title < $1.title }
                 self.showSourceLanguagePicker()
@@ -921,6 +939,111 @@ private extension TmkSpeakerGender {
             return "男声"
         case .female:
             return "女声"
+        }
+    }
+}
+
+private final class NetworkQualityOverlayView: UIView {
+    private let lossLabel = UILabel()
+    private let wifiLabel = UILabel()
+    private let totalLabel = UILabel()
+    private let summaryLabel = UILabel()
+    private var tickTimer: Timer?
+    private var latestNetwork = DemoOnlineNetworkStatsSnapshot()
+    private var latestBootstrap = DemoBootstrapSnapshot()
+    private var latestWifi = DemoWifiSpeedSnapshot()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = UIColor.black.withAlphaComponent(0.45)
+        layer.cornerRadius = 10
+        clipsToBounds = true
+
+        lossLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        lossLabel.textColor = .white
+        lossLabel.numberOfLines = 1
+
+        wifiLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        wifiLabel.textColor = UIColor(red: 184/255, green: 190/255, blue: 207/255, alpha: 1)
+        wifiLabel.numberOfLines = 2
+
+        totalLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        totalLabel.textColor = UIColor(red: 184/255, green: 190/255, blue: 207/255, alpha: 1)
+        totalLabel.numberOfLines = 1
+
+        summaryLabel.font = .systemFont(ofSize: 10, weight: .regular)
+        summaryLabel.textColor = UIColor(red: 184/255, green: 190/255, blue: 207/255, alpha: 1)
+        summaryLabel.numberOfLines = 0
+
+        let stack = UIStackView(arrangedSubviews: [lossLabel, wifiLabel, totalLabel, summaryLabel])
+        stack.axis = .vertical
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        tickTimer?.invalidate()
+    }
+
+    func update(network: DemoOnlineNetworkStatsSnapshot,
+                bootstrap: DemoBootstrapSnapshot,
+                wifiSpeed: DemoWifiSpeedSnapshot) {
+        latestNetwork = network
+        latestBootstrap = bootstrap
+        latestWifi = wifiSpeed
+        refreshLabels()
+        syncTickTimer()
+    }
+
+    private func refreshLabels() {
+        let nowMs = DemoBootstrapPipelineTracker.nowMs()
+        lossLabel.text = "上丢（\(latestNetwork.formatLoss(latestNetwork.txLossRate))）  下丢（\(latestNetwork.formatLoss(latestNetwork.rxLossRate))）"
+        wifiLabel.text = latestWifi.displayLine()
+        if latestWifi.status == .failed || latestWifi.isBandwidthPoor {
+            wifiLabel.textColor = UIColor(red: 231/255, green: 76/255, blue: 60/255, alpha: 1)
+        } else if latestWifi.status == .running {
+            wifiLabel.textColor = UIColor(red: 241/255, green: 196/255, blue: 15/255, alpha: 1)
+        } else if latestWifi.status == .done {
+            wifiLabel.textColor = UIColor(red: 46/255, green: 204/255, blue: 113/255, alpha: 1)
+        } else {
+            wifiLabel.textColor = UIColor(red: 184/255, green: 190/255, blue: 207/255, alpha: 1)
+        }
+
+        totalLabel.text = latestBootstrap.totalLine(nowMs: nowMs)
+        summaryLabel.text = latestBootstrap.summaryLine(nowMs: nowMs)
+
+        if latestBootstrap.failed {
+            totalLabel.textColor = UIColor(red: 231/255, green: 76/255, blue: 60/255, alpha: 1)
+        } else if latestBootstrap.totalMs != nil {
+            totalLabel.textColor = UIColor(red: 46/255, green: 204/255, blue: 113/255, alpha: 1)
+        } else if latestBootstrap.isRunning {
+            totalLabel.textColor = UIColor(red: 241/255, green: 196/255, blue: 15/255, alpha: 1)
+        } else {
+            totalLabel.textColor = UIColor(red: 184/255, green: 190/255, blue: 207/255, alpha: 1)
+        }
+    }
+
+    private func syncTickTimer() {
+        if latestBootstrap.isRunning {
+            guard tickTimer == nil else { return }
+            tickTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+                self?.refreshLabels()
+            }
+        } else {
+            tickTimer?.invalidate()
+            tickTimer = nil
         }
     }
 }

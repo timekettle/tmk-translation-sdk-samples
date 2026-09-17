@@ -7,8 +7,24 @@ import Foundation
 import Combine
 import TmkTranslationSDK
 
+enum DemoHomeLanguageSelectionResult: Equatable {
+    case applied
+    case rejectedSameLanguage
+
+    var pickerMessage: String? {
+        switch self {
+        case .applied:
+            return nil
+        case .rejectedSameLanguage:
+            return "不能选择相同的语言"
+        }
+    }
+}
+
 final class DemoHomeViewModel {
     @Published private(set) var state = DemoHomeViewState()
+
+    private static let languageCache = DemoHomeLanguageCache()
 
     private var requestID = 0
     private var hasLoadedOnce = false
@@ -37,33 +53,60 @@ final class DemoHomeViewModel {
     func selectScenario(_ scenario: DemoHomeScenario) {
         guard state.selectedScenario != scenario else { return }
         state.selectedScenario = scenario
+        // 一对一场景即拉取离线列表，用于判断语言对是否支持「在线&离线」（不受当前 mode 影响，避免死锁）。
+        if scenario == .oneToOne {
+            loadOfflineLanguageSupport()
+        }
+        if state.selectedMode.isAvailable(for: scenario) == false {
+            state.selectedMode = .online
+            state.footerText = "正在准备在线语言列表..."
+            publishState()
+            loadSupportedLanguages()
+            return
+        }
         publishState()
     }
 
     func selectMode(_ mode: DemoHomeMode) {
-        guard mode.isSelectable, state.selectedMode != mode else { return }
+        guard mode.isAvailable(for: state.selectedScenario), state.selectedMode != mode else { return }
+        // 切到「在线&离线」前校验语言对是否支持离线；不支持则不切换。
+        if mode == .concurrentOneToOne && !concurrentSelectable() {
+            state.footerText = "该语言对不支持离线翻译，无法选择在线&离线"
+            publishState()
+            return
+        }
         state.selectedMode = mode
         if mode.source != .online {
             shouldRetryOnlineLanguagesOnBecomeActive = false
             lastOnlineLanguagesLoadFailed = false
         }
-        state.footerText = mode == .online ? "正在准备在线语言列表..." : "正在准备离线语言列表..."
+        state.footerText = mode.source == .online ? "正在准备在线语言列表..." : "正在准备离线语言列表..."
         publishState()
         loadSupportedLanguages()
     }
 
-    func selectSourceLanguage(_ option: DemoLanguageOption) {
-        guard option != state.targetLanguage else { return }
+    func selectSourceLanguage(_ option: DemoLanguageOption) -> DemoHomeLanguageSelectionResult {
+        if let targetLanguage = state.targetLanguage,
+           targetLanguage.actualCode.caseInsensitiveCompare(option.actualCode) == .orderedSame {
+            return .rejectedSameLanguage
+        }
         state.sourceLanguage = option
         normalizeTargetLanguage()
+        recheckConcurrent()
         publishState()
+        return .applied
     }
 
-    func selectTargetLanguage(_ option: DemoLanguageOption) {
-        guard option != state.sourceLanguage else { return }
+    func selectTargetLanguage(_ option: DemoLanguageOption) -> DemoHomeLanguageSelectionResult {
+        if let sourceLanguage = state.sourceLanguage,
+           sourceLanguage.actualCode.caseInsensitiveCompare(option.actualCode) == .orderedSame {
+            return .rejectedSameLanguage
+        }
         state.targetLanguage = option
         normalizeTargetLanguage()
+        recheckConcurrent()
         publishState()
+        return .applied
     }
 
     func swapLanguages() {
@@ -73,6 +116,7 @@ final class DemoHomeViewModel {
         state.sourceLanguage = target
         state.targetLanguage = source
         normalizeTargetLanguage()
+        recheckConcurrent()
         publishState()
     }
 
@@ -86,8 +130,20 @@ final class DemoHomeViewModel {
         }
 
         hasLoadedOnce = true
+        // 并发模式额外拉取离线列表，用于判断语言对是否支持离线。
+        if state.selectedMode == .concurrentOneToOne {
+            loadOfflineLanguageSupport()
+        }
         requestID += 1
         let currentRequestID = requestID
+        if let cachedOptions = Self.languageCache.options(for: source) {
+            if source == .online {
+                lastOnlineLanguagesLoadFailed = false
+                shouldRetryOnlineLanguagesOnBecomeActive = false
+            }
+            applyLoadedLanguages(cachedOptions, source: source)
+            return
+        }
         state.isLoadingLanguages = true
         state.isStartEnabled = false
         publishState()
@@ -101,6 +157,7 @@ final class DemoHomeViewModel {
                     self.shouldRetryOnlineLanguagesOnBecomeActive = false
                 }
                 let options = Self.makeLanguageOptions(from: response)
+                Self.languageCache.store(options, for: source)
                 self.applyLoadedLanguages(options, source: source)
             case .failure(let error):
                 if source == .online {
@@ -126,7 +183,7 @@ final class DemoHomeViewModel {
         }
     }
 
-    private func applyLoadedLanguages(_ options: [DemoLanguageOption], source: TmkSupportedLanguagesSource) {
+    private func applyLoadedLanguages(_ options: [DemoLanguageOption], source: DemoLanguageSource) {
         state.isLoadingLanguages = false
         state.languages = options
         state.sourceLanguage = preferredOption(from: options,
@@ -171,8 +228,43 @@ final class DemoHomeViewModel {
             && state.sourceLanguage != nil
             && state.targetLanguage != nil
             && state.sourceLanguage != state.targetLanguage
+        state.isConcurrentSelectable = state.selectedScenario == .oneToOne && concurrentSelectable()
         DispatchQueue.main.async {
             self.state = self.state
+        }
+    }
+
+    /// 拉取离线语言列表，用于判断某语言对的 base code 是否同时支持离线。
+    private func loadOfflineLanguageSupport() {
+        TmkTranslationSDK.shared.getOfflineSupportedLanguages { [weak self] result in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if case .success(let response) = result {
+                    self.state.offlineFamilyCodes = Set(response.localeOptions.map {
+                        $0.code.split(separator: "-").first.map(String.init) ?? $0.code
+                    }.map { $0.lowercased() })
+                } else {
+                    self.state.offlineFamilyCodes = []
+                }
+                self.recheckConcurrent()
+                self.publishState()
+            }
+        }
+    }
+
+    /// 语言对是否同时支持在线+离线（按离线 base code 判定）。
+    private func concurrentSelectable() -> Bool {
+        guard let source = state.sourceLanguage, let target = state.targetLanguage else { return false }
+        return state.offlineFamilyCodes.contains(source.familyCode.lowercased()) &&
+            state.offlineFamilyCodes.contains(target.familyCode.lowercased())
+    }
+
+    /// 已在「在线&离线」模式下时，若语言对不再支持离线则自动回退到「在线」。
+    private func recheckConcurrent() {
+        guard state.selectedMode == .concurrentOneToOne else { return }
+        if !concurrentSelectable() {
+            state.selectedMode = .online
+            state.footerText = "该语言对不支持离线翻译，已切换为在线模式"
         }
     }
 

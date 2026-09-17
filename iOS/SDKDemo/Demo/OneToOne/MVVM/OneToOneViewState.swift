@@ -62,18 +62,22 @@ struct OneToOneRowViewData: Equatable {
     var translatedSegments: [DemoConversationDisplaySegment] = []
     /// 是否已收到服务端 bubble_end 信号，仅影响展示态，不阻止内容更新。
     var isBubbleEnded: Bool = false
+    /// 气泡首条 ASR final 句子的 offset(纳秒);bubbleEnd 后展示。
+    var bOffset: Int64? = nil
+    /// 气泡时长(纳秒);bubbleEnd 后展示。
+    var bDuration: Int64? = nil
 }
 
 struct OneToOneViewState: Equatable {
     var statusText: String = "初始化中..."
     var sourceLanguage: String = "zh-CN"
     var targetLanguage: String = "en-US"
-    var translateEngine: TmkOnlineTranslateEngine = .fast
+    var translateEngine: TmkOnlineTranslateEngine = OneToOneDemoDefaults.online.translateEngine
+    var recognizeEngine: TmkOnlineRecognizeEngine = OneToOneDemoDefaults.online.recognizeEngine
+    var translateMode: TmkTranslateDeliveryMode = OneToOneDemoDefaults.online.translateMode
     var scenarioOption: OneToOneScenarioOption = .defaultOption
     var canStartListening: Bool = false
     var canStopListening: Bool = false
-    var canSharePCM: Bool = false
-    var isCaptureEnabled: Bool = false
 
     var rows: [OneToOneRowViewData] = []
     var currentRoomNo: String = "-"
@@ -89,9 +93,7 @@ struct OneToOneViewState: Equatable {
     var captureChannels: Int = 0
     var playbackChannels: Int = 0
     var playbackMode: OneToOnePlaybackMode = .left
-    var dialogConversationAudioMode: TmkDialogConversationAudioMode = .standard
-
-    var pcmFileURL: URL?
+    var dialogConversationAudioMode: TmkDialogConversationAudioMode = OneToOneDemoDefaults.online.audioMode
 }
 
 extension TmkDialogConversationAudioMode {
