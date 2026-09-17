@@ -9,9 +9,11 @@ import 'package:tmk_translation_flutter/tmk_translation_flutter.dart' as api;
 void main() {
   group('fixed PCM source', () {
     test(
-      'selects platform asset and preserves legacy zero-padded loop',
+      'pads the last frame and waits three seconds before repeating',
       () async {
+        var nowMs = 1000;
         final source = SampleFixedPcmSource(
+          nowMs: () => nowMs,
           bundle: _MemoryAssetBundle({
             SampleFixedPcmSource.androidAsset: [1, 2, 3, 4, 5, 6],
             SampleFixedPcmSource.iosAsset: [7, 8],
@@ -21,10 +23,20 @@ void main() {
         await source.load(platform: TargetPlatform.android);
         expect(source.nextFrame(4), Uint8List.fromList([1, 2, 3, 4]));
         expect(source.nextFrame(4), Uint8List.fromList([5, 6, 0, 0]));
+        expect(source.nextFrame(4), Uint8List(4));
+        nowMs += 2999;
+        expect(source.nextFrame(4), Uint8List(4));
+        nowMs++;
         expect(source.nextFrame(4), Uint8List.fromList([1, 2, 3, 4]));
 
         source.reset();
         expect(source.nextFrame(2), Uint8List.fromList([1, 2]));
+
+        await source.load(platform: TargetPlatform.iOS);
+        expect(source.nextFrame(2), Uint8List.fromList([7, 8]));
+        expect(source.nextFrame(2), Uint8List(2));
+        nowMs += 3000;
+        expect(source.nextFrame(2), Uint8List.fromList([7, 8]));
       },
     );
   });

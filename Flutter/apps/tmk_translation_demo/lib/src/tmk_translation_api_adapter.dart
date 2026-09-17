@@ -7,6 +7,8 @@ api.TmkTranslationGlobalConfig sampleGlobalConfig(
   String? appId,
   String? appSecret,
 }) {
+  // When Dart defines are absent, the published SDK delegates empty values
+  // to Android Manifest or iOS Info.plist credentials supplied by the host.
   final resolvedAppId = appId?.trim().isNotEmpty == true
       ? appId!.trim()
       : const String.fromEnvironment('TMK_APP_ID');

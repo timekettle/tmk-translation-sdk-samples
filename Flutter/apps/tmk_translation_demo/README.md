@@ -82,7 +82,7 @@ flutter run -d <device-id>
 
 ## 凭证配置
 
-冻结的高层 API 由 Dart 初始化，因此开发运行时通过 `dart-define` 注入凭据：
+本地运行可通过 `dart-define` 显式注入凭据：
 
 ```bash
 flutter run \
@@ -90,8 +90,10 @@ flutter run \
   --dart-define=TMK_APP_SECRET="$TMK_SAMPLE_APP_SECRET"
 ```
 
-真实值只放在本地环境或 CI Secret 中，不提交到仓库。原生工程中已有的 manifest
-placeholder/Info.plist 变量仅供旧版 Sample 构建兼容，不是高层 API 的凭据来源。
+真实值只放在本地环境或 CI Secret 中，不提交到仓库。若没有提供 Dart defines，
+公开 SDK 会把空凭据交给原生端解析：Android 从 Manifest placeholders 读取，
+iOS 从 Info.plist 读取；当前发布 workflow 分别通过 `android/local.properties`
+和 `ios/Flutter/LocalSecrets.xcconfig` 注入这些值。
 
 ## 气泡渲染机制
 
