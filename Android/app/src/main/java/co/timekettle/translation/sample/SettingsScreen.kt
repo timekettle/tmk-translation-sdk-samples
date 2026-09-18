@@ -660,7 +660,7 @@ private fun TmkTranslationNetworkEnvironment.displayName(): String = name
 private fun TmkDiagnosisLevel.displayName(): String = when (this) {
     TmkDiagnosisLevel.ESSENTIAL -> "Essential"
     TmkDiagnosisLevel.DIAGNOSTIC -> "Diagnostic"
-    TmkDiagnosisLevel.TRACE -> "Speech"
+    TmkDiagnosisLevel.TRACE -> "Trace"
 }
 
 @Composable
