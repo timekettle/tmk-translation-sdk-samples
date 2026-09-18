@@ -1,4 +1,4 @@
-import 'package:tmk_translation_flutter/tmk_translation_flutter.dart';
+import 'tmk_translation_adapter.dart';
 
 import 'models.dart';
 
