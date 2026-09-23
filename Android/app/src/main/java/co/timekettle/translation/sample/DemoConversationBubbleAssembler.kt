@@ -4,7 +4,6 @@ import co.timekettle.translation.*
 
 import co.timekettle.translation.model.BubbleRowData
 import co.timekettle.translation.model.Result
-import kotlin.math.max
 
 enum class DemoConversationStage {
     ASR,
@@ -27,6 +26,8 @@ data class DemoConversationEvent(
     val sourceLangCode: String,
     val targetLangCode: String,
     val chunkId: String? = null,
+    /** 离线 MT 当前 chunk 已稳定；与整气泡的 [isFinal] 分开表达。 */
+    val isSentenceFinal: Boolean = false,
     /** ASR 结果携带的起始偏移(纳秒);MT 不携带,恒为 null。 */
     val offset: Long? = null,
     /** ASR 结果携带的时长(纳秒);MT 不携带,恒为 null。 */
@@ -166,6 +167,8 @@ object DemoConversationEventAdapter {
             sourceLangCode = result?.srcCode?.takeIf { it.isNotEmpty() } ?: fallbackSourceLangCode,
             targetLangCode = result?.dstCode?.takeIf { it.isNotEmpty() } ?: fallbackTargetLangCode,
             chunkId = chunk,
+            isSentenceFinal = stringExtra(result?.extraData, "sentence_state")
+                ?.equals("stable", ignoreCase = true) == true,
         )
     }
 
@@ -227,10 +230,19 @@ object DemoConversationEventAdapter {
 }
 
 class DemoConversationBubbleAssembler(maxRows: Int = 500) {
+    private enum class SegmentState {
+        ACTIVE_PARTIAL,
+        SUSPENDED_PARTIAL,
+        FINALIZED,
+    }
+
     private data class SessionSegment(
         val text: String,
-        val isFinal: Boolean,
-    )
+        val state: SegmentState,
+    ) {
+        val isFinal: Boolean
+            get() = state == SegmentState.FINALIZED
+    }
 
     private data class BubbleAggregate(
         var sourceLangCode: String,
@@ -239,11 +251,9 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
         val translatedSessionOrder: MutableList<String> = mutableListOf(),
         val sourceBySession: MutableMap<String, SessionSegment> = mutableMapOf(),
         val translatedBySession: MutableMap<String, SessionSegment> = mutableMapOf(),
-        val sourceSessionAlias: MutableMap<String, String> = mutableMapOf(),
-        val translatedSessionAlias: MutableMap<String, String> = mutableMapOf(),
-        val sourceChunkAlias: MutableMap<String, String> = mutableMapOf(),
-        val translatedChunkAlias: MutableMap<String, String> = mutableMapOf(),
-        /** effectiveSessionId -> 贡献它的原始服务端 session_id 集合（用于按 session 着色）。 */
+        var activeSourceSegmentId: String? = null,
+        var activeTranslatedSegmentId: String? = null,
+        /** segmentId -> 贡献它的原始服务端 session_id 集合（用于按 session 着色）。 */
         val sourceRawIdsByEffective: MutableMap<String, MutableSet<String>> = mutableMapOf(),
         val translatedRawIdsByEffective: MutableMap<String, MutableSet<String>> = mutableMapOf(),
         /** effectiveSessionId -> 贡献它的原始服务端 chunk_id 集合（用于按 chunk 着色）。 */
@@ -256,9 +266,7 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
         var bLastEnd: Long? = null,
         /**
          * 内容版本号:每次 consume 改动本 aggregate 时自增,作为快照缓存的失效依据。
-         * composeText/composeSegments 含 O(文本长度²) 的 LCS/overlap,新闻联播等超长句(单气泡累积 200+ 字)
-         * 下单次成本高;且每次快照要遍历全部气泡(可达数百)。缓存后:未变的历史气泡直接复用上次结果,
-         * 每次快照只对本轮真正变更的 1~2 个活跃气泡重算,避免"全量气泡 × O(n²)"随时长放大(bug 卡顿根因)。
+         * 快照缓存只在文本状态实际变化时失效，避免高频 ASR/MT 回调反复组装历史气泡。
          */
         var contentVersion: Long = 0L,
         /** 上次快照缓存:命中条件为 contentVersion 与 isActiveBubble 均未变。 */
@@ -316,27 +324,30 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
             DemoConversationStage.ASR -> update(
                 segmentText = event.text,
                 isFinal = event.isFinal,
-                sessionId = event.sessionId,
-                chunkId = event.chunkId,
+                segmentId = event.sessionId.trim(),
+                rawSessionId = event.sessionId,
+                rawChunkId = null,
                 sessionOrder = aggregate.sourceSessionOrder,
                 segments = aggregate.sourceBySession,
-                sessionAliases = aggregate.sourceSessionAlias,
-                chunkAliases = aggregate.sourceChunkAlias,
                 rawIdsByEffective = aggregate.sourceRawIdsByEffective,
                 rawChunkByEffective = aggregate.sourceRawChunkByEffective,
-            )
-            DemoConversationStage.MT -> update(
-                segmentText = event.text,
-                isFinal = event.isFinal,
-                sessionId = event.sessionId,
-                chunkId = event.chunkId,
-                sessionOrder = aggregate.translatedSessionOrder,
-                segments = aggregate.translatedBySession,
-                sessionAliases = aggregate.translatedSessionAlias,
-                chunkAliases = aggregate.translatedChunkAlias,
-                rawIdsByEffective = aggregate.translatedRawIdsByEffective,
-                rawChunkByEffective = aggregate.translatedRawChunkByEffective,
-            )
+                activeSegmentId = aggregate.activeSourceSegmentId,
+            ).also { aggregate.activeSourceSegmentId = it }
+            DemoConversationStage.MT -> normalizedChunkId(event.chunkId)?.let { chunkId ->
+                update(
+                    segmentText = event.text,
+                    // 离线 stable 代表当前句已定稿；isFinal 仍保留整气泡结束语义。
+                    isFinal = event.isFinal || event.isSentenceFinal,
+                    segmentId = chunkId,
+                    rawSessionId = event.sessionId,
+                    rawChunkId = chunkId,
+                    sessionOrder = aggregate.translatedSessionOrder,
+                    segments = aggregate.translatedBySession,
+                    rawIdsByEffective = aggregate.translatedRawIdsByEffective,
+                    rawChunkByEffective = aggregate.translatedRawChunkByEffective,
+                    activeSegmentId = aggregate.activeTranslatedSegmentId,
+                ).also { aggregate.activeTranslatedSegmentId = it }
+            }
             DemoConversationStage.TTS -> Unit
         }
 
@@ -368,72 +379,63 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
     private fun update(
         segmentText: String?,
         isFinal: Boolean,
-        sessionId: String,
-        chunkId: String?,
+        segmentId: String,
+        rawSessionId: String,
+        rawChunkId: String?,
         sessionOrder: MutableList<String>,
         segments: MutableMap<String, SessionSegment>,
-        sessionAliases: MutableMap<String, String>,
-        chunkAliases: MutableMap<String, String>,
         rawIdsByEffective: MutableMap<String, MutableSet<String>>,
         rawChunkByEffective: MutableMap<String, MutableSet<String>>,
-    ) {
+        activeSegmentId: String?,
+    ): String? {
         val text = segmentText.orEmpty().trim()
-        if (text.isEmpty() && !isFinal) return
+        if (segmentId.isEmpty() || (text.isEmpty() && !isFinal)) return activeSegmentId
 
-        val normalizedChunk = normalizedChunkId(chunkId)
-        val effectiveSessionId = normalizedChunk?.let { chunkKey ->
-            chunkAliases.getOrPut(chunkKey) { nextSyntheticSessionId(segments) }
-        } ?: sessionAliases[sessionId] ?: sessionId
-
-        if (!sessionOrder.contains(effectiveSessionId)) {
-            sessionOrder.add(effectiveSessionId)
+        val old = segments[segmentId]
+        if (old?.state == SegmentState.FINALIZED ||
+            (old?.state == SegmentState.SUSPENDED_PARTIAL && !isFinal)
+        ) {
+            return activeSegmentId
         }
 
-        val old = segments[effectiveSessionId]
-        // 仅当已固定(old.isFinal)且新文本非增量时才另起新段(对齐 iOS)。
-        // 同一 chunkId 的中间态(old.isFinal=false)收到 final 时不另起新段,而是走下方合并:
-        // 用新文本替换上次的中间态,避免 partial 与 final 同时保留导致文本重复、"..." 落在中间。
-        //
-        // 豁免：新消息是 final 且旧消息也是 final 时，这是服务端对同一 session/chunk 发出的
-        // 第二次修正版 completed(如 ASR/MT 二次识别或重算结果)。此时应直接覆盖旧 final 而非另起
-        // 新段，否则同一句话会重复展示两次(bug 7049772181)。
-        // 注意：chunkId 非空时，effectiveSessionId 由 chunkAliases 分配且唯一，同一 chunkId
-        // 的多次 final 仍归同一 effectiveSessionId → 正常覆盖，不会多段。
-        val isServerCorrectionFinal = isFinal && old != null && old.isFinal
-        val shouldAppendAsNewSegment = !isServerCorrectionFinal &&
-            old != null &&
-            old.isFinal &&
-            text.isNotEmpty() &&
-            !isIncrementalTransition(old.text, text)
-        if (shouldAppendAsNewSegment) {
-            val newSessionId = nextSyntheticSessionId(segments)
-            sessionOrder.add(newSessionId)
-            segments[newSessionId] = SessionSegment(text = text, isFinal = isFinal)
-            sessionAliases[sessionId] = newSessionId
-            recordRawIds(rawIdsByEffective, rawChunkByEffective, newSessionId, sessionId, normalizedChunk)
-            return
+        var nextActiveSegmentId = activeSegmentId
+        if (old == null) {
+            activeSegmentId?.let { activeId ->
+                val active = segments[activeId]
+                if (active?.state == SegmentState.ACTIVE_PARTIAL) {
+                    segments[activeId] = active.copy(state = SegmentState.SUSPENDED_PARTIAL)
+                }
+            }
+            nextActiveSegmentId = null
+            sessionOrder.add(segmentId)
         }
 
-        val mergedText = resolveIncrementalText(old?.text.orEmpty(), text)
-        val finalValue = (old?.isFinal ?: false) || isFinal
-        segments[effectiveSessionId] = SessionSegment(text = mergedText, isFinal = finalValue)
-        sessionAliases[sessionId] = effectiveSessionId
-        recordRawIds(rawIdsByEffective, rawChunkByEffective, effectiveSessionId, sessionId, normalizedChunk)
+        // final 必须覆盖同一段的 partial；空 final 表示 ASR 修订后撤回该中间态，不能保留旧译文。
+        val finalText = text
+        val state = if (isFinal) SegmentState.FINALIZED else SegmentState.ACTIVE_PARTIAL
+        segments[segmentId] = SessionSegment(text = finalText, state = state)
+        recordRawIds(rawIdsByEffective, rawChunkByEffective, segmentId, rawSessionId, rawChunkId)
+
+        return when {
+            !isFinal -> segmentId
+            nextActiveSegmentId == segmentId -> null
+            else -> nextActiveSegmentId
+        }
     }
 
-    /** 记录某个 effectiveSessionId 由哪些原始 session_id / chunk_id 贡献，供按 session/chunk 着色。 */
+    /** 记录某个展示分段由哪些原始 session_id / chunk_id 贡献，供按 session/chunk 着色。 */
     private fun recordRawIds(
         rawIdsByEffective: MutableMap<String, MutableSet<String>>,
         rawChunkByEffective: MutableMap<String, MutableSet<String>>,
         effectiveSessionId: String,
-        sessionId: String,
-        normalizedChunk: String?,
+        rawSessionId: String,
+        rawChunkId: String?,
     ) {
-        if (sessionId.isNotEmpty()) {
-            rawIdsByEffective.getOrPut(effectiveSessionId) { mutableSetOf() }.add(sessionId)
+        if (rawSessionId.isNotEmpty()) {
+            rawIdsByEffective.getOrPut(effectiveSessionId) { mutableSetOf() }.add(rawSessionId)
         }
-        if (normalizedChunk != null) {
-            rawChunkByEffective.getOrPut(effectiveSessionId) { mutableSetOf() }.add(normalizedChunk)
+        if (rawChunkId != null) {
+            rawChunkByEffective.getOrPut(effectiveSessionId) { mutableSetOf() }.add(rawChunkId)
         }
     }
 
@@ -445,11 +447,7 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
         val translatedSegments: List<DemoConversationDisplaySegment>,
     )
 
-    /**
-     * 取本 aggregate 的组装结果:contentVersion 与 isActiveBubble 均命中缓存则直接复用,
-     * 否则重算 composeText/composeSegments(含 O(n²) LCS)并写回缓存。
-     * 使"全量气泡 × O(n²)/次"降为"仅变更气泡重算",消除长跑随文本长度平方放大的卡顿。
-     */
+    /** 取本 aggregate 的组装结果；内容或活跃态未变时直接复用缓存。 */
     private fun resolveComposed(aggregate: BubbleAggregate, isActiveBubble: Boolean): ComposedResult {
         if (aggregate.cachedVersion == aggregate.contentVersion && aggregate.cachedIsActive == isActiveBubble) {
             return ComposedResult(
@@ -593,10 +591,7 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
             }
         }
         if (orderedTexts.isEmpty()) return ""
-        var merged = orderedTexts.first()
-        for (idx in 1 until orderedTexts.size) {
-            merged = mergeCumulativeText(merged, orderedTexts[idx])
-        }
+        val merged = orderedTexts.joinToString(separator = " ")
         return if (latestIsFinal || !isActiveBubble) {
             removeTrailingEllipsis(merged)
         } else {
@@ -636,41 +631,6 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
         return result
     }
 
-    private fun resolveIncrementalText(old: String, new: String): String {
-        val lhs = old.trim()
-        val rhs = new.trim()
-        if (rhs.isEmpty()) return lhs
-        if (lhs.isEmpty()) return rhs
-        if (shouldPreferRightInUpdate(lhs, rhs)) return rhs
-        if (shouldPreferLeftInUpdate(lhs, rhs)) return lhs
-        return rhs
-    }
-
-    private fun mergeCumulativeText(lhsRaw: String, rhsRaw: String): String {
-        val lhs = lhsRaw.trim()
-        val rhs = rhsRaw.trim()
-        if (lhs.isEmpty()) return rhs
-        if (rhs.isEmpty()) return lhs
-        if (shouldPreferRightInMerge(lhs, rhs)) return rhs
-        if (shouldPreferLeftInMerge(lhs, rhs)) return lhs
-        val overlap = longestOverlap(lhs, rhs)
-        if (overlap > 0) return lhs + rhs.drop(overlap)
-        val similarity = normalizedSimilarity(lhs, rhs)
-        if (similarity >= 0.78) return if (rhs.length >= lhs.length) rhs else lhs
-        return "$lhs $rhs"
-    }
-
-    private fun longestOverlap(lhs: String, rhs: String): Int {
-        // 求 lhs 后缀与 rhs 前缀的最长重叠。原实现每个 count 都 takeLast/take 建子串再 == 比较,
-        // 是 O(n²) 且产生大量临时字符串;新闻联播等超长句(单气泡 200+ 字)下高频调用会剧烈拖慢。
-        // 改用 regionMatches 逐位比较,不分配子串,复杂度与原来同阶但常数与 GC 大幅降低。
-        val maxCount = minOf(lhs.length, rhs.length)
-        for (count in maxCount downTo 1) {
-            if (lhs.regionMatches(lhs.length - count, rhs, 0, count)) return count
-        }
-        return 0
-    }
-
     private fun appendEllipsisIfNeeded(text: String): String {
         return if (text.endsWith("...") || text.endsWith("…")) text else "$text..."
     }
@@ -692,101 +652,6 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
         return normalized
     }
 
-    private fun isIncrementalTransition(old: String, new: String): Boolean {
-        val lhs = old.trim()
-        val rhs = new.trim()
-        if (lhs.isEmpty() || rhs.isEmpty()) return false
-        if (shouldPreferRightInUpdate(lhs, rhs)) return true
-        if (shouldPreferLeftInUpdate(lhs, rhs)) return true
-        return normalizedSimilarity(lhs, rhs) >= 0.70
-    }
-
-    private fun nextSyntheticSessionId(segments: Map<String, SessionSegment>): String {
-        var id = -1
-        while (segments.containsKey(id.toString())) {
-            id -= 1
-        }
-        return id.toString()
-    }
-
-    private fun shouldPreferRightInUpdate(lhs: String, rhs: String): Boolean {
-        if (lhs == rhs) return true
-        if (rhs.startsWith(lhs) || rhs.contains(lhs)) return true
-        val lhsKey = normalizeCompareKey(lhs)
-        val rhsKey = normalizeCompareKey(rhs)
-        if (lhsKey.isEmpty() || rhsKey.isEmpty()) return false
-        if (rhsKey == lhsKey) return true
-        if (rhsKey.startsWith(lhsKey) || rhsKey.contains(lhsKey)) return true
-        return normalizedSimilarity(lhs, rhs) >= 0.88 && rhs.length >= lhs.length
-    }
-
-    private fun shouldPreferLeftInUpdate(lhs: String, rhs: String): Boolean {
-        if (lhs.startsWith(rhs) || lhs.contains(rhs)) return true
-        val lhsKey = normalizeCompareKey(lhs)
-        val rhsKey = normalizeCompareKey(rhs)
-        if (lhsKey.isEmpty() || rhsKey.isEmpty()) return false
-        if (lhsKey.startsWith(rhsKey) || lhsKey.contains(rhsKey)) return true
-        return normalizedSimilarity(lhs, rhs) >= 0.88 && lhs.length > rhs.length
-    }
-
-    private fun shouldPreferRightInMerge(lhs: String, rhs: String): Boolean {
-        if (lhs == rhs) return false
-        if (rhs.startsWith(lhs) || rhs.contains(lhs)) return true
-        val lhsKey = normalizeCompareKey(lhs)
-        val rhsKey = normalizeCompareKey(rhs)
-        if (lhsKey.isEmpty() || rhsKey.isEmpty()) return false
-        if (rhsKey == lhsKey) return rhs.length >= lhs.length
-        return rhsKey.startsWith(lhsKey) || rhsKey.contains(lhsKey)
-    }
-
-    private fun shouldPreferLeftInMerge(lhs: String, rhs: String): Boolean {
-        if (lhs.startsWith(rhs) || lhs.contains(rhs)) return true
-        val lhsKey = normalizeCompareKey(lhs)
-        val rhsKey = normalizeCompareKey(rhs)
-        if (lhsKey.isEmpty() || rhsKey.isEmpty()) return false
-        if (lhsKey == rhsKey) return lhs.length > rhs.length
-        return lhsKey.startsWith(rhsKey) || lhsKey.contains(rhsKey)
-    }
-
-    private fun normalizeCompareKey(text: String): String {
-        return text.filter { !it.isWhitespace() && !it.isPunctuationOrSymbol() }.lowercase()
-    }
-
-    private fun normalizedSimilarity(lhs: String, rhs: String): Double {
-        val lhsKey = normalizeCompareKey(lhs)
-        val rhsKey = normalizeCompareKey(rhs)
-        if (lhsKey.isEmpty() || rhsKey.isEmpty()) return 0.0
-        val common = longestCommonSubstringLength(lhsKey, rhsKey)
-        val denominator = max(lhsKey.length, rhsKey.length)
-        return if (denominator > 0) common.toDouble() / denominator.toDouble() else 0.0
-    }
-
-    private fun longestCommonSubstringLength(lhs: String, rhs: String): Int {
-        if (lhs.isEmpty() || rhs.isEmpty()) return 0
-        // 用一维滚动数组替代原二维 dp:原实现每次分配 (n+1)×(m+1) 的 IntArray,
-        // 新闻联播等超长句(实测单句归一后可达数百字符)会一次性分配数十万 int(数 MB),
-        // 长时间高频调用(旁听每秒数次、每次遍历数百气泡)造成剧烈 GC 与主线程停顿(bug 7051627151)。
-        // 一维数组把空间从 O(n×m) 降到 O(m);dp[i][j] 依赖左上角 dp[i-1][j-1],
-        // 故内层 j 从大到小遍历,dp[j-1] 在被覆盖前仍是上一行(i-1)的值,结果与二维实现完全等价。
-        // 让 rhs 作为较短串以最小化数组长度。
-        val a: String
-        val b: String
-        if (lhs.length >= rhs.length) {
-            a = lhs; b = rhs
-        } else {
-            a = rhs; b = lhs
-        }
-        val dp = IntArray(b.length + 1)
-        var best = 0
-        for (i in 1..a.length) {
-            for (j in b.length downTo 1) {
-                dp[j] = if (a[i - 1] == b[j - 1]) dp[j - 1] + 1 else 0
-                if (dp[j] > best) best = dp[j]
-            }
-        }
-        return best
-    }
-
     companion object {
         const val MIN_MAX_ROWS = 10
         const val MAX_MAX_ROWS = 500
@@ -802,22 +667,5 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
                 DemoConversationLane.LEFT
             }
         }
-    }
-}
-
-private fun Char.isPunctuationOrSymbol(): Boolean {
-    return when (Character.getType(this)) {
-        Character.CONNECTOR_PUNCTUATION.toInt(),
-        Character.DASH_PUNCTUATION.toInt(),
-        Character.START_PUNCTUATION.toInt(),
-        Character.END_PUNCTUATION.toInt(),
-        Character.INITIAL_QUOTE_PUNCTUATION.toInt(),
-        Character.FINAL_QUOTE_PUNCTUATION.toInt(),
-        Character.OTHER_PUNCTUATION.toInt(),
-        Character.MATH_SYMBOL.toInt(),
-        Character.CURRENCY_SYMBOL.toInt(),
-        Character.MODIFIER_SYMBOL.toInt(),
-        Character.OTHER_SYMBOL.toInt() -> true
-        else -> false
     }
 }

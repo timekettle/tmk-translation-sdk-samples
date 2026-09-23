@@ -527,7 +527,8 @@ class Offline1v1ViewModel @Inject constructor(
         val hour = now.get(java.util.Calendar.HOUR_OF_DAY)
         val minute = now.get(java.util.Calendar.MINUTE)
         val second = now.get(java.util.Calendar.SECOND)
-        val metadata = byteArrayOf(channel.toByte(), hour.toByte(), minute.toByte(), second.toByte())
+        // 离线引擎用第五字节 1 识别 VAD 或循环 PCM 的语音段起点。
+        val metadata = byteArrayOf(channel.toByte(), hour.toByte(), minute.toByte(), second.toByte(), 1)
         val speechMarker = String.format(java.util.Locale.US, "%d%02d%02d%02d", channel, hour, minute, second)
         return metadata to speechMarker
     }
