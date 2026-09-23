@@ -240,12 +240,19 @@ struct OfflineSentenceTextState {
 }
 
 final class DemoConversationBubbleAssembler {
-    /// 单个气泡保留的服务端 session 别名上限；超出后只影响已过期 partial 的高亮映射，不影响文本或 final 语义。
-    private static let maxSessionAliasesPerBubble = 64
+    private enum SegmentState {
+        case activePartial
+        case suspendedPartial
+        case finalized
+    }
 
     private struct SessionSegment {
         var text: String
-        var isFinal: Bool
+        var state: SegmentState
+
+        var isFinal: Bool {
+            state == .finalized
+        }
     }
 
     private struct BubbleAggregate {
@@ -255,24 +262,19 @@ final class DemoConversationBubbleAssembler {
         var sentenceTranslation = OfflineSentenceTextState()
         var usesSentenceSource = false
         var usesSentenceTranslation = false
-        var sourceSessionOrder: [Int] = []
-        var translatedSessionOrder: [Int] = []
-        var sourceBySession: [Int: SessionSegment] = [:]
-        var translatedBySession: [Int: SessionSegment] = [:]
-        var sourceSessionAlias: [Int: Int] = [:]
-        var translatedSessionAlias: [Int: Int] = [:]
-        var sourceSessionAliasOrder: [Int] = []
-        var translatedSessionAliasOrder: [Int] = []
-        var sourceChunkAlias: [String: Int] = [:]
-        var translatedChunkAlias: [String: Int] = [:]
-        /// 同一气泡内未携带 chunkId 的 ASR partial 可能轮换 sessionId；始终覆盖该活动分段。
-        var activeSourcePartialSegmentID: Int?
-        /// effectiveSessionId -> 贡献它的原始服务端 session_id 集合（用于按 session 着色）。
-        var sourceRawIdsByEffective: [Int: Set<Int>] = [:]
-        var translatedRawIdsByEffective: [Int: Set<Int>] = [:]
-        /// effectiveSessionId -> 贡献它的原始服务端 chunk_id 集合（用于按 chunk 着色）。
-        var sourceRawChunkByEffective: [Int: Set<String>] = [:]
-        var translatedRawChunkByEffective: [Int: Set<String>] = [:]
+        var sourceSessionOrder: [String] = []
+        var translatedSessionOrder: [String] = []
+        var sourceBySession: [String: SessionSegment] = [:]
+        var translatedBySession: [String: SessionSegment] = [:]
+        /// 每个通道同一时刻仅有一个可持续替换的 partial；新身份到来时旧 partial 暂停。
+        var activeSourceSegmentID: String?
+        var activeTranslatedSegmentID: String?
+        /// segmentId -> 贡献它的原始服务端 session_id 集合（用于按 session 着色）。
+        var sourceRawIdsByEffective: [String: Set<Int>] = [:]
+        var translatedRawIdsByEffective: [String: Set<Int>] = [:]
+        /// segmentId -> 贡献它的原始服务端 chunk_id 集合（用于按 chunk 着色）。
+        var sourceRawChunkByEffective: [String: Set<String>] = [:]
+        var translatedRawChunkByEffective: [String: Set<String>] = [:]
         /// 离线 MT 的 final 是累计快照；partial 既可能是累计文本，也可能仅是当前句。
         /// 两者分开保存，避免 partial 覆盖已确认前缀，也允许同一 chunk 的 final 修正文本。
         var offlineConfirmedTranslatedText: String = ""
@@ -290,10 +292,7 @@ final class DemoConversationBubbleAssembler {
         /// 气泡内最后一条 ASR final 句子的 (offset+duration)(纳秒)。
         var bLastEnd: Int64? = nil
         /// 内容版本号:每次 consume 改动本 aggregate 时自增,作为快照缓存的失效依据。
-        /// composeText/composeSegments 含 O(文本长度²) 的 LCS/overlap,新闻联播等超长句
-        /// (单气泡累积 500+ 字)下单次成本高。缓存后:内容未变的历史气泡(切换/markBubbleEnded
-        /// 遍历时)直接复用上次结果,只对本轮真正变更的活跃气泡重算,避免长跑随文本长度平方放大
-        /// 的 CPU 占用(设备发烫根因)。
+        /// 内容未变的历史气泡(切换/markBubbleEnded 遍历时)直接复用上次结果。
         var contentVersion: Int64 = 0
         /// 上次快照缓存:命中条件为 contentVersion 与 isActiveBubble 均未变。
         var cachedVersion: Int64 = -1
@@ -386,15 +385,12 @@ final class DemoConversationBubbleAssembler {
             } else {
                 update(segmentText: event.text,
                        isFinal: event.isFinal,
-                       sessionId: event.sessionId,
-                       chunkId: event.chunkId,
-                       coalesceUnchunkedPartials: true,
-                       activePartialSegmentID: &aggregate.activeSourcePartialSegmentID,
+                       segmentID: String(event.sessionId),
+                       rawSessionID: event.sessionId,
+                       rawChunkID: event.chunkId,
+                       activeSegmentID: &aggregate.activeSourceSegmentID,
                        sessionOrder: &aggregate.sourceSessionOrder,
                        segments: &aggregate.sourceBySession,
-                       sessionAliases: &aggregate.sourceSessionAlias,
-                       sessionAliasOrder: &aggregate.sourceSessionAliasOrder,
-                       chunkAliases: &aggregate.sourceChunkAlias,
                        rawIdsByEffective: &aggregate.sourceRawIdsByEffective,
                        rawChunkByEffective: &aggregate.sourceRawChunkByEffective)
             }
@@ -404,19 +400,15 @@ final class DemoConversationBubbleAssembler {
                 aggregate.sentenceTranslation.update(text: text, id: event.chunkId, isFinal: event.isFinal)
             } else if translationAssemblyMode == .offlineCumulative {
                 updateOfflineCumulativeTranslation(event, aggregate: &aggregate)
-            } else {
-                var ignoredActivePartialSegmentID: Int?
+            } else if let chunkID = normalizedChunkId(event.chunkId) {
                 update(segmentText: event.text,
                        isFinal: event.isFinal,
-                       sessionId: event.sessionId,
-                       chunkId: event.chunkId,
-                       coalesceUnchunkedPartials: false,
-                       activePartialSegmentID: &ignoredActivePartialSegmentID,
+                       segmentID: chunkID,
+                       rawSessionID: event.sessionId,
+                       rawChunkID: chunkID,
+                       activeSegmentID: &aggregate.activeTranslatedSegmentID,
                        sessionOrder: &aggregate.translatedSessionOrder,
                        segments: &aggregate.translatedBySession,
-                       sessionAliases: &aggregate.translatedSessionAlias,
-                       sessionAliasOrder: &aggregate.translatedSessionAliasOrder,
-                       chunkAliases: &aggregate.translatedChunkAlias,
                        rawIdsByEffective: &aggregate.translatedRawIdsByEffective,
                        rawChunkByEffective: &aggregate.translatedRawChunkByEffective)
             }
@@ -492,9 +484,7 @@ final class DemoConversationBubbleAssembler {
         "\(bubbleId)_\(lane.rawValue)"
     }
 
-    /// 取本 aggregate 的组装结果:contentVersion 与 isActiveBubble 均命中缓存则直接复用,
-    /// 否则重算 composeText/composeSegments(含 O(n²) LCS/overlap)并写回缓存。
-    /// 使"全量气泡 × O(n²)/次"降为"仅变更气泡重算",消除长跑随文本长度平方放大的 CPU 占用。
+    /// 取本 aggregate 的组装结果；内容与活跃态未变时直接复用缓存。
     private func resolveComposed(_ aggregate: inout BubbleAggregate, isActiveBubble: Bool) -> ComposedResult {
         if aggregate.cachedVersion == aggregate.contentVersion, aggregate.cachedIsActive == isActiveBubble {
             return ComposedResult(sourceText: aggregate.cachedSourceText,
@@ -603,74 +593,46 @@ final class DemoConversationBubbleAssembler {
 
     private func update(segmentText: String?,
                         isFinal: Bool,
-                        sessionId: Int,
-                        chunkId: String?,
-                        coalesceUnchunkedPartials: Bool,
-                        activePartialSegmentID: inout Int?,
-                        sessionOrder: inout [Int],
-                        segments: inout [Int: SessionSegment],
-                        sessionAliases: inout [Int: Int],
-                        sessionAliasOrder: inout [Int],
-                        chunkAliases: inout [String: Int],
-                        rawIdsByEffective: inout [Int: Set<Int>],
-                        rawChunkByEffective: inout [Int: Set<String>]) {
+                        segmentID: String,
+                        rawSessionID: Int,
+                        rawChunkID: String?,
+                        activeSegmentID: inout String?,
+                        sessionOrder: inout [String],
+                        segments: inout [String: SessionSegment],
+                        rawIdsByEffective: inout [String: Set<Int>],
+                        rawChunkByEffective: inout [String: Set<String>]) {
         let text = (segmentText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty && isFinal == false { return }
-        let normalizedChunk = normalizedChunkId(chunkId)
-        let effectiveSessionId: Int
-        if let chunkKey = normalizedChunk {
-            if let aliasedSessionId = chunkAliases[chunkKey] {
-                effectiveSessionId = aliasedSessionId
-            } else {
-                let newSessionId = nextSyntheticSessionId(segments)
-                chunkAliases[chunkKey] = newSessionId
-                effectiveSessionId = newSessionId
+        guard segmentID.isEmpty == false else { return }
+
+        let old = segments[segmentID]
+        if let old {
+            // final 一经接收即不可变；暂停段只能由它自己的 final 确认，不能再被 partial 改写。
+            if old.state == .finalized || (old.state == .suspendedPartial && isFinal == false) {
+                return
             }
-        } else if coalesceUnchunkedPartials,
-                  let activeSegmentID = activePartialSegmentID,
-                  segments[activeSegmentID]?.isFinal == false {
-            effectiveSessionId = activeSegmentID
         } else {
-            effectiveSessionId = sessionAliases[sessionId] ?? sessionId
-        }
-        if sessionOrder.contains(effectiveSessionId) == false {
-            sessionOrder.append(effectiveSessionId)
-        }
-        let old = segments[effectiveSessionId]
-        if let old, old.isFinal, text.isEmpty == false, isIncrementalTransition(old: old.text, new: text) == false {
-            let newSessionId = nextSyntheticSessionId(segments)
-            sessionOrder.append(newSessionId)
-            segments[newSessionId] = SessionSegment(text: text, isFinal: isFinal)
-            setSessionAlias(sessionId,
-                            effectiveSessionId: newSessionId,
-                            aliases: &sessionAliases,
-                            aliasOrder: &sessionAliasOrder)
-            updateRawSessionIDs(sessionId,
-                                effectiveSessionId: newSessionId,
-                                coalesceUnchunkedPartials: coalesceUnchunkedPartials,
-                                normalizedChunk: normalizedChunk,
-                                storage: &rawIdsByEffective)
-            if let normalizedChunk { rawChunkByEffective[newSessionId, default: []].insert(normalizedChunk) }
-            if coalesceUnchunkedPartials, normalizedChunk == nil {
-                activePartialSegmentID = isFinal ? nil : newSessionId
+            // 新 session/chunk 到来时，原 active partial 暂停。随后若它的 final 迟到，
+            // 仍可回写该段，但不会影响当前活跃段。
+            if let activeID = activeSegmentID,
+               let active = segments[activeID],
+               active.state == .activePartial {
+                segments[activeID] = SessionSegment(text: active.text, state: .suspendedPartial)
             }
-            return
+            activeSegmentID = nil
+            sessionOrder.append(segmentID)
         }
-        let mergedText = resolveIncrementalText(old: old?.text ?? "", new: text)
-        let finalValue = (old?.isFinal ?? false) || isFinal
-        segments[effectiveSessionId] = SessionSegment(text: mergedText, isFinal: finalValue)
-        setSessionAlias(sessionId,
-                        effectiveSessionId: effectiveSessionId,
-                        aliases: &sessionAliases,
-                        aliasOrder: &sessionAliasOrder)
-        updateRawSessionIDs(sessionId,
-                            effectiveSessionId: effectiveSessionId,
-                            coalesceUnchunkedPartials: coalesceUnchunkedPartials,
-                            normalizedChunk: normalizedChunk,
-                            storage: &rawIdsByEffective)
-        if let normalizedChunk { rawChunkByEffective[effectiveSessionId, default: []].insert(normalizedChunk) }
-        if coalesceUnchunkedPartials, normalizedChunk == nil {
-            activePartialSegmentID = finalValue ? nil : effectiveSessionId
+
+        // 空 final 只收口当前段，保留已展示的 partial，避免气泡内容被清空。
+        let finalText = isFinal && text.isEmpty ? old?.text ?? "" : text
+        let nextState: SegmentState = isFinal ? .finalized : .activePartial
+        segments[segmentID] = SessionSegment(text: finalText, state: nextState)
+        rawIdsByEffective[segmentID, default: []].insert(rawSessionID)
+        if let rawChunkID { rawChunkByEffective[segmentID, default: []].insert(rawChunkID) }
+        if isFinal {
+            if activeSegmentID == segmentID { activeSegmentID = nil }
+        } else {
+            activeSegmentID = segmentID
         }
     }
 
@@ -787,54 +749,26 @@ final class DemoConversationBubbleAssembler {
         return Int64(chunkId)
     }
 
-    /// 更新服务端 session 到展示分段的别名，并以固定窗口限制长跑 partial 的历史引用。
-    private func setSessionAlias(_ sessionId: Int,
-                                 effectiveSessionId: Int,
-                                 aliases: inout [Int: Int],
-                                 aliasOrder: inout [Int]) {
-        if aliases[sessionId] == nil {
-            aliasOrder.append(sessionId)
-        }
-        aliases[sessionId] = effectiveSessionId
-        while aliasOrder.count > Self.maxSessionAliasesPerBubble {
-            let expiredSessionId = aliasOrder.removeFirst()
-            aliases.removeValue(forKey: expiredSessionId)
-        }
-    }
-
-    /// 无 chunkId 的 ASR partial 仅需当前 session 用于高亮；保留历史 ID 会造成单气泡内存线性增长。
-    private func updateRawSessionIDs(_ sessionId: Int,
-                                     effectiveSessionId: Int,
-                                     coalesceUnchunkedPartials: Bool,
-                                     normalizedChunk: String?,
-                                     storage: inout [Int: Set<Int>]) {
-        if coalesceUnchunkedPartials, normalizedChunk == nil {
-            storage[effectiveSessionId] = [sessionId]
-        } else {
-            storage[effectiveSessionId, default: []].insert(sessionId)
-        }
-    }
-
     private func normalizedChunkId(_ chunkId: String?) -> String? {
         let normalized = (chunkId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return normalized.isEmpty ? nil : normalized
     }
 
     /// 按 session 顺序产出独立展示片段（不做跨 session 合并去重），用于按 session/chunk 着色。
-    private func composeSegments(order: [Int],
-                                 segments: [Int: SessionSegment],
-                                 rawIds: [Int: Set<Int>],
-                                 rawChunks: [Int: Set<String>],
+    private func composeSegments(order: [String],
+                                 segments: [String: SessionSegment],
+                                 rawIds: [String: Set<Int>],
+                                 rawChunks: [String: Set<String>],
                                  isActiveBubble: Bool) -> [DemoConversationDisplaySegment] {
         var result: [DemoConversationDisplaySegment] = []
         var latestIsFinal = true
-        for sessionId in order {
-            guard let segment = segments[sessionId] else { continue }
+        for segmentID in order {
+            guard let segment = segments[segmentID] else { continue }
             let normalized = normalizedDisplayText(segment.text, isFinal: segment.isFinal)
             guard normalized.isEmpty == false else { continue }
             result.append(DemoConversationDisplaySegment(text: normalized,
-                                                         rawSessionIds: rawIds[sessionId] ?? [sessionId],
-                                                         rawChunkIds: rawChunks[sessionId] ?? []))
+                                                         rawSessionIds: rawIds[segmentID] ?? [],
+                                                         rawChunkIds: rawChunks[segmentID] ?? []))
             latestIsFinal = segment.isFinal
         }
         guard result.isEmpty == false else { return [] }
@@ -853,80 +787,22 @@ final class DemoConversationBubbleAssembler {
                                        isHighlighted: segment.isHighlighted)
     }
 
-    private func composeText(order: [Int], segments: [Int: SessionSegment], isActiveBubble: Bool) -> String {
+    private func composeText(order: [String], segments: [String: SessionSegment], isActiveBubble: Bool) -> String {
         var orderedTexts: [String] = []
         var latestIsFinal = true
-        for sessionId in order {
-            guard let segment = segments[sessionId] else { continue }
+        for segmentID in order {
+            guard let segment = segments[segmentID] else { continue }
             let text = normalizedDisplayText(segment.text, isFinal: segment.isFinal)
             guard text.isEmpty == false else { continue }
             orderedTexts.append(text)
             latestIsFinal = segment.isFinal
         }
         guard orderedTexts.isEmpty == false else { return "" }
-        var merged = orderedTexts[0]
-        if orderedTexts.count > 1 {
-            for idx in 1..<orderedTexts.count {
-                merged = mergeCumulativeText(merged, orderedTexts[idx])
-            }
-        }
+        let merged = orderedTexts.joined(separator: " ")
         if latestIsFinal || isActiveBubble == false {
             return removeTrailingEllipsis(merged)
         }
         return appendEllipsisIfNeeded(merged)
-    }
-
-    private func resolveIncrementalText(old: String, new: String) -> String {
-        let lhs = old.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rhs = new.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard rhs.isEmpty == false else { return lhs }
-        guard lhs.isEmpty == false else { return rhs }
-        if shouldPreferRightInUpdate(lhs: lhs, rhs: rhs) { return rhs }
-        if shouldPreferLeftInUpdate(lhs: lhs, rhs: rhs) { return lhs }
-        return rhs
-    }
-
-    private func mergeCumulativeText(_ lhsRaw: String, _ rhsRaw: String) -> String {
-        let lhs = lhsRaw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rhs = rhsRaw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard lhs.isEmpty == false else { return rhs }
-        guard rhs.isEmpty == false else { return lhs }
-        if shouldPreferRightInMerge(lhs: lhs, rhs: rhs) { return rhs }
-        if shouldPreferLeftInMerge(lhs: lhs, rhs: rhs) { return lhs }
-        let overlap = longestOverlap(lhs, rhs)
-        if overlap > 0 {
-            let start = rhs.index(rhs.startIndex, offsetBy: overlap)
-            return lhs + rhs[start...]
-        }
-        let similarity = normalizedSimilarity(lhs, rhs)
-        if similarity >= 0.78 {
-            return rhs.count >= lhs.count ? rhs : lhs
-        }
-        return lhs + " " + rhs
-    }
-
-    private func longestOverlap(_ lhs: String, _ rhs: String) -> Int {
-        // 逐位比较取代 lhs[...] == rhs[...] 的 Substring 相等,不分配子串。
-        // 与原实现同阶但常数与内存分配大幅降低,对齐 Android(regionMatches);
-        // 新闻联播超长句下 mergeCumulativeText 高频调用,子串分配是发烫的次要来源。
-        let a = Array(lhs)
-        let b = Array(rhs)
-        let maxCount = min(a.count, b.count)
-        guard maxCount > 0 else { return 0 }
-        for k in stride(from: maxCount, through: 1, by: -1) {
-            var matched = true
-            let lhsOffset = a.count - k
-            var i = 0
-            while i < k {
-                if a[lhsOffset + i] != b[i] {
-                    matched = false
-                    break
-                }
-                i += 1
-            }
-            if matched { return k }
-        }
-        return 0
     }
 
     private func appendEllipsisIfNeeded(_ text: String) -> String {
@@ -953,117 +829,6 @@ final class DemoConversationBubbleAssembler {
         return normalized
     }
 
-    private func isIncrementalTransition(old: String, new: String) -> Bool {
-        let lhs = old.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rhs = new.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard lhs.isEmpty == false, rhs.isEmpty == false else { return false }
-        if shouldPreferRightInUpdate(lhs: lhs, rhs: rhs) { return true }
-        if shouldPreferLeftInUpdate(lhs: lhs, rhs: rhs) { return true }
-        if normalizedSimilarity(lhs, rhs) >= 0.70 { return true }
-        return false
-    }
-
-    private func nextSyntheticSessionId(_ segments: [Int: SessionSegment]) -> Int {
-        var id = -1
-        while segments[id] != nil {
-            id -= 1
-        }
-        return id
-    }
-
-    private func shouldPreferRightInUpdate(lhs: String, rhs: String) -> Bool {
-        if lhs == rhs { return true }
-        if rhs.hasPrefix(lhs) || rhs.contains(lhs) { return true }
-        let lhsKey = normalizeCompareKey(lhs)
-        let rhsKey = normalizeCompareKey(rhs)
-        if lhsKey.isEmpty || rhsKey.isEmpty { return false }
-        if rhsKey == lhsKey { return true }
-        if rhsKey.hasPrefix(lhsKey) || rhsKey.contains(lhsKey) { return true }
-        if normalizedSimilarity(lhs, rhs) >= 0.88 && rhs.count >= lhs.count { return true }
-        return false
-    }
-
-    private func shouldPreferLeftInUpdate(lhs: String, rhs: String) -> Bool {
-        if lhs.hasPrefix(rhs) || lhs.contains(rhs) { return true }
-        let lhsKey = normalizeCompareKey(lhs)
-        let rhsKey = normalizeCompareKey(rhs)
-        if lhsKey.isEmpty || rhsKey.isEmpty { return false }
-        if lhsKey.hasPrefix(rhsKey) || lhsKey.contains(rhsKey) { return true }
-        if normalizedSimilarity(lhs, rhs) >= 0.88 && lhs.count > rhs.count { return true }
-        return false
-    }
-
-    private func shouldPreferRightInMerge(lhs: String, rhs: String) -> Bool {
-        if lhs == rhs { return false }
-        if rhs.hasPrefix(lhs) || rhs.contains(lhs) { return true }
-        let lhsKey = normalizeCompareKey(lhs)
-        let rhsKey = normalizeCompareKey(rhs)
-        if lhsKey.isEmpty || rhsKey.isEmpty { return false }
-        if rhsKey == lhsKey { return rhs.count >= lhs.count }
-        if rhsKey.hasPrefix(lhsKey) || rhsKey.contains(lhsKey) { return true }
-        return false
-    }
-
-    private func shouldPreferLeftInMerge(lhs: String, rhs: String) -> Bool {
-        if lhs.hasPrefix(rhs) || lhs.contains(rhs) { return true }
-        let lhsKey = normalizeCompareKey(lhs)
-        let rhsKey = normalizeCompareKey(rhs)
-        if lhsKey.isEmpty || rhsKey.isEmpty { return false }
-        if lhsKey == rhsKey { return lhs.count > rhs.count }
-        if lhsKey.hasPrefix(rhsKey) || lhsKey.contains(rhsKey) { return true }
-        return false
-    }
-
-    private func normalizeCompareKey(_ text: String) -> String {
-        let scalars = text.unicodeScalars.filter { scalar in
-            if CharacterSet.whitespacesAndNewlines.contains(scalar) { return false }
-            if CharacterSet.punctuationCharacters.contains(scalar) { return false }
-            if CharacterSet.symbols.contains(scalar) { return false }
-            return true
-        }
-        return String(String.UnicodeScalarView(scalars)).lowercased()
-    }
-
-    private func normalizedSimilarity(_ lhs: String, _ rhs: String) -> Double {
-        let lhsKey = normalizeCompareKey(lhs)
-        let rhsKey = normalizeCompareKey(rhs)
-        guard lhsKey.isEmpty == false, rhsKey.isEmpty == false else { return 0 }
-        let common = longestCommonSubstringLength(lhsKey, rhsKey)
-        let denominator = max(lhsKey.count, rhsKey.count)
-        guard denominator > 0 else { return 0 }
-        return Double(common) / Double(denominator)
-    }
-
-    private func longestCommonSubstringLength(_ lhs: String, _ rhs: String) -> Int {
-        let a = Array(lhs)
-        let b = Array(rhs)
-        guard a.isEmpty == false, b.isEmpty == false else { return 0 }
-        // 一维滚动数组:空间 O(min) 而非二维 O(a×b)。
-        // 新闻联播超长句(500+ 字)下,二维 DP 每次分配 ~25 万个 Int 的嵌套数组,
-        // partial 高频重算是设备发烫根因之一(bug 7056277420)。dp[j] 表示以 a[i-1]、b[j-1]
-        // 结尾的最长公共子串长度;按 j 从大到小更新,diagUpLeft 保存上一行 dp[j-1](左上角)。
-        let inner = b.count
-        var dp = Array(repeating: 0, count: inner + 1)
-        var best = 0
-        var i = 1
-        while i <= a.count {
-            var diagUpLeft = 0 // dp[i-1][j-1]
-            var j = 1
-            while j <= inner {
-                let temp = dp[j] // 保存 dp[i-1][j],作为下一列的左上角
-                if a[i - 1] == b[j - 1] {
-                    dp[j] = diagUpLeft + 1
-                    if dp[j] > best { best = dp[j] }
-                } else {
-                    dp[j] = 0
-                }
-                diagUpLeft = temp
-                j += 1
-            }
-            i += 1
-        }
-        return best
-    }
 }
 
 /// 把气泡的 meta 行 + 源语言/目标语言分段文本渲染为带颜色的富文本。
