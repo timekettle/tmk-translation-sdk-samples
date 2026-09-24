@@ -392,7 +392,7 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
         if (segmentId.isEmpty() || (text.isEmpty() && !isFinal)) return activeSegmentId
 
         val old = segments[segmentId]
-        if (old?.state == SegmentState.FINALIZED ||
+        if ((old?.state == SegmentState.FINALIZED && !isFinal) ||
             (old?.state == SegmentState.SUSPENDED_PARTIAL && !isFinal)
         ) {
             return activeSegmentId

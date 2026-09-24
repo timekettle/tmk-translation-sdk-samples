@@ -266,6 +266,8 @@ final class DemoConversationBubbleAssembler {
         var translatedSessionOrder: [String] = []
         var sourceBySession: [String: SessionSegment] = [:]
         var translatedBySession: [String: SessionSegment] = [:]
+        /// 同一 session 的混合回调获得 chunk 后，后续无 chunk 事件沿用该身份。
+        var translatedChunkBySession: [Int: String] = [:]
         /// 每个通道同一时刻仅有一个可持续替换的 partial；新身份到来时旧 partial 暂停。
         var activeSourceSegmentID: String?
         var activeTranslatedSegmentID: String?
@@ -400,10 +402,27 @@ final class DemoConversationBubbleAssembler {
                 aggregate.sentenceTranslation.update(text: text, id: event.chunkId, isFinal: event.isFinal)
             } else if translationAssemblyMode == .offlineCumulative {
                 updateOfflineCumulativeTranslation(event, aggregate: &aggregate)
-            } else if let chunkID = normalizedChunkId(event.chunkId) {
+            } else {
+                let chunkID = normalizedChunkId(event.chunkId)
+                let segmentID: String
+                if let chunkID {
+                    reconcileUnchunkedTranslation(sessionID: event.sessionId,
+                                                  chunkID: chunkID,
+                                                  isFinal: event.isFinal,
+                                                  aggregate: &aggregate)
+                    segmentID = "chunk:\(chunkID)"
+                    aggregate.translatedChunkBySession[event.sessionId] = segmentID
+                } else if let chunkKey = aggregate.translatedChunkBySession[event.sessionId] {
+                    // 身份已切到 chunk 后，无 chunk 的迟到 partial 不能重新建 session 段。
+                    guard event.isFinal,
+                          aggregate.translatedBySession[chunkKey]?.state != .finalized else { break }
+                    segmentID = chunkKey
+                } else {
+                    segmentID = "session:\(event.sessionId)"
+                }
                 update(segmentText: event.text,
                        isFinal: event.isFinal,
-                       segmentID: chunkID,
+                       segmentID: segmentID,
                        rawSessionID: event.sessionId,
                        rawChunkID: chunkID,
                        activeSegmentID: &aggregate.activeTranslatedSegmentID,
@@ -591,6 +610,39 @@ final class DemoConversationBubbleAssembler {
                                               bDuration: bDuration)
     }
 
+    /// 无 chunk 结果后续获得 chunk 身份时，保留原分段位置并由本次事件更新。
+    private func reconcileUnchunkedTranslation(sessionID: Int,
+                                               chunkID: String,
+                                               isFinal: Bool,
+                                               aggregate: inout BubbleAggregate) {
+        let sessionKey = "session:\(sessionID)"
+        let chunkKey = "chunk:\(chunkID)"
+        guard let fallback = aggregate.translatedBySession[sessionKey],
+              fallback.state != .finalized || isFinal else { return }
+
+        if aggregate.translatedBySession[chunkKey] == nil {
+            aggregate.translatedBySession[chunkKey] = fallback
+            if let index = aggregate.translatedSessionOrder.firstIndex(of: sessionKey) {
+                aggregate.translatedSessionOrder[index] = chunkKey
+            }
+            aggregate.translatedRawIdsByEffective[chunkKey] =
+                aggregate.translatedRawIdsByEffective.removeValue(forKey: sessionKey)
+            aggregate.translatedRawChunkByEffective[chunkKey] =
+                aggregate.translatedRawChunkByEffective.removeValue(forKey: sessionKey)
+            if aggregate.activeTranslatedSegmentID == sessionKey {
+                aggregate.activeTranslatedSegmentID = chunkKey
+            }
+        } else {
+            aggregate.translatedSessionOrder.removeAll { $0 == sessionKey }
+            aggregate.translatedRawIdsByEffective.removeValue(forKey: sessionKey)
+            aggregate.translatedRawChunkByEffective.removeValue(forKey: sessionKey)
+            if aggregate.activeTranslatedSegmentID == sessionKey {
+                aggregate.activeTranslatedSegmentID = nil
+            }
+        }
+        aggregate.translatedBySession.removeValue(forKey: sessionKey)
+    }
+
     private func update(segmentText: String?,
                         isFinal: Bool,
                         segmentID: String,
@@ -607,8 +659,9 @@ final class DemoConversationBubbleAssembler {
 
         let old = segments[segmentID]
         if let old {
-            // final 一经接收即不可变；暂停段只能由它自己的 final 确认，不能再被 partial 改写。
-            if old.state == .finalized || (old.state == .suspendedPartial && isFinal == false) {
+            // 已完成段仅拒绝迟到 partial；同段的修正 final 仍需覆盖旧文本。
+            if (old.state == .finalized && isFinal == false) ||
+                (old.state == .suspendedPartial && isFinal == false) {
                 return
             }
         } else {
