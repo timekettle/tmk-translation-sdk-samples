@@ -123,6 +123,12 @@ class Offline1v1ViewModel @Inject constructor(
     private val _isStarting = MutableStateFlow(false)
     val isStarting: StateFlow<Boolean> = _isStarting.asStateFlow()
 
+    private val _offlineBubbleLengthSplitEnabled = MutableStateFlow(false)
+    val offlineBubbleLengthSplitEnabled: StateFlow<Boolean> = _offlineBubbleLengthSplitEnabled.asStateFlow()
+
+    private val _offlineBubbleLengthSplitThreshold = MutableStateFlow(60)
+    val offlineBubbleLengthSplitThreshold: StateFlow<Int> = _offlineBubbleLengthSplitThreshold.asStateFlow()
+
     private val _conversationErrorPrompt = MutableStateFlow<OnlineConversationErrorPrompt?>(null)
     val conversationErrorPrompt: StateFlow<OnlineConversationErrorPrompt?> = _conversationErrorPrompt.asStateFlow()
 
@@ -138,7 +144,10 @@ class Offline1v1ViewModel @Inject constructor(
     private val _logMessages = MutableStateFlow<List<String>>(emptyList())
     val logMessages: StateFlow<List<String>> = _logMessages.asStateFlow()
 
-    private val bubbleAssembler = DemoConversationBubbleAssembler(maxRows = DEFAULT_BUBBLE_RETENTION_LIMIT)
+    private val bubbleAssembler = DemoConversationBubbleAssembler(
+        maxRows = DEFAULT_BUBBLE_RETENTION_LIMIT,
+        translationAssemblyMode = DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE,
+    )
     private val _bubbleRetentionLimit = MutableStateFlow(DEFAULT_BUBBLE_RETENTION_LIMIT)
     val bubbleRetentionLimit: StateFlow<Int> = _bubbleRetentionLimit.asStateFlow()
     private val _bubbles = MutableStateFlow<List<DemoConversationBubbleSnapshot>>(emptyList())
@@ -522,13 +531,19 @@ class Offline1v1ViewModel @Inject constructor(
         }
     }
 
-    private fun buildSpeechMetadata(channel: Int): Pair<ByteArray, String> {
+    private fun buildSpeechMetadata(channel: Int, isSpeechSegmentStart: Boolean = false): Pair<ByteArray, String> {
         val now = java.util.Calendar.getInstance()
         val hour = now.get(java.util.Calendar.HOUR_OF_DAY)
         val minute = now.get(java.util.Calendar.MINUTE)
         val second = now.get(java.util.Calendar.SECOND)
-        // 离线引擎用第五字节 1 识别 VAD 或循环 PCM 的语音段起点。
-        val metadata = byteArrayOf(channel.toByte(), hour.toByte(), minute.toByte(), second.toByte(), 1)
+        // 第五字节仅离线引擎消费：1 表示 VAD/synthetic speech-start，缺失保持历史 trace-only 协议。
+        val metadata = byteArrayOf(
+            channel.toByte(),
+            hour.toByte(),
+            minute.toByte(),
+            second.toByte(),
+            if (isSpeechSegmentStart) 1 else 0,
+        )
         val speechMarker = String.format(java.util.Locale.US, "%d%02d%02d%02d", channel, hour, minute, second)
         return metadata to speechMarker
     }
@@ -819,6 +834,8 @@ class Offline1v1ViewModel @Inject constructor(
             .setChannelScenario(Scenario.ONE_TO_ONE)
             .setSourceLang(_sourceLang.value)
             .setTargetLang(_targetLang.value)
+            .setOfflineBubbleLengthSplitEnabled(_offlineBubbleLengthSplitEnabled.value)
+                .setOfflineBubbleLengthSplitThreshold(_offlineBubbleLengthSplitThreshold.value)
             .build()
         TmkTranslationSDK.createTmkTranslationRoom(roomConfig, object : CreateRoomCallback {
             override fun onSuccess(room: TmkTranslationRoom) {
@@ -928,6 +945,35 @@ class Offline1v1ViewModel @Inject constructor(
         initSDK()
     }
 
+    fun setOfflineBubbleLengthSplitEnabled(enabled: Boolean) {
+        if (_offlineBubbleLengthSplitEnabled.value == enabled) return
+        _offlineBubbleLengthSplitEnabled.value = enabled
+        clearConversation()
+        when {
+            // 创建中的 Room 已冻结旧配置，必须取消并重建，不能只更新界面值。
+            _isStarting.value || channel != null -> {
+                addLog("超过字符阈值分气泡已${if (enabled) "开启" else "关闭"}，正在重启离线通道...")
+                recreateChannelForModeChange()
+            }
+            else -> addLog("超过字符阈值分气泡已${if (enabled) "开启" else "关闭"}，将在创建离线通道时生效")
+        }
+    }
+
+    fun setOfflineBubbleLengthSplitThreshold(units: Int) {
+        val value = units.coerceIn(10, 500)
+        if (_offlineBubbleLengthSplitThreshold.value == value) return
+        _offlineBubbleLengthSplitThreshold.value = value
+        clearConversation()
+        when {
+            // releaseChannel 同时取消待建 Room/Channel，新一轮读取最新阈值。
+            _isStarting.value || channel != null -> {
+                addLog("分泡单位已设为 $value，正在重启离线通道...")
+                recreateChannelForModeChange()
+            }
+            else -> addLog("分泡单位已设为 $value，将在创建离线通道时生效")
+        }
+    }
+
     fun dismissConversationErrorPrompt() {
         _conversationErrorPrompt.value = null
     }
@@ -958,7 +1004,8 @@ class Offline1v1ViewModel @Inject constructor(
      * 切换前在收听则重建就绪后自动恢复收听。
      */
     private fun recreateChannelForModeChange() {
-        val wasListening = _isStarted.value
+        // 连续修改设置时，上一轮重建尚未恢复收听，仍须保留原来的恢复意图。
+        val wasListening = _isStarted.value || pendingAutoStartAfterRecreate
         // 释放旧通道与采集/播放,但保留已鉴权/模型就绪状态,不走 stop() 的 released=true 全量收尾。
         stopRecording()
         ttsCoordinator.setActive(false)
@@ -1049,7 +1096,7 @@ class Offline1v1ViewModel @Inject constructor(
             val ch = normalizeChannel(r?.extraData?.get("channel"))
             val src = r?.srcCode?.takeIf { it.isNotEmpty() } ?: _sourceLang.value
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
-            DemoConversationEventAdapter.makeRecognizedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
+            DemoConversationEventAdapter.makeOfflineRecognizedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
             if (!isFinal) return
             val now = System.currentTimeMillis()
@@ -1066,7 +1113,7 @@ class Offline1v1ViewModel @Inject constructor(
             val ch = normalizeChannel(r?.extraData?.get("channel"))
             val src = r?.srcCode?.takeIf { it.isNotEmpty() } ?: _sourceLang.value
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
-            DemoConversationEventAdapter.makeTranslatedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
+            DemoConversationEventAdapter.makeOfflineTranslatedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
             if (!isFinal) return
             val now = System.currentTimeMillis()
@@ -1106,7 +1153,7 @@ class Offline1v1ViewModel @Inject constructor(
                 val bubbleId = result.bubbleId.takeIf { it.isNotBlank() }
                     ?: result.extraData?.get("bubble_id")?.toString()?.takeIf { it.isNotBlank() }
                     ?: return
-                val affectedRows = bubbleAssembler.markBubbleEnded(bubbleId)
+                val affectedRows = bubbleAssembler.markBubbleEnded(bubbleId, result.extraData?.get("end_reason")?.toString() ?: "other")
                 Log.d(TAG, DemoTmkResultLogFormatter.makeBubbleEndLine("Offline1V1", result, affectedRows.size))
                 publishBubbles()
                 return
@@ -1145,7 +1192,7 @@ class Offline1v1ViewModel @Inject constructor(
         rightVadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
             setCallback(object : VadDetector.Callback {
                 override fun onVadStart() {
-                    val (metadata, speechMarker) = buildSpeechMetadata(channel = 2)
+                    val (metadata, speechMarker) = buildSpeechMetadata(channel = 2, isSpeechSegmentStart = true)
                     pendingRightMetadata = metadata
                     rightSpeechMarker = speechMarker
                     rightVadStartMs = System.currentTimeMillis() - (rightVadDetector?.getVadBeginDurationMs() ?: 0)
@@ -1227,7 +1274,7 @@ class Offline1v1ViewModel @Inject constructor(
     }
 
     private fun buildLeftFileCycleMetadata(): ByteArray {
-        val (metadata, speechMarker) = buildSpeechMetadata(channel = 1)
+        val (metadata, speechMarker) = buildSpeechMetadata(channel = 1, isSpeechSegmentStart = true)
         leftSpeechMarker = speechMarker
         leftVadStartMs = System.currentTimeMillis()
         leftFirstAsrMs = 0

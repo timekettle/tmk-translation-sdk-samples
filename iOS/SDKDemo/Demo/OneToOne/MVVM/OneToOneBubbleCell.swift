@@ -42,6 +42,7 @@ final class OneToOneBubbleCell: UITableViewCell {
                    translatedSegments: [DemoConversationDisplaySegment],
                    isRightBubble: Bool,
                    isBubbleEnded: Bool,
+                   bubbleEndReason: String? = nil,
                    timeRangeText: String? = nil) {
         contentLabel.attributedText = DemoConversationSegmentRenderer.makeBubbleText(
             metaText: metaText,
@@ -55,7 +56,7 @@ final class OneToOneBubbleCell: UITableViewCell {
             timeRangeText: timeRangeText
         )
         bubbleView.layer.borderWidth = isBubbleEnded ? 1 : 0
-        bubbleView.layer.borderColor = bubbleBorderColor(isRightBubble: isRightBubble, isBubbleEnded: isBubbleEnded)
+        bubbleView.layer.borderColor = bubbleBorderColor(isRightBubble: isRightBubble, reason: bubbleEndReason)
         bubbleView.snp.remakeConstraints { make in
             make.top.bottom.equalToSuperview().inset(6)
             make.width.lessThanOrEqualTo(contentView.snp.width).multipliedBy(0.78)
@@ -69,9 +70,14 @@ final class OneToOneBubbleCell: UITableViewCell {
         }
     }
 
-    private func bubbleBorderColor(isRightBubble: Bool, isBubbleEnded: Bool) -> CGColor? {
-        guard isBubbleEnded else { return nil }
-        let color = isRightBubble ? UIColor.systemBlue : UIColor.systemGreen
+    private func bubbleBorderColor(isRightBubble: Bool, reason: String?) -> CGColor? {
+        let color: UIColor
+        switch reason {
+        case "length": color = .systemYellow
+        case "error": color = .systemRed
+        case nil, "natural", "native_final", "empty_final": color = isRightBubble ? .systemBlue : .systemGreen
+        default: color = .systemPurple
+        }
         return color.cgColor
     }
 }

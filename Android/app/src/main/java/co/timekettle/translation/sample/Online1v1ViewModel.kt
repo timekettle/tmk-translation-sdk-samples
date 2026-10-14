@@ -28,6 +28,7 @@ import co.timekettle.translation.enums.TmkOnlineTranslateEngine
 import co.timekettle.translation.enums.TmkSensitiveWordRedactionOption
 import co.timekettle.translation.enums.TmkTranslateDeliveryMode
 import co.timekettle.translation.enums.TranslationMode
+import co.timekettle.sdk.common.enums.TransModeType
 import co.timekettle.translation.listener.ActionCallback
 import co.timekettle.translation.listener.AuthCallback
 import co.timekettle.translation.listener.CreateChannelCallback
@@ -656,6 +657,7 @@ class Online1v1ViewModel @Inject constructor(
         val builder = TmkTransChannelConfig.Builder()
             .setMode(TranslationMode.ONLINE)
             .setScenario(Scenario.ONE_TO_ONE)
+            .setTransModeType(TransModeType.ONE_TO_ONE)
             // 在线一对一统一语义:source=右路/对方、target=左路/自己。
             .setSourceLang(channelLanguages.rightLang)
             .setTargetLang(channelLanguages.leftLang)

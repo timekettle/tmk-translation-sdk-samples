@@ -240,7 +240,7 @@ data class DualChannelScreen(
                         "能力：${roomScenarioOption.title}",
                         "下发：${OnlineTranslateModeOption.from(translateMode).title}",
                         "通道：one_to_one/online",
-                        "模式：${co.timekettle.translation.sample.OnlineChannelAudioModeOption.from(audioMode).title}",
+                        "模式：${OnlineChannelAudioModeOption.from(audioMode).title}",
                         "播放：${playbackMode.title}",
                         "采样：配置16000Hz/2ch  采集$captureInfo  回放$playbackInfo",
                         "输入：左声道固定PCM / 右声道麦克风",

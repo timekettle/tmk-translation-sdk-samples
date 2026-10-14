@@ -179,7 +179,7 @@ private extension Offline1V1Controller {
             make.top.equalTo(startListeningButton)
             make.left.equalTo(startListeningButton.snp.right).offset(8)
             make.height.equalTo(startListeningButton)
-            make.right.lessThanOrEqualToSuperview().inset(12)
+            make.right.equalToSuperview().inset(12)
         }
         tableView.snp.makeConstraints { make in
             make.top.equalTo(startListeningButton.snp.bottom).offset(8)
@@ -203,6 +203,9 @@ private extension Offline1V1Controller {
                 presentBubbleRetentionLimitPicker(from: self,
                                                   current: self.viewModel.currentBubbleRetentionLimit(),
                                                   onConfirm: self.viewModel.setBubbleRetentionLimit)
+            },
+            UIAction(title: "气泡设置") { [weak self] _ in
+                self?.showOfflineBubbleSettings()
             },
             UIAction(title: "播放音源") { [weak self] _ in
                 self?.showPlaybackModePicker()
@@ -239,6 +242,20 @@ private extension Offline1V1Controller {
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
         alert.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
         present(alert, animated: true)
+    }
+
+    func showOfflineBubbleSettings() {
+        let controller = OfflineBubbleSettingsViewController(
+            lengthSplitEnabled: viewModel.isOfflineBubbleLengthSplitEnabled(),
+            thresholdUnits: viewModel.offlineBubbleLengthSplitThresholdValue
+        ) { [weak self] enabled in
+            guard let self else { return }
+            self.viewModel.setOfflineBubbleLengthSplitEnabled(enabled)
+            self.refreshSettingsMenu()
+        } onThresholdUnitsChange: { [weak self] units in
+            self?.viewModel.setOfflineBubbleLengthSplitThreshold(units)
+        }
+        present(UINavigationController(rootViewController: controller), animated: true)
     }
 
     /// 翻译模式(partial/stable)选择:UIAlertController(actionSheet),选中项 title 前加"✓ "标记,不显示"当前:xxx"。
@@ -435,7 +452,8 @@ private extension Offline1V1Controller {
                        translatedText: row.translatedText,
                        translatedSegments: row.translatedSegments,
                        isRightBubble: row.lane == .right,
-                       isBubbleEnded: row.isBubbleEnded)
+                       isBubbleEnded: row.isBubbleEnded,
+                       bubbleEndReason: row.bubbleEndReason)
     }
 
     func refreshVisibleCells() {

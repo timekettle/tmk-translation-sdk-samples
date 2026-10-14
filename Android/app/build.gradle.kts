@@ -6,7 +6,7 @@ plugins {
     alias(libs.plugins.hilt.android)
 }
 
-val sampleSdkVersion = providers.gradleProperty("TMK_SDK_VERSION").orElse("1.3.4").get()
+val sampleSdkVersion = providers.gradleProperty("TMK_SDK_VERSION").orElse("1.3.5").get()
 val sampleAppId = providers.environmentVariable("TMK_SAMPLE_APP_ID")
     .orElse(providers.gradleProperty("TMK_SAMPLE_APP_ID"))
     .orElse("")
@@ -58,6 +58,9 @@ android {
             apkOutput.outputFileName = "tmk-translation-sdk-samples-${versionName ?: "1.0.0"}.apk"
         }
     }
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
     buildFeatures {
         compose = true
         buildConfig = true
@@ -91,6 +94,7 @@ dependencies {
     implementation(libs.voyager.transitions)
 
     testImplementation(libs.junit)
+    testImplementation("org.robolectric:robolectric:4.14.1")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

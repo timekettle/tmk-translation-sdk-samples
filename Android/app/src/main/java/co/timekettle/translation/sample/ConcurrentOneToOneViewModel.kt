@@ -23,6 +23,7 @@ import co.timekettle.translation.enums.Scenario
 import co.timekettle.translation.enums.TmkSensitiveWordRedactionOption
 import co.timekettle.translation.enums.TmkTTSAudioCallbackThread
 import co.timekettle.translation.enums.TranslationMode
+import co.timekettle.sdk.common.enums.TransModeType
 import co.timekettle.translation.listener.AuthCallback
 import co.timekettle.translation.listener.CreateChannelCallback
 import co.timekettle.translation.listener.CreateRoomCallback
@@ -429,6 +430,7 @@ class ConcurrentOneToOneViewModel @Inject constructor(
                     .setRoom(room)
                     .setMode(TranslationMode.ONLINE)
                     .setScenario(Scenario.ONE_TO_ONE)
+                    .setTransModeType(TransModeType.ONE_TO_ONE)
                     .setSourceLang(rightLang)
                     .setTargetLang(leftLang)
                     .setSpeakers(listOf(TmkSpeaker(SpeakerChannel.LEFT, profile.leftSpeaker), TmkSpeaker(SpeakerChannel.RIGHT, profile.rightSpeaker)))

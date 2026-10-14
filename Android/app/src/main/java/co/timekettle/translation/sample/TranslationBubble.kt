@@ -32,6 +32,14 @@ private val BubbleEndLeftBorder = Color(0xFF34C759)
 private val BubbleEndRightBorder = Color(0xFF007AFF)
 private val TimeRangeColor = Color(0xFFE8730C) // 橙色:气泡时间段单行,醒目区别于 meta/源/译文
 
+/** 在线无原因时沿用左右配色；离线按结束原因显示诊断边框。 */
+internal fun demoBubbleEndBorderColor(reason: String?, isRight: Boolean): Color = when (reason) {
+    "length" -> Color(0xFFFFCC00)
+    "error" -> Color(0xFFFF3B30)
+    null, "native_final", "natural", "empty_final" -> if (isRight) BubbleEndRightBorder else BubbleEndLeftBorder
+    else -> Color(0xFFAF52DE)
+}
+
 /**
  * 气泡时间段单行文本:仅在收到 bubbleEnd 且已聚合出 offset 时展示。
  * 时间由纳秒换算为秒,保留 3 位小数(到毫秒),形如 `⏱ offset=16.692s duration=1.600s`。
@@ -72,7 +80,7 @@ fun BubbleList(
     }
     LazyColumn(state = listState, modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
-        items(rows.size, key = { index -> "${rows[index].row.sessionId}:${rows[index].row.bubbleId}" }) { index ->
+        items(rows.size, key = { index -> rows[index].itemKey }) { index ->
             BubbleCell(rows[index], metaText?.invoke(rows[index].row))
         }
     }
@@ -89,7 +97,7 @@ private fun BubbleCell(snapshot: DemoConversationBubbleSnapshot, metaText: Strin
         BubbleBg
     }
     val bubbleShape = RoundedCornerShape(14.dp)
-    val endedBorderColor = if (isRight) BubbleEndRightBorder else BubbleEndLeftBorder
+    val endedBorderColor = demoBubbleEndBorderColor(row.bubbleEndReason, isRight)
     val channelLabel = if (metaText != null) {
         null
     } else {
@@ -140,6 +148,7 @@ private fun BubbleCell(snapshot: DemoConversationBubbleSnapshot, metaText: Strin
                         segments = snapshot.translatedSegments,
                         fallbackText = row.translatedText,
                         baseColor = TranslatedColor,
+                        preserveSourceText = false,
                     ),
                     fontSize = 14.sp, lineHeight = 18.sp,
                 )
@@ -166,15 +175,16 @@ private fun buildSegmentedLine(
     segments: List<DemoConversationDisplaySegment>,
     fallbackText: String,
     baseColor: Color,
+    preserveSourceText: Boolean = true,
 ): AnnotatedString = buildAnnotatedString {
     withStyle(SpanStyle(color = baseColor)) { append(label) }
     val nonEmpty = segments.filter { it.text.isNotEmpty() }
     if (nonEmpty.isEmpty()) {
-        withStyle(SpanStyle(color = baseColor)) { append(fallbackText.ifEmpty { "..." }) }
+        withStyle(SpanStyle(color = baseColor)) { append(if (preserveSourceText) fallbackText else fallbackText.ifEmpty { "..." }) }
         return@buildAnnotatedString
     }
     nonEmpty.forEachIndexed { index, segment ->
-        if (index > 0) {
+        if (index > 0 && !preserveSourceText) {
             withStyle(SpanStyle(color = baseColor)) { append(" ") }
         }
         val color = if (segment.isHighlighted) HighlightColor else baseColor

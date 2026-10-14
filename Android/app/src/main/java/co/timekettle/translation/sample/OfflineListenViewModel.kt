@@ -22,6 +22,7 @@ import co.timekettle.translation.enums.TmkRoomScenario
 import co.timekettle.translation.enums.TmkTranslateDeliveryMode
 import co.timekettle.translation.enums.TmkTTSAudioCallbackThread
 import co.timekettle.translation.enums.TranslationMode
+import co.timekettle.sdk.common.enums.TransModeType
 import co.timekettle.translation.listener.ActionCallback
 import co.timekettle.translation.listener.AuthCallback
 import co.timekettle.translation.listener.CreateChannelCallback
@@ -114,6 +115,12 @@ class OfflineListenViewModel @Inject constructor(
     private val _isStarting = MutableStateFlow(false)
     val isStarting: StateFlow<Boolean> = _isStarting.asStateFlow()
 
+    private val _offlineBubbleLengthSplitEnabled = MutableStateFlow(false)
+    val offlineBubbleLengthSplitEnabled: StateFlow<Boolean> = _offlineBubbleLengthSplitEnabled.asStateFlow()
+
+    private val _offlineBubbleLengthSplitThreshold = MutableStateFlow(60)
+    val offlineBubbleLengthSplitThreshold: StateFlow<Int> = _offlineBubbleLengthSplitThreshold.asStateFlow()
+
     private val _conversationErrorPrompt = MutableStateFlow<OnlineConversationErrorPrompt?>(null)
     val conversationErrorPrompt: StateFlow<OnlineConversationErrorPrompt?> = _conversationErrorPrompt.asStateFlow()
 
@@ -129,7 +136,10 @@ class OfflineListenViewModel @Inject constructor(
     private val _logMessages = MutableStateFlow<List<String>>(emptyList())
     val logMessages: StateFlow<List<String>> = _logMessages.asStateFlow()
 
-    private val bubbleAssembler = DemoConversationBubbleAssembler(maxRows = DEFAULT_BUBBLE_RETENTION_LIMIT)
+    private val bubbleAssembler = DemoConversationBubbleAssembler(
+        maxRows = DEFAULT_BUBBLE_RETENTION_LIMIT,
+        translationAssemblyMode = DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE,
+    )
     private val _bubbleRetentionLimit = MutableStateFlow(DEFAULT_BUBBLE_RETENTION_LIMIT)
     val bubbleRetentionLimit: StateFlow<Int> = _bubbleRetentionLimit.asStateFlow()
     private val _bubbles = MutableStateFlow<List<DemoConversationBubbleSnapshot>>(emptyList())
@@ -644,6 +654,8 @@ class OfflineListenViewModel @Inject constructor(
                 .setChannelScenario(Scenario.LISTEN)
                 .setSourceLang(_sourceLang.value)
                 .setTargetLang(_targetLang.value)
+                .setOfflineBubbleLengthSplitEnabled(_offlineBubbleLengthSplitEnabled.value)
+                .setOfflineBubbleLengthSplitThreshold(_offlineBubbleLengthSplitThreshold.value)
                 .build()
             TmkTranslationSDK.createTmkTranslationRoom(roomConfig, object : CreateRoomCallback {
                 override fun onSuccess(room: TmkTranslationRoom) {
@@ -658,6 +670,7 @@ class OfflineListenViewModel @Inject constructor(
                             .setRoom(room)
                             .setMode(TranslationMode.OFFLINE)
                             .setScenario(Scenario.LISTEN)
+                            .setTransModeType(TransModeType.LISTEN)
                             .setSourceLang(_sourceLang.value)
                             .setTargetLang(_targetLang.value)
                             .setSpeakers(listOf(TmkSpeaker(SpeakerChannel.LEFT, _speakerGender.value)))
@@ -766,6 +779,40 @@ class OfflineListenViewModel @Inject constructor(
         stop()
         released = false
         initSDK()
+    }
+
+    fun setOfflineBubbleLengthSplitEnabled(enabled: Boolean) {
+        if (_offlineBubbleLengthSplitEnabled.value == enabled) return
+        _offlineBubbleLengthSplitEnabled.value = enabled
+        clearConversation()
+        when {
+            // 创建中的 Room 已冻结旧配置，必须取消并重建，不能只更新界面值。
+            _isStarting.value || channel != null -> {
+                addLog("超过字符阈值分气泡已${if (enabled) "开启" else "关闭"}，正在重启离线通道...")
+                recreateChannelAfterRuntimeFailure()
+            }
+            else -> addLog("超过字符阈值分气泡已${if (enabled) "开启" else "关闭"}，将在创建离线通道时生效")
+        }
+    }
+
+    fun setOfflineBubbleLengthSplitThreshold(units: Int) {
+        val value = units.coerceIn(10, 500)
+        if (_offlineBubbleLengthSplitThreshold.value == value) return
+        _offlineBubbleLengthSplitThreshold.value = value
+        clearConversation()
+        when {
+            // releaseChannel 同时取消待建 Room/Channel，新一轮读取最新阈值。
+            _isStarting.value || channel != null -> {
+                addLog("分泡单位已设为 $value，正在重启离线通道...")
+                recreateChannelAfterRuntimeFailure()
+            }
+            else -> addLog("分泡单位已设为 $value，将在创建离线通道时生效")
+        }
+    }
+
+    private fun clearConversation() {
+        bubbleAssembler.clear()
+        _bubbles.value = emptyList()
     }
 
     fun dismissConversationErrorPrompt() {
@@ -965,7 +1012,7 @@ class OfflineListenViewModel @Inject constructor(
             val text = r?.data ?: ""
             val src = r?.srcCode?.takeIf { it.isNotEmpty() } ?: _sourceLang.value
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
-            DemoConversationEventAdapter.makeRecognizedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
+            DemoConversationEventAdapter.makeOfflineRecognizedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
             val tid = currentSpeechMarker
             if (isFinal && tid != null && firstAsrMs == 0L) {
@@ -981,7 +1028,7 @@ class OfflineListenViewModel @Inject constructor(
             val text = r?.data ?: ""
             val src = r?.srcCode?.takeIf { it.isNotEmpty() } ?: _sourceLang.value
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
-            DemoConversationEventAdapter.makeTranslatedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
+            DemoConversationEventAdapter.makeOfflineTranslatedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
             publishBubbles()
             val tid = currentSpeechMarker
             if (isFinal && tid != null && firstMtMs == 0L) {
@@ -1020,7 +1067,7 @@ class OfflineListenViewModel @Inject constructor(
                 val bubbleId = result.bubbleId.takeIf { it.isNotBlank() }
                     ?: result.extraData?.get("bubble_id")?.toString()?.takeIf { it.isNotBlank() }
                     ?: return
-                val affectedRows = bubbleAssembler.markBubbleEnded(bubbleId)
+                val affectedRows = bubbleAssembler.markBubbleEnded(bubbleId, result.extraData?.get("end_reason")?.toString() ?: "other")
                 Log.d(TAG, DemoTmkResultLogFormatter.makeBubbleEndLine("OfflineListen", result, affectedRows.size))
                 publishBubbles()
                 return

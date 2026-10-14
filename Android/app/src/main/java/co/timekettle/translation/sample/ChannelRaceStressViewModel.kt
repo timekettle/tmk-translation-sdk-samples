@@ -15,6 +15,7 @@ import co.timekettle.translation.enums.Scenario
 import co.timekettle.translation.enums.TmkOnlineRecognizeEngine
 import co.timekettle.translation.enums.TmkOnlineTranslateEngine
 import co.timekettle.translation.enums.TranslationMode
+import co.timekettle.sdk.common.enums.TransModeType
 import co.timekettle.translation.listener.AuthCallback
 import co.timekettle.translation.listener.CreateChannelCallback
 import co.timekettle.translation.listener.CreateRoomCallback
@@ -305,6 +306,7 @@ class ChannelRaceStressViewModel @Inject constructor(
             .setRoom(room)
             .setMode(TranslationMode.ONLINE)
             .setScenario(Scenario.ONE_TO_ONE)
+            .setTransModeType(TransModeType.ONE_TO_ONE)
             .setSourceLang(languages.leftLang)
             .setTargetLang(languages.rightLang)
             .setSpeakers(defaultSpeakers())

@@ -16,6 +16,11 @@ enum class DemoConversationLane(val rawValue: String) {
     RIGHT("right"),
 }
 
+enum class DemoConversationTranslationAssemblyMode {
+    CHUNKED,
+    OFFLINE_CUMULATIVE,
+}
+
 data class DemoConversationEvent(
     val bubbleId: String,
     val sessionId: String,
@@ -32,6 +37,8 @@ data class DemoConversationEvent(
     val offset: Long? = null,
     /** ASR 结果携带的时长(纳秒);MT 不携带,恒为 null。 */
     val duration: Long? = null,
+    /** 显式撤回临时译文；缺失时空终态仅关闭原段。 */
+    val isTextRetracted: Boolean = false,
 )
 
 /**
@@ -67,6 +74,8 @@ data class DemoConversationBubbleSnapshot(
     val bOffset: Long? = null,
     /** 气泡内 (最后一条 final ASR 的 offset+duration) − bOffset(纳秒)，无则 null。 */
     val bDuration: Long? = null,
+    /** 列表使用聚合身份bubbleId+lane；session/chunk更新不能改变同一气泡的列表身份。 */
+    val itemKey: String = "${row.bubbleId}_${row.channel}",
 )
 
 /** 按 online_tts_state 维护的高亮集合，对快照分段计算 isHighlighted。 */
@@ -97,6 +106,42 @@ object DemoConversationHighlighter {
 }
 
 object DemoConversationEventAdapter {
+    fun makeOfflineRecognizedEvent(
+        result: Result<String>?,
+        isFinal: Boolean,
+        fallbackSourceLangCode: String,
+        fallbackTargetLangCode: String,
+    ): DemoConversationEvent? = makeRecognizedEvent(
+        offlineResultWithBubbleIdentity(result), isFinal, fallbackSourceLangCode, fallbackTargetLangCode,
+    )
+
+    /** stable 是本句终态，即使整气泡尚未结束、正文为空，也要交给聚合器结束该句。 */
+    fun makeOfflineTranslatedEvent(
+        result: Result<String>?,
+        isFinal: Boolean,
+        fallbackSourceLangCode: String,
+        fallbackTargetLangCode: String,
+    ): DemoConversationEvent? {
+        val isStable = stringExtra(result?.extraData, "sentence_state")?.equals("stable", ignoreCase = true) == true
+        return makeTranslatedEvent(
+            offlineResultWithBubbleIdentity(result), isFinal || isStable, fallbackSourceLangCode, fallbackTargetLangCode,
+        )
+    }
+
+    /** 只为缺失气泡身份的离线结果生成兼容副本，不修改 SDK 交付对象或在线必要字段校验。 */
+    private fun offlineResultWithBubbleIdentity(result: Result<String>?): Result<String>? {
+        if (result == null || result.sessionID.isEmpty() || rawBubbleId(result) != null) return result
+        return Result(
+            sessionId = result.sessionID,
+            bubbleId = "sid_${result.sessionID}",
+            data = result.data,
+            srcCode = result.srcCode,
+            dstCode = result.dstCode,
+            isLast = result.isLast,
+            extraData = result.extraData,
+        )
+    }
+
     private const val TAG = "DemoConvEventAdapter"
 
     fun makeRecognizedEvent(
@@ -105,7 +150,7 @@ object DemoConversationEventAdapter {
         fallbackSourceLangCode: String,
         fallbackTargetLangCode: String,
     ): DemoConversationEvent? {
-        val text = normalized(result?.data)
+        val text = result?.data.orEmpty()
         if (!isDisplayable(text, isFinal)) return null
         // ASR(识别)必要字段校验:bubbleId + sessionId 不能为空。
         // 注意不校验 chunkId——ASR 结果服务端恒不下发 chunk_id(按 session_id 分段),
@@ -131,6 +176,7 @@ object DemoConversationEventAdapter {
             chunkId = chunkId(result),
             offset = longExtra(result?.extraData, "offset"),
             duration = longExtra(result?.extraData, "duration"),
+            isTextRetracted = stringExtra(result?.extraData, "text_action") == "retract",
         )
     }
 
@@ -167,6 +213,7 @@ object DemoConversationEventAdapter {
             sourceLangCode = result?.srcCode?.takeIf { it.isNotEmpty() } ?: fallbackSourceLangCode,
             targetLangCode = result?.dstCode?.takeIf { it.isNotEmpty() } ?: fallbackTargetLangCode,
             chunkId = chunk,
+            isTextRetracted = stringExtra(result?.extraData, "text_action") == "retract",
             isSentenceFinal = stringExtra(result?.extraData, "sentence_state")
                 ?.equals("stable", ignoreCase = true) == true,
         )
@@ -229,7 +276,10 @@ object DemoConversationEventAdapter {
     }
 }
 
-class DemoConversationBubbleAssembler(maxRows: Int = 500) {
+class DemoConversationBubbleAssembler(
+    maxRows: Int = 500,
+    private val translationAssemblyMode: DemoConversationTranslationAssemblyMode = DemoConversationTranslationAssemblyMode.CHUNKED,
+) {
     private enum class SegmentState {
         ACTIVE_PARTIAL,
         SUSPENDED_PARTIAL,
@@ -283,11 +333,13 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
     private val aggregates = linkedMapOf<String, BubbleAggregate>()
     private val activeBubbleIdByLane = mutableMapOf<DemoConversationLane, String>()
     private val endedBubbleIds = mutableSetOf<String>()
+    private val endedBubbleReasons = mutableMapOf<String, String>()
 
     fun reset() = synchronized(lock) {
         aggregates.clear()
         activeBubbleIdByLane.clear()
         endedBubbleIds.clear()
+        endedBubbleReasons.clear()
     }
 
     fun clear() = reset()
@@ -323,6 +375,8 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
         when (event.stage) {
             DemoConversationStage.ASR -> update(
                 segmentText = event.text,
+                preserveSourceText = true,
+                isTextRetracted = event.isTextRetracted,
                 isFinal = event.isFinal,
                 segmentId = event.sessionId.trim(),
                 rawSessionId = event.sessionId,
@@ -336,6 +390,7 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
             DemoConversationStage.MT -> normalizedChunkId(event.chunkId)?.let { chunkId ->
                 update(
                     segmentText = event.text,
+                    isTextRetracted = event.isTextRetracted,
                     // 离线 stable 代表当前句已定稿；isFinal 仍保留整气泡结束语义。
                     isFinal = event.isFinal || event.isSentenceFinal,
                     segmentId = chunkId,
@@ -367,10 +422,13 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
         snapshotWithSegmentsLocked()
     }
 
-    fun markBubbleEnded(bubbleId: String): List<BubbleRowData> = synchronized(lock) {
+    fun markBubbleEnded(bubbleId: String, reason: String? = null): List<BubbleRowData> = synchronized(lock) {
         val normalized = bubbleId.trim()
         if (normalized.isEmpty()) return emptyList()
         endedBubbleIds.add(normalized)
+        // 在线不分类结束原因；离线调用方显式提供 other 作为缺失原因兜底。
+        if (reason == null) endedBubbleReasons.remove(normalized)
+        else endedBubbleReasons[normalized] = reason.trim().ifEmpty { "other" }
         snapshotLocked().filter { row ->
             row.bubbleId == normalized || row.originalBubbleId == normalized
         }
@@ -387,37 +445,47 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
         rawIdsByEffective: MutableMap<String, MutableSet<String>>,
         rawChunkByEffective: MutableMap<String, MutableSet<String>>,
         activeSegmentId: String?,
+        preserveSourceText: Boolean = false,
+        isTextRetracted: Boolean = false,
     ): String? {
-        val text = segmentText.orEmpty().trim()
+        val text = if (preserveSourceText) segmentText.orEmpty() else segmentText.orEmpty().trim()
         if (segmentId.isEmpty() || (text.isEmpty() && !isFinal)) return activeSegmentId
 
         val old = segments[segmentId]
-        if ((old?.state == SegmentState.FINALIZED && !isFinal) ||
+        if (old?.state == SegmentState.FINALIZED ||
             (old?.state == SegmentState.SUSPENDED_PARTIAL && !isFinal)
         ) {
             return activeSegmentId
         }
 
         var nextActiveSegmentId = activeSegmentId
+        // 迟到的较早句只能回填自己的位置，不能暂停较新的当前句。
+        val precedesActive = translationAssemblyMode == DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE &&
+            segmentId.toLongOrNull()?.let { incoming -> activeSegmentId?.toLongOrNull()?.let { incoming < it } } == true
         if (old == null) {
-            activeSegmentId?.let { activeId ->
+            if (!precedesActive) activeSegmentId?.let { activeId ->
                 val active = segments[activeId]
                 if (active?.state == SegmentState.ACTIVE_PARTIAL) {
                     segments[activeId] = active.copy(state = SegmentState.SUSPENDED_PARTIAL)
                 }
             }
-            nextActiveSegmentId = null
+            if (!precedesActive) nextActiveSegmentId = null
             sessionOrder.add(segmentId)
+            if (translationAssemblyMode == DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE &&
+                sessionOrder.all { it.toLongOrNull() != null }) sessionOrder.sortBy { it.toLong() }
         }
 
-        // final 必须覆盖同一段的 partial；空 final 表示 ASR 修订后撤回该中间态，不能保留旧译文。
-        val finalText = text
-        val state = if (isFinal) SegmentState.FINALIZED else SegmentState.ACTIVE_PARTIAL
+        // 离线空 final 只结束该段并保留正文；在线仍沿用空 final 撤回 partial 的契约。
+        val finalText = if (translationAssemblyMode == DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE &&
+            isFinal && text.isEmpty() && !isTextRetracted
+        ) old?.text.orEmpty() else text
+        val state = if (isFinal) SegmentState.FINALIZED else if (precedesActive)
+            SegmentState.SUSPENDED_PARTIAL else SegmentState.ACTIVE_PARTIAL
         segments[segmentId] = SessionSegment(text = finalText, state = state)
         recordRawIds(rawIdsByEffective, rawChunkByEffective, segmentId, rawSessionId, rawChunkId)
 
         return when {
-            !isFinal -> segmentId
+            !isFinal && !precedesActive -> segmentId
             nextActiveSegmentId == segmentId -> null
             else -> nextActiveSegmentId
         }
@@ -457,7 +525,7 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
                 aggregate.cachedTranslatedSegments,
             )
         }
-        val sourceText = composeText(aggregate.sourceSessionOrder, aggregate.sourceBySession, isActiveBubble)
+        val sourceText = composeText(aggregate.sourceSessionOrder, aggregate.sourceBySession, isActiveBubble, preserveSourceText = true)
         val translatedText = composeText(aggregate.translatedSessionOrder, aggregate.translatedBySession, isActiveBubble)
         val sourceSegments = composeSegments(
             aggregate.sourceSessionOrder,
@@ -465,6 +533,7 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
             aggregate.sourceRawIdsByEffective,
             aggregate.sourceRawChunkByEffective,
             isActiveBubble,
+            preserveSourceText = true,
         )
         val translatedSegments = composeSegments(
             aggregate.translatedSessionOrder,
@@ -509,6 +578,7 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
                     sourceText = sourceText,
                     translatedText = translatedText,
                     isBubbleEnded = endedBubbleIds.contains(bubbleId),
+                    bubbleEndReason = endedBubbleReasons[bubbleId],
                     bOffset = bOffset,
                     bDuration = bDuration,
                 )
@@ -543,6 +613,7 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
                     sourceText = sourceText,
                     translatedText = translatedText,
                     isBubbleEnded = endedBubbleIds.contains(bubbleId),
+                    bubbleEndReason = endedBubbleReasons[bubbleId],
                     bOffset = bOffset,
                     bDuration = bDuration,
                 )
@@ -552,6 +623,7 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
                     translatedSegments = composed.translatedSegments,
                     bOffset = bOffset,
                     bDuration = bDuration,
+                    itemKey = key,
                 )
             }
         }
@@ -567,6 +639,7 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
             val bubbleId = bubbleIdFromRowKey(firstKey)
             if (aggregates.keys.none { bubbleIdFromRowKey(it) == bubbleId }) {
                 endedBubbleIds.remove(bubbleId)
+                endedBubbleReasons.remove(bubbleId)
             }
         }
     }
@@ -579,19 +652,21 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
         order: List<String>,
         segments: Map<String, SessionSegment>,
         isActiveBubble: Boolean,
+        preserveSourceText: Boolean = false,
     ): String {
         val orderedTexts = mutableListOf<String>()
         var latestIsFinal = true
         order.forEach { sessionId ->
             val segment = segments[sessionId] ?: return@forEach
-            val text = normalizedDisplayText(segment.text, segment.isFinal)
+            val text = if (preserveSourceText) segment.text else normalizedDisplayText(segment.text, segment.isFinal)
             if (text.isNotEmpty()) {
                 orderedTexts.add(text)
                 latestIsFinal = segment.isFinal
             }
         }
         if (orderedTexts.isEmpty()) return ""
-        val merged = orderedTexts.joinToString(separator = " ")
+        val merged = orderedTexts.joinToString(separator = if (preserveSourceText) "" else " ")
+        if (preserveSourceText) return merged
         return if (latestIsFinal || !isActiveBubble) {
             removeTrailingEllipsis(merged)
         } else {
@@ -606,12 +681,13 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
         rawIds: Map<String, Set<String>>,
         rawChunks: Map<String, Set<String>>,
         isActiveBubble: Boolean,
+        preserveSourceText: Boolean = false,
     ): List<DemoConversationDisplaySegment> {
         val result = mutableListOf<DemoConversationDisplaySegment>()
         var latestIsFinal = true
         order.forEach { sessionId ->
             val segment = segments[sessionId] ?: return@forEach
-            val normalized = normalizedDisplayText(segment.text, segment.isFinal)
+            val normalized = if (preserveSourceText) segment.text else normalizedDisplayText(segment.text, segment.isFinal)
             if (normalized.isEmpty()) return@forEach
             result.add(
                 DemoConversationDisplaySegment(
@@ -624,7 +700,7 @@ class DemoConversationBubbleAssembler(maxRows: Int = 500) {
         }
         if (result.isEmpty()) return emptyList()
         // 活跃气泡的最后一段若未 final，补省略号，与 composeText 行为保持一致。
-        if (!latestIsFinal && isActiveBubble) {
+        if (!preserveSourceText && !latestIsFinal && isActiveBubble) {
             val lastIndex = result.size - 1
             result[lastIndex] = result[lastIndex].copy(text = appendEllipsisIfNeeded(result[lastIndex].text))
         }

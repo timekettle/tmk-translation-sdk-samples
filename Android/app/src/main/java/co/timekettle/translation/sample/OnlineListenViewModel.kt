@@ -27,6 +27,7 @@ import co.timekettle.translation.enums.TmkOnlineTranslateEngine
 import co.timekettle.translation.enums.TmkSensitiveWordRedactionOption
 import co.timekettle.translation.enums.TmkTranslateDeliveryMode
 import co.timekettle.translation.enums.TranslationMode
+import co.timekettle.sdk.common.enums.TransModeType
 import co.timekettle.translation.listener.ActionCallback
 import co.timekettle.translation.listener.AuthCallback
 import co.timekettle.translation.listener.CreateChannelCallback
@@ -576,6 +577,7 @@ class OnlineListenViewModel @Inject constructor(
         val builder = TmkTransChannelConfig.Builder()
             .setMode(TranslationMode.ONLINE)
             .setScenario(Scenario.LISTEN)
+            .setTransModeType(TransModeType.LISTEN)
             .setSourceLang(_sourceLang.value)
             .setTargetLang(_targetLang.value)
             .setSpeakers(listOf(TmkSpeaker(SpeakerChannel.LEFT, _speakerGender.value)))
