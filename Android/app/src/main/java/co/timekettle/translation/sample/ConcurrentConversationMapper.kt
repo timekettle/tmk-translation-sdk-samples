@@ -37,7 +37,8 @@ class ConcurrentConversationMapper(
         DemoConversationBubbleAssembler.MAX_MAX_ROWS,
     )
     private val onlineAssembler = DemoConversationBubbleAssembler(maxRows = boundedMaxRows)
-    private val offlineAssembler = DemoConversationBubbleAssembler(maxRows = boundedMaxRows)
+    private val offlineAssembler = DemoConversationBubbleAssembler(maxRows = boundedMaxRows,
+        translationAssemblyMode = DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE)
     /** 只用于两个独立列表合并成快照，不参与结果匹配。 */
     private val rowOrder = linkedMapOf<RowKey, Long>()
     private var nextOrder = 0L

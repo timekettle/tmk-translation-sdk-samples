@@ -31,6 +31,8 @@ final class OfflineListenViewModel: NSObject {
     let pendingDownloadPrompt = PassthroughSubject<OfflinePendingDownloadPrompt, Never>()
 
     private var channel: TmkTranslationChannel?
+    private var offlineBubbleLengthSplitEnabled = false
+    private var offlineBubbleLengthSplitThreshold = 60
     private var voiceIO: TmkVoiceProcessingIO?
     private var hasStoppedListening = false
     private lazy var ttsCoordinator = DemoTtsPlaybackCoordinator(
@@ -489,6 +491,23 @@ extension OfflineListenViewModel {
         trimRowsIfNeeded()
         publishRows()
     }
+
+    func isOfflineBubbleLengthSplitEnabled() -> Bool { offlineBubbleLengthSplitEnabled }
+
+    var offlineBubbleLengthSplitThresholdValue: Int { offlineBubbleLengthSplitThreshold }
+
+    func setOfflineBubbleLengthSplitThreshold(_ units: Int) {
+        let value = min(max(units, 10), 500)
+        guard offlineBubbleLengthSplitThreshold != value else { return }
+        offlineBubbleLengthSplitThreshold = value
+        resetAndRecreateChannel(reason: "分泡单位已设为\(value)，正在重启离线翻译通道...")
+    }
+
+    func setOfflineBubbleLengthSplitEnabled(_ enabled: Bool) {
+        guard offlineBubbleLengthSplitEnabled != enabled else { return }
+        offlineBubbleLengthSplitEnabled = enabled
+        resetAndRecreateChannel(reason: "超过字符阈值分气泡已\(enabled ? "开启" : "关闭")，正在重启离线通道...")
+    }
 }
 
 private extension OfflineListenViewModel {
@@ -627,7 +646,9 @@ private extension OfflineListenViewModel {
                                                    roomScenario: selectedScenarioOption.roomScenario,
                                                    channelScenario: .listen,
                                                    speakers: speakers.isEmpty ? nil : speakers,
-                                                   translateMode: selectedTranslateMode)
+                                                   translateMode: selectedTranslateMode,
+                                                   offlineBubbleLengthSplitEnabled: offlineBubbleLengthSplitEnabled,
+                                                   offlineBubbleLengthSplitThreshold: offlineBubbleLengthSplitThreshold)
         updateStatus("正在创建离线房间...")
         TmkTranslationSDK.shared.createTmkTranslationRoom(config: roomConfig) { [weak self] roomResult in
             guard let self else { return }
@@ -679,9 +700,7 @@ private extension OfflineListenViewModel {
 
     func resetAndRecreateChannel(reason: String) {
         voiceIO?.stop()
-
         setListeningActive(false)
-
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
         hasStoppedListening = false
@@ -708,8 +727,6 @@ private extension OfflineListenViewModel {
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
         voiceIO?.stop()
-
-
         voiceIO = nil
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
@@ -720,9 +737,7 @@ private extension OfflineListenViewModel {
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         voiceIO?.stop()
-
         setListeningActive(false)
-
         voiceIO = nil
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
@@ -754,8 +769,6 @@ private extension OfflineListenViewModel {
     func stopCurrentChannelForMissingModels() {
         voiceIO?.stop()
         setListeningActive(false)
-
-
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
     }
@@ -823,6 +836,7 @@ private extension OfflineListenViewModel {
                 row.sourceText = snapshot.sourceText
                 row.translatedText = snapshot.translatedText
                 row.isBubbleEnded = snapshot.isBubbleEnded
+                row.bubbleEndReason = snapshot.bubbleEndReason
                 self.rows[rowIndex] = row
                 self.rowMutation.send(.update(row: row, index: rowIndex, heightMayChange: true))
                 self.publishRows()
@@ -834,7 +848,8 @@ private extension OfflineListenViewModel {
                                               targetLangCode: snapshot.targetLangCode,
                                               sourceText: snapshot.sourceText,
                                               translatedText: snapshot.translatedText,
-                                              isBubbleEnded: snapshot.isBubbleEnded)
+                                              isBubbleEnded: snapshot.isBubbleEnded,
+                                              bubbleEndReason: snapshot.bubbleEndReason)
             self.rows.append(row)
             let newIndex = self.rows.count - 1
             self.bubbleIndexMap[key] = newIndex
@@ -876,8 +891,8 @@ private extension OfflineListenViewModel {
 extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloadListener {
     func onRecognized(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        DemoTmkResultLogFormatter.log(DemoTmkResultLogFormatter.makeLine(scene: "OfflineListen", stage: "ASR", result: result, isFinal: isFinal))
-        guard let event = DemoConversationEventAdapter.makeRecognizedEvent(from: result, isFinal: isFinal) else { return }
+        DemoTmkResultLogFormatter.logOfflineCallback(scene: "OfflineListen", stage: "ASR", result: result, isFinal: isFinal)
+        guard let event = DemoConversationEventAdapter.makeOfflineRecognizedEvent(from: result, isFinal: isFinal) else { return }
         let normalized = DemoConversationEvent(bubbleId: event.bubbleId,
                                                sessionId: event.sessionId,
                                                lane: .left,
@@ -890,7 +905,8 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
                                                sourceSegmentText: event.sourceSegmentText,
                                                sentenceState: event.sentenceState,
                                                offset: event.offset,
-                                               duration: event.duration)
+                                               duration: event.duration,
+                                     isTextRetracted: event.isTextRetracted)
         let snapshots = bubbleAssembler.consume(normalized)
         guard snapshots.isEmpty == false else { return }
         snapshots.forEach(applyBubbleSnapshot)
@@ -898,8 +914,8 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
 
     func onTranslate(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        DemoTmkResultLogFormatter.log(DemoTmkResultLogFormatter.makeLine(scene: "OfflineListen", stage: "MT", result: result, isFinal: isFinal))
-        guard let event = DemoConversationEventAdapter.makeTranslatedEvent(from: result, isFinal: isFinal) else { return }
+        DemoTmkResultLogFormatter.logOfflineCallback(scene: "OfflineListen", stage: "MT", result: result, isFinal: isFinal)
+        guard let event = DemoConversationEventAdapter.makeOfflineTranslatedEvent(from: result, isFinal: isFinal) else { return }
         let normalized = DemoConversationEvent(bubbleId: event.bubbleId,
                                                sessionId: event.sessionId,
                                                lane: .left,
@@ -913,7 +929,8 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
                                      sourceSegmentText: event.sourceSegmentText,
                                      sentenceState: event.sentenceState,
                                      offset: event.offset,
-                                     duration: event.duration)
+                                     duration: event.duration,
+                                     isTextRetracted: event.isTextRetracted)
         let snapshots = bubbleAssembler.consume(normalized)
         guard snapshots.isEmpty == false else { return }
         snapshots.forEach(applyBubbleSnapshot)
@@ -940,7 +957,8 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
     func onEvent(name: String, args: Any?) {
         if name == "offline_bubble_end",
            let result = args as? TmkResult<String> {
-            let snapshots = bubbleAssembler.markBubbleEnded(bubbleId: result.bubbleId)
+            let snapshots = bubbleAssembler.markBubbleEnded(bubbleId: result.bubbleId,
+                                                             reason: result.extraData["end_reason"] as? String ?? "other")
             DemoTmkResultLogFormatter.log(DemoTmkResultLogFormatter.makeBubbleEndLine(scene: "OfflineListen",
                                                                      result: result,
                                                                      affectedSnapshots: snapshots))

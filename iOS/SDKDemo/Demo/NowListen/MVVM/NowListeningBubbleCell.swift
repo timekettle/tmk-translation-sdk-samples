@@ -70,7 +70,16 @@ final class NowListeningBubbleCell: UITableViewCell {
         }
         bubbleView.backgroundColor = UIColor.systemGray5
         bubbleView.layer.borderWidth = row.isBubbleEnded ? 1 : 0
-        bubbleView.layer.borderColor = row.isBubbleEnded ? UIColor.systemGreen.cgColor : nil
+        bubbleView.layer.borderColor = bubbleBorderColor(reason: row.bubbleEndReason)
         contentLabel.textAlignment = .left
+    }
+
+    private func bubbleBorderColor(reason: String?) -> CGColor? {
+        switch reason {
+        case "length": return UIColor.systemYellow.cgColor
+        case "error": return UIColor.systemRed.cgColor
+        case nil, "natural", "native_final", "empty_final": return UIColor.systemGreen.cgColor
+        default: return UIColor.systemPurple.cgColor
+        }
     }
 }

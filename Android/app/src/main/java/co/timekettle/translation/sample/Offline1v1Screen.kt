@@ -68,6 +68,8 @@ data class Offline1v1Screen(
         val translateMode by viewModel.translateMode.collectAsState()
         val scenarioOption by viewModel.scenarioOption.collectAsState()
         val isScenarioUpdating by viewModel.isScenarioUpdating.collectAsState()
+        val offlineBubbleLengthSplitEnabled by viewModel.offlineBubbleLengthSplitEnabled.collectAsState()
+        val offlineBubbleLengthSplitThreshold by viewModel.offlineBubbleLengthSplitThreshold.collectAsState()
         val pendingDownloadPrompt by viewModel.pendingDownloadPrompt.collectAsState()
         val retryHintAfterDownload by viewModel.retryHintAfterDownload.collectAsState()
         val downloadFailureMessage by viewModel.downloadFailureMessage.collectAsState()
@@ -109,6 +111,7 @@ data class Offline1v1Screen(
         var showTranslateModeDialog by remember { mutableStateOf(false) }
         var showScenarioDialog by remember { mutableStateOf(false) }
         var showBubbleRetentionLimitDialog by remember { mutableStateOf(false) }
+        var showOfflineBubbleSettingsDialog by remember { mutableStateOf(false) }
         var showDetailInfo by remember { mutableStateOf(false) }
         val offlineLanguageOptions = (rememberOfflineLanguageOptions().state
             as? LanguageOptionsState.Ready)?.options ?: emptyMap()
@@ -192,6 +195,13 @@ data class Offline1v1Screen(
                             onClick = {
                                 settingsExpanded = false
                                 showBubbleRetentionLimitDialog = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("气泡设置") },
+                            onClick = {
+                                settingsExpanded = false
+                                showOfflineBubbleSettingsDialog = true
                             },
                         )
                         DropdownMenuItem(
@@ -356,6 +366,16 @@ data class Offline1v1Screen(
                         "采样: 配置16000Hz/2ch  模式:${offlineAudioChannelMode.displayName()}  播放:${playbackMode.title}"
                 },
                 scrollOnLatestUpdate = true,
+            )
+        }
+
+        if (showOfflineBubbleSettingsDialog) {
+            OfflineBubbleSettingsDialog(
+                lengthSplitEnabled = offlineBubbleLengthSplitEnabled,
+                onLengthSplitEnabledChange = viewModel::setOfflineBubbleLengthSplitEnabled,
+                thresholdUnits = offlineBubbleLengthSplitThreshold,
+                onThresholdUnitsChange = viewModel::setOfflineBubbleLengthSplitThreshold,
+                onDismiss = { showOfflineBubbleSettingsDialog = false },
             )
         }
 

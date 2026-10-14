@@ -137,6 +137,8 @@ final class Offline1V1ViewModel: NSObject {
     let pendingDownloadPrompt = PassthroughSubject<OfflinePendingDownloadPrompt, Never>()
 
     private var channel: TmkTranslationChannel?
+    private var offlineBubbleLengthSplitEnabled = false
+    private var offlineBubbleLengthSplitThreshold = 60
     private var voiceIO: TmkVoiceProcessingIO?
     private var hasStoppedListening = false
     private lazy var ttsCoordinator = DemoTtsPlaybackCoordinator(
@@ -780,6 +782,23 @@ extension Offline1V1ViewModel {
         trimRowsIfNeeded()
         publishRows()
     }
+
+    func isOfflineBubbleLengthSplitEnabled() -> Bool { offlineBubbleLengthSplitEnabled }
+
+    var offlineBubbleLengthSplitThresholdValue: Int { offlineBubbleLengthSplitThreshold }
+
+    func setOfflineBubbleLengthSplitThreshold(_ units: Int) {
+        let value = min(max(units, 10), 500)
+        guard offlineBubbleLengthSplitThreshold != value else { return }
+        offlineBubbleLengthSplitThreshold = value
+        resetAndRecreateChannel(reason: "分泡单位已设为\(value)，正在重启离线翻译通道...")
+    }
+
+    func setOfflineBubbleLengthSplitEnabled(_ enabled: Bool) {
+        guard offlineBubbleLengthSplitEnabled != enabled else { return }
+        offlineBubbleLengthSplitEnabled = enabled
+        resetAndRecreateChannel(reason: "超过字符阈值分气泡已\(enabled ? "开启" : "关闭")，正在重启离线一对一通道...")
+    }
 }
 
 private extension Offline1V1ViewModel {
@@ -913,7 +932,9 @@ private extension Offline1V1ViewModel {
                                                    channelScenario: .oneToOne,
                                                    speakers: speakers.isEmpty ? nil : speakers,
                                                    translateMode: selectedTranslateMode,
-                                                   dialogConversationAudioMode: channelAudioMode)
+                                                   dialogConversationAudioMode: channelAudioMode,
+                                                   offlineBubbleLengthSplitEnabled: offlineBubbleLengthSplitEnabled,
+                                                   offlineBubbleLengthSplitThreshold: offlineBubbleLengthSplitThreshold)
         updateStatus("正在创建离线房间...")
         TmkTranslationSDK.shared.createTmkTranslationRoom(config: roomConfig) { [weak self] roomResult in
             guard let self else { return }
@@ -964,7 +985,6 @@ private extension Offline1V1ViewModel {
         }
     }
 
-
     func resetAndRecreateChannel(reason: String = "语言已切换，正在重新鉴权并检测离线能力...") {
         voiceIO?.stop()
         resetLocalPCMPlaybackState()
@@ -1006,9 +1026,7 @@ private extension Offline1V1ViewModel {
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
         voiceIO?.stop()
-
         resetLocalPCMPlaybackState()
-
         voiceIO = nil
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
@@ -1019,10 +1037,8 @@ private extension Offline1V1ViewModel {
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         voiceIO?.stop()
-
         resetLocalPCMPlaybackState()
         setListeningActive(false)
-
         // 复位每帧发布去重基线：本方法清 playbackChannels=0，重启收听后须能重新发布一次，否则守卫误判致 UI 停在 0。
         lastPlaybackChannels = 0
         lastCaptureSampleRate = 0
@@ -1056,8 +1072,6 @@ private extension Offline1V1ViewModel {
         voiceIO?.stop()
         resetLocalPCMPlaybackState()
         setListeningActive(false)
-
-
         TmkTranslationSDK.shared.releaseChannel()
         channel = nil
     }
@@ -1140,22 +1154,23 @@ private extension Offline1V1ViewModel {
     }
 
     func extractChannel(from result: TmkResult<String>) -> OneToOneRowViewData.Lane {
-        if let ch = result.extraData["channel"] as? String {
-            return ch == "right" ? .right : .left
-        }
-        return .left
+        lane(from: result) ?? .left
     }
 
-    func lane(from result: TmkResult<String>) -> OneToOneRowViewData.Lane? {
+    internal func lane(from result: TmkResult<String>) -> OneToOneRowViewData.Lane? {
         if let channel = (result.extraData["channel"] as? String)?.lowercased() {
             return parseLane(channel: channel)
+        }
+        if let channel = result.extraData["channel"] as? NSNumber {
+            return parseLane(channel: channel.stringValue)
         }
         return nil
     }
 
     func parseLane(channel: String) -> OneToOneRowViewData.Lane? {
-        if channel == OneToOneRowViewData.Lane.left.rawValue { return .left }
-        if channel == OneToOneRowViewData.Lane.right.rawValue { return .right }
+        let channel = channel.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if channel == OneToOneRowViewData.Lane.left.rawValue || channel == "1" { return .left }
+        if channel == OneToOneRowViewData.Lane.right.rawValue || channel == "2" { return .right }
         return nil
     }
 
@@ -1208,14 +1223,15 @@ private extension Offline1V1ViewModel {
                                      stage: event.stage,
                                      isFinal: event.isFinal,
                                      text: event.text,
-                                     sourceLangCode: languagePair.source,
-                                     targetLangCode: languagePair.target,
+                                     sourceLangCode: event.sourceLangCode.isEmpty ? languagePair.source : event.sourceLangCode,
+                                     targetLangCode: event.targetLangCode.isEmpty ? languagePair.target : event.targetLangCode,
                                      chunkId: event.chunkId,
                                      translationSegmentText: event.translationSegmentText,
                                      sourceSegmentText: event.sourceSegmentText,
                                      sentenceState: event.sentenceState,
                                      offset: event.offset,
-                                     duration: event.duration)
+                                     duration: event.duration,
+                                     isTextRetracted: event.isTextRetracted)
     }
 
     func sourceLanguagePrefix() -> String {
@@ -1253,6 +1269,7 @@ private extension Offline1V1ViewModel {
             row.sourceText = snapshot.sourceText
             row.translatedText = snapshot.translatedText
             row.isBubbleEnded = snapshot.isBubbleEnded
+            row.bubbleEndReason = snapshot.bubbleEndReason
             rows[rowIndex] = row
             rowMutation.send(.update(row: row, index: rowIndex, heightMayChange: true))
             publishRows()
@@ -1265,7 +1282,8 @@ private extension Offline1V1ViewModel {
                                       targetLangCode: snapshot.targetLangCode,
                                       sourceText: snapshot.sourceText,
                                       translatedText: snapshot.translatedText,
-                                      isBubbleEnded: snapshot.isBubbleEnded)
+                                      isBubbleEnded: snapshot.isBubbleEnded,
+                                      bubbleEndReason: snapshot.bubbleEndReason)
         rows.append(row)
         let newIndex = rows.count - 1
         bubbleIndexMap[key] = newIndex
@@ -1316,8 +1334,8 @@ private extension Offline1V1ViewModel {
 extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadListener {
     func onRecognized(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        DemoTmkResultLogFormatter.log(DemoTmkResultLogFormatter.makeLine(scene: "Offline1V1", stage: "ASR", result: result, isFinal: isFinal))
-        guard let event = DemoConversationEventAdapter.makeRecognizedEvent(from: result, isFinal: isFinal) else { return }
+        DemoTmkResultLogFormatter.logOfflineCallback(scene: "Offline1V1", stage: "ASR", result: result, isFinal: isFinal)
+        guard let event = DemoConversationEventAdapter.makeOfflineRecognizedEvent(from: result, isFinal: isFinal) else { return }
         let normalized = normalizedConversationEvent(from: event, explicitLane: lane(from: result))
         let snapshots = bubbleAssembler.consume(normalized)
         guard snapshots.isEmpty == false else { return }
@@ -1326,8 +1344,8 @@ extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadLi
 
     func onTranslate(from engine: AbstractChannelEngine, result: TmkResult<String>, isFinal: Bool) {
         _ = engine
-        DemoTmkResultLogFormatter.log(DemoTmkResultLogFormatter.makeLine(scene: "Offline1V1", stage: "MT", result: result, isFinal: isFinal))
-        guard let event = DemoConversationEventAdapter.makeTranslatedEvent(from: result, isFinal: isFinal) else { return }
+        DemoTmkResultLogFormatter.logOfflineCallback(scene: "Offline1V1", stage: "MT", result: result, isFinal: isFinal)
+        guard let event = DemoConversationEventAdapter.makeOfflineTranslatedEvent(from: result, isFinal: isFinal) else { return }
         let normalized = normalizedConversationEvent(from: event, explicitLane: lane(from: result))
         let snapshots = bubbleAssembler.consume(normalized)
         guard snapshots.isEmpty == false else { return }
@@ -1357,7 +1375,8 @@ extension Offline1V1ViewModel: TmkTranslationListener, TmkOfflineModelDownloadLi
     func onEvent(name: String, args: Any?) {
         if name == "offline_bubble_end",
            let result = args as? TmkResult<String> {
-            let snapshots = bubbleAssembler.markBubbleEnded(bubbleId: result.bubbleId)
+            let snapshots = bubbleAssembler.markBubbleEnded(bubbleId: result.bubbleId,
+                                                             reason: result.extraData["end_reason"] as? String ?? "other")
             DemoTmkResultLogFormatter.log(DemoTmkResultLogFormatter.makeBubbleEndLine(scene: "Offline1V1",
                                                                      result: result,
                                                                      affectedSnapshots: snapshots))

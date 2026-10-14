@@ -158,6 +158,7 @@ final class OneToOneViewModel: NSObject {
         }
         guard let voiceIO else { return }
         ttsCoordinator.attach(voiceIO: voiceIO)
+
         configureInterruptionHandling(for: voiceIO)
 
         do {
@@ -502,7 +503,7 @@ enum OneToOneSameLanguagePolicy {
 }
 
 enum DemoTmkResultLogFormatter {
-    /// 逐条 ASR/MT 结果日志开关。默认关闭。
+    /// 逐条 ASR/MT partial 日志开关。默认关闭；离线 final 始终记录用于核对重复回调。
     ///
     /// 每个 ASR/MT partial 回调都会走到 [log]；新闻联播等长跑场景单句可产 300+ partial,
     /// 无门控地 `NSLog` + 全量字符串格式化(插值 + formatExtraData 的字典排序/map/join)在热路径上
@@ -517,8 +518,27 @@ enum DemoTmkResultLogFormatter {
         NSLog("%@", line())
     }
 
+    /// 离线 final 默认记录；高频 partial 沿用详细日志开关。
+    static func logOfflineCallback(scene: String, stage: String, result: TmkResult<String>, isFinal: Bool) {
+        guard isFinal || isVerboseResultLoggingEnabled else { return }
+        NSLog("%@", makeOfflineCallbackLine(scene: scene, stage: stage, result: result, isFinal: isFinal))
+    }
+
     static func makeLine(scene: String, stage: String, result: TmkResult<String>, isFinal: Bool) -> String {
         "[\(scene)][\(stage)][TmkResult] channel=\(channel(from: result)) lane=\(lane(from: result)) sessionID=\(result.sessionID) bubbleId=\(bubbleId(from: result)) srcCode=\(result.srcCode) dstCode=\(result.dstCode) isLast=\(result.isLast) isFinal=\(isFinal) data=\(result.data) extraData=\(formatExtraData(result.extraData))"
+    }
+
+    static func makeOfflineCallbackLine(scene: String, stage: String,
+                                        result: TmkResult<String>, isFinal: Bool) -> String {
+        let callback = stage == "ASR" ? "onRecognized" : "onTranslate"
+        let chunkId = stringExtra("chunk_id", fallback: "chunkId", from: result) ?? "-"
+        let sentenceState = stringExtra("sentence_state", fallback: "sentenceState", from: result) ?? "-"
+        let baseLine = makeLine(scene: scene, stage: stage, result: result, isFinal: isFinal)
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+        return "\(baseLine) " +
+            "callback=\(callback) sessionId=\(result.sessionID) chunkId=\(chunkId) " +
+            "sentence_state=\(sentenceState) text=\(String(reflecting: result.data))"
     }
 
     static func makeBubbleEndLine(scene: String,
@@ -546,6 +566,13 @@ enum DemoTmkResultLogFormatter {
             return channel
         }
         return "-"
+    }
+
+    private static func stringExtra(_ key: String, fallback: String, from result: TmkResult<String>) -> String? {
+        let value = result.extraData[key] ?? result.extraData[fallback]
+        guard let value else { return nil }
+        let text = String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
     }
 
     private static func lane(from result: TmkResult<String>) -> String {
@@ -579,6 +606,7 @@ extension OneToOneViewModel {
 }
 
 private extension OneToOneViewModel {
+
     func startOnlineListening() {
         let startupStartedAt = Date()
         let authStartedAt = Date()
@@ -699,9 +727,7 @@ private extension OneToOneViewModel {
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
-
         voiceIO?.stop()
-
         ttsCoordinator.setActive(false)
         resetLocalPCMPlaybackState()
         voiceIO = nil
@@ -721,11 +747,9 @@ private extension OneToOneViewModel {
         setPendingAutoStartAfterRecreate(getListeningActive())
         networkStatsTracker.reset()
         voiceIO?.stop()
-
         ttsCoordinator.setActive(false)
         resetLocalPCMPlaybackState()
         setListeningActive(false)
-
         activePlaybackUID = nil
         targetPlaybackUIDs.removeAll()
         playbackLaneByUID.removeAll()
@@ -1265,9 +1289,7 @@ private extension OneToOneViewModel {
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
-
         voiceIO?.stop()
-
         ttsCoordinator.setActive(false)
         resetLocalPCMPlaybackState()
         voiceIO = nil
@@ -1420,9 +1442,7 @@ extension OneToOneViewModel: TmkTranslationListener {
         pendingRowsPublishWorkItem?.cancel()
         pendingRowsPublishWorkItem = nil
         setListeningActive(false)
-
         voiceIO?.stop()
-
         ttsCoordinator.setActive(false)
         resetLocalPCMPlaybackState()
         voiceIO = nil
