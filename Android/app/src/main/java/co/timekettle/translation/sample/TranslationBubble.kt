@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -167,27 +168,28 @@ private fun BubbleCell(snapshot: DemoConversationBubbleSnapshot, metaText: Strin
 }
 
 /**
- * 把 label + 分段文本拼成富文本：命中 TTS 高亮的片段显示为蓝色，其余为 baseColor。
+ * 把 label + 分段文本拼成富文本：final 段加粗，TTS 高亮独立决定蓝色。
  * 无分段（离线等场景）时回退到整段纯文本，保持既有展示。
  */
-private fun buildSegmentedLine(
+internal fun buildSegmentedLine(
     label: String,
     segments: List<DemoConversationDisplaySegment>,
     fallbackText: String,
     baseColor: Color,
     preserveSourceText: Boolean = true,
+    emptyFallbackText: String = "...",
 ): AnnotatedString = buildAnnotatedString {
-    withStyle(SpanStyle(color = baseColor)) { append(label) }
+    withStyle(SpanStyle(color = baseColor, fontWeight = FontWeight.Normal)) { append(label) }
     val nonEmpty = segments.filter { it.text.isNotEmpty() }
     if (nonEmpty.isEmpty()) {
-        withStyle(SpanStyle(color = baseColor)) { append(if (preserveSourceText) fallbackText else fallbackText.ifEmpty { "..." }) }
+        withStyle(SpanStyle(color = baseColor, fontWeight = FontWeight.Normal)) { append(if (preserveSourceText) fallbackText else fallbackText.ifEmpty { emptyFallbackText }) }
         return@buildAnnotatedString
     }
     nonEmpty.forEachIndexed { index, segment ->
         if (index > 0 && !preserveSourceText) {
-            withStyle(SpanStyle(color = baseColor)) { append(" ") }
+            withStyle(SpanStyle(color = baseColor, fontWeight = FontWeight.Normal)) { append(" ") }
         }
         val color = if (segment.isHighlighted) HighlightColor else baseColor
-        withStyle(SpanStyle(color = color)) { append(segment.text) }
+        withStyle(SpanStyle(color = color, fontWeight = if (segment.isFinal) FontWeight.Bold else FontWeight.Normal)) { append(segment.text) }
     }
 }

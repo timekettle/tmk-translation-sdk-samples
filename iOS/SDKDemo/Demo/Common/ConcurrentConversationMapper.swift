@@ -21,6 +21,8 @@ final class ConcurrentConversationMapper {
         let runtime: Runtime
         let asr: String
         let mt: String
+        let sourceSegments: [DemoConversationDisplaySegment]
+        let translatedSegments: [DemoConversationDisplaySegment]
     }
 
     private struct RowKey: Hashable {
@@ -95,7 +97,30 @@ final class ConcurrentConversationMapper {
                               lane: lane,
                               runtime: runtime,
                               asr: snapshot.sourceText,
-                              mt: snapshot.translatedText)
+                              mt: snapshot.translatedText,
+                              sourceSegments: snapshot.sourceSegments,
+                              translatedSegments: alignedTranslatedSegments(snapshot.translatedSegments, text: snapshot.translatedText))
+        }
+    }
+
+    /// 并行页保留原 row 正文，只裁去分段额外保留的尾省略号，不改变普通页或聚合器。
+    private func alignedTranslatedSegments(_ segments: [DemoConversationDisplaySegment], text: String) -> [DemoConversationDisplaySegment] {
+        let nonEmpty = segments.filter { !$0.text.isEmpty }
+        let rendered = nonEmpty.enumerated().map { index, segment in
+            (index == 0 ? "" : segment.separator) + segment.text
+        }.joined()
+        guard rendered != text else { return nonEmpty }
+        // 无法按前缀映射的旧结果回退原 row 文本，避免字体增强改变显示内容。
+        guard rendered.hasPrefix(text) else { return [] }
+        var remaining = text.count
+        return nonEmpty.enumerated().compactMap { index, segment in
+            if index > 0 { remaining -= segment.separator.count }
+            guard remaining > 0 else { return nil }
+            let copy = DemoConversationDisplaySegment(text: String(segment.text.prefix(remaining)),
+                rawSessionIds: segment.rawSessionIds, rawChunkIds: segment.rawChunkIds,
+                isHighlighted: segment.isHighlighted, isFinal: segment.isFinal, separator: segment.separator)
+            remaining -= copy.text.count
+            return copy
         }
     }
 }

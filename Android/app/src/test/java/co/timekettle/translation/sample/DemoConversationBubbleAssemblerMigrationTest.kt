@@ -2,12 +2,184 @@ package co.timekettle.translation.sample
 
 import co.timekettle.translation.model.Result
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DemoConversationBubbleAssemblerMigrationTest {
+    @Test
+    fun emptyPartialUpdatesExistingFontWithoutCreatingOrActivatingBubbles() {
+        for (mode in DemoConversationTranslationAssemblyMode.entries) {
+            val assembler = DemoConversationBubbleAssembler(translationAssemblyMode = mode)
+            fun event(bubble: String, chunk: String, text: String, final: Boolean): DemoConversationEvent {
+                val result = Result.Builder<String>().setSessionId("session-$chunk").setBubbleId(bubble)
+                    .setData(text).setExtraData(mapOf("chunk_id" to chunk, "sentence_state" to "partial")).build()
+                return if (mode == DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE)
+                    DemoConversationEventAdapter.makeOfflineTranslatedEvent(result, final, "zh", "en")!!
+                else DemoConversationEventAdapter.makeTranslatedEvent(result, final, "zh", "en")!!
+            }
+            assembler.consume(event("old", "1", "locked", true))
+            assembler.consume(event("active", "2", "current", false))
+            val before = assembler.snapshot()
+            assertEquals("current...", before.last().translatedText)
+            assembler.consume(event("old", "1", "", false))
+            assertEquals(false, assembler.snapshotWithSegments().first().translatedSegments.single().isFinal)
+            assertEquals(before, assembler.snapshot())
+            assembler.consume(event("old", "missing", "", false))
+            assembler.consume(event("unknown", "missing", "", false))
+            assertEquals(before, assembler.snapshot())
+            assertEquals(1, assembler.snapshotWithSegments().first().translatedSegments.size)
+        }
+    }
+
+    @Test
+    fun rawCompletionFollowsBothDirectionsWithoutUnlockingTextAcrossModesAndStages() {
+        for (mode in DemoConversationTranslationAssemblyMode.entries) {
+            for (stage in listOf(DemoConversationStage.ASR, DemoConversationStage.MT)) {
+                val assembler = DemoConversationBubbleAssembler(translationAssemblyMode = mode)
+                fun event(chunk: String, text: String, final: Boolean, bubble: String = "bubble-1"): DemoConversationEvent {
+                    val session = if (stage == DemoConversationStage.ASR && mode == DemoConversationTranslationAssemblyMode.CHUNKED)
+                        "session-$chunk" else "session"
+                    val result = Result.Builder<String>().setSessionId(session).setBubbleId(bubble)
+                        .setData(text).setIsLast(!final).setExtraData(mapOf("chunk_id" to chunk,
+                            "sentence_state" to if (stage == DemoConversationStage.MT) "stable" else "partial")).build()
+                    return when {
+                        stage == DemoConversationStage.ASR && mode == DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE ->
+                            DemoConversationEventAdapter.makeOfflineRecognizedEvent(result, final, "zh", "en")
+                        stage == DemoConversationStage.ASR -> DemoConversationEventAdapter.makeRecognizedEvent(result, final, "zh", "en")
+                        mode == DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE ->
+                            DemoConversationEventAdapter.makeOfflineTranslatedEvent(result, final, "zh", "en")
+                        else -> DemoConversationEventAdapter.makeTranslatedEvent(result, final, "zh", "en")
+                    }!!
+                }
+                fun segments() = assembler.snapshotWithSegments().single().let {
+                    if (stage == DemoConversationStage.ASR) it.sourceSegments else it.translatedSegments
+                }
+                assembler.consume(event("1", "first", false))
+                assertEquals(false, segments().single().isFinal)
+                assembler.consume(event("1", "first", true))
+                assertEquals(true, segments().single().isFinal)
+                assembler.consume(event("2", "second", true))
+                val lockedText = assembler.snapshot().single().let { if (stage == DemoConversationStage.ASR) it.sourceText else it.translatedText }
+                assembler.consume(event("1", "must not replace text", false))
+                assertEquals(listOf(false, true), segments().map { it.isFinal })
+                assembler.consume(event("1", "must not replace text", true))
+                assertEquals(listOf(true, true), segments().map { it.isFinal })
+                val beforeEmpty = assembler.snapshot().single()
+                assembler.consume(event("1", "", false))
+                assertEquals(listOf(false, true), segments().map { it.isFinal })
+                assertEquals(beforeEmpty, assembler.snapshot().single())
+                assertEquals(lockedText, assembler.snapshot().single().let { if (stage == DemoConversationStage.ASR) it.sourceText else it.translatedText })
+                // 空 false 没有已有段可更新时，不创建正文、段或新气泡，也不切换当前气泡。
+                assembler.consume(event("missing", "", false))
+                assembler.consume(event("missing", "", false, "unknown"))
+                assertEquals(beforeEmpty, assembler.snapshot().single())
+                assertEquals(2, segments().size)
+            }
+        }
+    }
+
+    @Test
+    fun displayCompletionIsIndependentPerStageChunkAndBubbleEnd() {
+        val assembler = DemoConversationBubbleAssembler(translationAssemblyMode = DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE)
+        assembler.consume(asrEvent("source", false, "session").copy(chunkId = "1"))
+        assembler.consume(mtEvent("first", false, "1").copy(sessionId = "session"))
+        assembler.consume(mtEvent("second", false, "2").copy(sessionId = "session"))
+        assembler.consume(asrEvent("source", true, "session").copy(chunkId = "1"))
+        assembler.consume(mtEvent("first", true, "1").copy(sessionId = "session"))
+        assembler.markBubbleEnded("bubble-1")
+        val snapshot = assembler.snapshotWithSegments().single()
+        assertEquals(listOf(true), snapshot.sourceSegments.map { it.isFinal })
+        assertEquals(listOf(true, false), snapshot.translatedSegments.map { it.isFinal })
+        assembler.consume(asrEvent("ignored source", false, "session").copy(chunkId = "1"))
+        val sourceReverted = assembler.snapshotWithSegments().single()
+        assertEquals(listOf(false), sourceReverted.sourceSegments.map { it.isFinal })
+        assertEquals(listOf(true, false), sourceReverted.translatedSegments.map { it.isFinal })
+        assembler.consume(mtEvent("ignored translation", false, "1").copy(sessionId = "session"))
+        val translationReverted = assembler.snapshotWithSegments().single()
+        assertEquals(listOf(false), translationReverted.sourceSegments.map { it.isFinal })
+        assertEquals(listOf(false, false), translationReverted.translatedSegments.map { it.isFinal })
+        assertEquals(snapshot.row, translationReverted.row)
+    }
+
+    @Test
+    fun stableDoesNotBoldButLaterRawFinalRefreshesLockedText() {
+        val assembler = DemoConversationBubbleAssembler(translationAssemblyMode = DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE)
+        fun event(text: String, final: Boolean, state: String) =
+            DemoConversationEventAdapter.makeOfflineTranslatedEvent(Result.Builder<String>()
+                .setSessionId("session").setBubbleId("bubble-1").setData(text).setIsLast(true)
+                .setExtraData(mapOf("chunk_id" to "chunk", "sentence_state" to state))
+                .build(), final, "zh", "en")!!
+        assembler.consume(event("locked", false, "stable"))
+        val partial = assembler.snapshotWithSegments().single()
+        assertEquals(false, partial.translatedSegments.single().isFinal)
+        assembler.consume(event("must not replace locked text", true, "partial"))
+        val final = assembler.snapshotWithSegments().single()
+        assertEquals(partial.row.translatedText, final.row.translatedText)
+        assertEquals(true, final.translatedSegments.single().isFinal)
+        assembler.consume(event("late draft", false, "stable"))
+        assertEquals(false, assembler.snapshotWithSegments().single().translatedSegments.single().isFinal)
+    }
+
+    @Test
+    fun unchangedSourceTextFinalChangesOnlyDisplayCompletion() {
+        val assembler = DemoConversationBubbleAssembler()
+        assembler.consume(asrEvent("same", false, "session"))
+        val partial = assembler.snapshotWithSegments().single()
+        assembler.consume(asrEvent("same", true, "session"))
+        val final = assembler.snapshotWithSegments().single()
+        assertEquals(partial.row.sourceText, final.row.sourceText)
+        assertEquals(false, partial.sourceSegments.single().isFinal)
+        assertEquals(true, final.sourceSegments.single().isFinal)
+    }
+
+    @Test fun offlineSourceUsesChunksWithinOneSessionAndPreservesEmptyFinalBody() {
+        val assembler = DemoConversationBubbleAssembler(translationAssemblyMode = DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE)
+        fun source(text: String, final: Boolean, chunk: String): DemoConversationEvent =
+            DemoConversationEventAdapter.makeOfflineRecognizedEvent(Result.Builder<String>()
+                .setSessionId("same-session").setBubbleId("bubble-1").setData(text)
+                .setExtraData(mapOf("chunk_id" to chunk, "sentence_state" to if (final) "stable" else "partial"))
+                .build(), final, "zh", "en")!!
+        assembler.consume(source("第一句", false, "1"))
+        assembler.consume(source("第一句。", true, "1"))
+        assembler.consume(source("第二句", false, "2"))
+        val rows = assembler.consume(source(" \t\u200B", true, "2"))
+        assertEquals("第一句。第二句", rows.single().sourceText)
+        assertEquals(listOf(true, true), assembler.snapshotWithSegments().single().sourceSegments.map { it.isFinal })
+        // U+001C 不是共同固定空白合同成员，不能按平台 isWhitespace 吞掉原文。
+        assertEquals("第一句。第二句\u001C", assembler.consume(source("\u001C", true, "3")).single().sourceText)
+    }
+
+    /** 固定 Unicode White_Space 合同不能退回 JVM trim/isWhitespace 的平台集合。 */
+    @Test
+    fun offlineWhitespaceFinalPreservesEachStageBodyAndZeroWidthSpaceOnlyClosesSource() {
+        val whitespace = listOf(
+            "\u0009", "\u000A", "\u000B", "\u000C", "\u000D", "\u0020", "\u0085", "\u00A0", "\u1680",
+            "\u2000", "\u2001", "\u2002", "\u2003", "\u2004", "\u2005", "\u2006", "\u2007", "\u2008", "\u2009", "\u200A",
+            "\u2028", "\u2029", "\u202F", "\u205F", "\u3000",
+        )
+        for (stage in listOf(DemoConversationStage.ASR, DemoConversationStage.MT)) {
+            for (terminal in whitespace + "\u200B") {
+                val assembler = DemoConversationBubbleAssembler(
+                    translationAssemblyMode = DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE)
+                val draft = if (stage == DemoConversationStage.ASR)
+                    asrEvent("保留正文", false, "session").copy(chunkId = "1")
+                else mtEvent("保留正文", false, "1")
+                assembler.consume(draft)
+                assembler.consume(draft.copy(text = terminal, isFinal = true, displayIsFinal = true))
+                val snapshot = assembler.snapshotWithSegments().single()
+                val segments = if (stage == DemoConversationStage.ASR) snapshot.sourceSegments else snapshot.translatedSegments
+                val expected = if (stage == DemoConversationStage.MT && terminal == "\u200B") "\u200B" else "保留正文"
+                assertEquals("$stage final U+${terminal.single().code.toString(16)}", expected, segments.single().text)
+                assertTrue(segments.single().isFinal)
+                assertEquals(expected, if (stage == DemoConversationStage.ASR) snapshot.row.sourceText else snapshot.row.translatedText)
+                assertFalse("句终态不能代替 BubbleEnd", snapshot.row.isBubbleEnded)
+            }
+        }
+    }
+
     @Test
     fun offlineNumericSourceOrderKeepsNewerPartialActiveWhenOlderStableArrives() {
         val assembler = DemoConversationBubbleAssembler(translationAssemblyMode = DemoConversationTranslationAssemblyMode.OFFLINE_CUMULATIVE)

@@ -26,6 +26,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -294,8 +295,10 @@ private fun RuntimeBubblePane(
                             colors = CardDefaults.cardColors(containerColor = bubbleColor),
                         ) {
                             Column(Modifier.padding(8.dp)) {
-                                Text("ASR：${row.asr}", fontSize = 8.sp, lineHeight = 10.sp)
-                                Text("MT：${row.mt}", fontSize = 8.sp, lineHeight = 10.sp)
+                                Text(buildSegmentedLine("ASR：", row.sourceSegments, row.asr, LocalContentColor.current),
+                                    fontSize = 8.sp, lineHeight = 10.sp)
+                                Text(buildSegmentedLine("MT：", row.translatedSegments, row.mt, LocalContentColor.current, preserveSourceText = false, emptyFallbackText = ""),
+                                    fontSize = 8.sp, lineHeight = 10.sp)
                             }
                         }
                     }

@@ -509,7 +509,10 @@ private final class ConcurrentBubbleCell: UITableViewCell {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func configure(_ row: ConcurrentConversationMapper.Row) {
-        text.text = "ASR：\(row.asr)\nMT：\(row.mt)"
+        text.attributedText = DemoConversationSegmentRenderer.makeConcurrentText(
+            sourceSegments: row.sourceSegments, sourceFallbackText: row.asr,
+            translatedSegments: row.translatedSegments, translatedFallbackText: row.mt,
+            font: text.font)
         bubbleView.backgroundColor = row.lane == .left
             ? UIColor.systemBlue.withAlphaComponent(0.18)
             : UIColor.systemPurple.withAlphaComponent(0.18)
