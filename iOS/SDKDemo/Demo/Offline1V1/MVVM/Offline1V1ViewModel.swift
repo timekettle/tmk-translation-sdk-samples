@@ -1222,6 +1222,7 @@ private extension Offline1V1ViewModel {
                                      lane: demoLane,
                                      stage: event.stage,
                                      isFinal: event.isFinal,
+                                     displayIsFinal: event.displayIsFinal,
                                      text: event.text,
                                      sourceLangCode: event.sourceLangCode.isEmpty ? languagePair.source : event.sourceLangCode,
                                      targetLangCode: event.targetLangCode.isEmpty ? languagePair.target : event.targetLangCode,
@@ -1268,6 +1269,8 @@ private extension Offline1V1ViewModel {
             row.targetLangCode = snapshot.targetLangCode
             row.sourceText = snapshot.sourceText
             row.translatedText = snapshot.translatedText
+            row.sourceSegments = snapshot.sourceSegments
+            row.translatedSegments = snapshot.translatedSegments
             row.isBubbleEnded = snapshot.isBubbleEnded
             row.bubbleEndReason = snapshot.bubbleEndReason
             rows[rowIndex] = row
@@ -1282,6 +1285,8 @@ private extension Offline1V1ViewModel {
                                       targetLangCode: snapshot.targetLangCode,
                                       sourceText: snapshot.sourceText,
                                       translatedText: snapshot.translatedText,
+                                      sourceSegments: snapshot.sourceSegments,
+                                      translatedSegments: snapshot.translatedSegments,
                                       isBubbleEnded: snapshot.isBubbleEnded,
                                       bubbleEndReason: snapshot.bubbleEndReason)
         rows.append(row)

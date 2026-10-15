@@ -1143,6 +1143,7 @@ private extension OneToOneViewModel {
                                      lane: demoLane,
                                      stage: event.stage,
                                      isFinal: event.isFinal,
+                                     displayIsFinal: event.displayIsFinal,
                                      text: event.text,
                                      sourceLangCode: languagePair.source,
                                      targetLangCode: languagePair.target,

@@ -857,12 +857,17 @@ enum NowListeningConversationEventNormalizer {
                               lane: .left,
                               stage: event.stage,
                               isFinal: event.isFinal,
+                              displayIsFinal: event.displayIsFinal,
                               text: event.text,
                               sourceLangCode: event.sourceLangCode,
                               targetLangCode: event.targetLangCode,
                               chunkId: event.chunkId,
+                              translationSegmentText: event.translationSegmentText,
+                              sourceSegmentText: event.sourceSegmentText,
+                              sentenceState: event.sentenceState,
                               offset: event.offset,
-                              duration: event.duration)
+                              duration: event.duration,
+                              isTextRetracted: event.isTextRetracted)
     }
 }
 

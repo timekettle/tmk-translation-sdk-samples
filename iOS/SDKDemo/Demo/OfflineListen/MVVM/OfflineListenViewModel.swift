@@ -835,6 +835,8 @@ private extension OfflineListenViewModel {
                 row.targetLangCode = snapshot.targetLangCode
                 row.sourceText = snapshot.sourceText
                 row.translatedText = snapshot.translatedText
+                row.sourceSegments = snapshot.sourceSegments
+                row.translatedSegments = snapshot.translatedSegments
                 row.isBubbleEnded = snapshot.isBubbleEnded
                 row.bubbleEndReason = snapshot.bubbleEndReason
                 self.rows[rowIndex] = row
@@ -848,6 +850,8 @@ private extension OfflineListenViewModel {
                                               targetLangCode: snapshot.targetLangCode,
                                               sourceText: snapshot.sourceText,
                                               translatedText: snapshot.translatedText,
+                                              sourceSegments: snapshot.sourceSegments,
+                                              translatedSegments: snapshot.translatedSegments,
                                               isBubbleEnded: snapshot.isBubbleEnded,
                                               bubbleEndReason: snapshot.bubbleEndReason)
             self.rows.append(row)
@@ -898,6 +902,7 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
                                                lane: .left,
                                                stage: event.stage,
                                                isFinal: event.isFinal,
+                                               displayIsFinal: event.displayIsFinal,
                                                text: event.text,
                                                sourceLangCode: event.sourceLangCode,
                                                targetLangCode: event.targetLangCode,
@@ -921,6 +926,7 @@ extension OfflineListenViewModel: TmkTranslationListener, TmkOfflineModelDownloa
                                                lane: .left,
                                                stage: event.stage,
                                                isFinal: event.isFinal,
+                                               displayIsFinal: event.displayIsFinal,
                                                text: event.text,
                                                sourceLangCode: event.sourceLangCode,
                                                targetLangCode: event.targetLangCode,

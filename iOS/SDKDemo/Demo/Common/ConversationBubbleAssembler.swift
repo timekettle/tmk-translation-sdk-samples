@@ -41,12 +41,18 @@ struct DemoConversationEvent {
     let duration: Int64?
     /// 显式撤回临时译文；缺失时空终态仅关闭原段。
     let isTextRetracted: Bool
+    /// 原始文字回调完成态，仅控制字重，不参与既有文本聚合判断。
+    let displayIsFinal: Bool
+
+    /// 旧适配器会过滤的空 partial 只传递字重，不能创建或更新正文。
+    var isDisplayOnly: Bool { stage != .tts && !isFinal && (text ?? "").isEmpty }
 
     init(bubbleId: String,
          sessionId: Int,
          lane: DemoConversationLane,
          stage: DemoConversationStage,
          isFinal: Bool,
+         displayIsFinal: Bool? = nil,
          text: String?,
          sourceLangCode: String,
          targetLangCode: String,
@@ -72,6 +78,7 @@ struct DemoConversationEvent {
         self.offset = offset
         self.duration = duration
         self.isTextRetracted = isTextRetracted
+        self.displayIsFinal = displayIsFinal ?? isFinal
     }
 }
 
@@ -89,6 +96,10 @@ struct DemoConversationDisplaySegment: Equatable {
     let rawChunkIds: Set<String>
     /// 是否高亮（蓝色），由 ViewModel 写入。
     var isHighlighted: Bool = false
+    /// 文字字重与文本锁定、TTS 高亮分别保存，避免由 sentence_state 推导字体。
+    var isFinal: Bool = false
+    /// 累计快照拆成样式范围时正文已包含分隔符；普通句片段沿用一个空格。
+    var separator: String = " "
 }
 
 struct DemoConversationBubbleSnapshot {
@@ -99,9 +110,9 @@ struct DemoConversationBubbleSnapshot {
     let targetLangCode: String
     let sourceText: String
     let translatedText: String
-    /// 源语言按 session 切分的展示片段；离线场景可忽略。
+    /// 原文按既有 session/chunk 切分的展示片段，携带独立字重标记。
     let sourceSegments: [DemoConversationDisplaySegment]
-    /// 目标语言按 session 切分的展示片段；离线场景可忽略。
+    /// 译文按既有 chunk 切分的展示片段，携带独立字重标记。
     let translatedSegments: [DemoConversationDisplaySegment]
     /// 是否已收到服务端 bubble_end 信号，仅用于展示结束态，不阻止后续内容更新。
     let isBubbleEnded: Bool
@@ -122,12 +133,12 @@ enum DemoConversationEventAdapter {
     static func makeOfflineTranslatedEvent(from result: TmkResult<String>, isFinal: Bool) -> DemoConversationEvent? {
         guard chunkId(from: result) != nil else { return nil }
         let isStable = stringValue(result.extraData["sentence_state"])?.lowercased() == "stable"
-        return makeTranslatedEvent(from: result, isFinal: isFinal || isStable)
+        return makeTranslatedEvent(from: result, isFinal: isFinal || isStable, displayIsFinal: isFinal)
     }
 
     static func makeRecognizedEvent(from result: TmkResult<String>, isFinal: Bool) -> DemoConversationEvent? {
         let text = result.data ?? ""
-        guard isDisplayable(text, isFinal: isFinal) else { return nil }
+        // 空 partial 也携带可观察的 final=false；consume 仅更新已存在段的显示元数据。
         return DemoConversationEvent(bubbleId: bubbleId(from: result),
                                      sessionId: Int(result.sessionID) ?? 0,
                                      lane: lane(from: result),
@@ -144,14 +155,14 @@ enum DemoConversationEventAdapter {
                                      isTextRetracted: result.extraData["text_action"] as? String == "retract")
     }
 
-    static func makeTranslatedEvent(from result: TmkResult<String>, isFinal: Bool) -> DemoConversationEvent? {
+    static func makeTranslatedEvent(from result: TmkResult<String>, isFinal: Bool, displayIsFinal: Bool? = nil) -> DemoConversationEvent? {
         let text = normalized(result.data)
-        guard isDisplayable(text, isFinal: isFinal) else { return nil }
         return DemoConversationEvent(bubbleId: bubbleId(from: result),
                                      sessionId: Int(result.sessionID) ?? 0,
                                      lane: lane(from: result),
                                      stage: .mt,
                                      isFinal: isFinal,
+                                     displayIsFinal: displayIsFinal ?? isFinal,
                                      text: text,
                                      sourceLangCode: result.srcCode,
                                      targetLangCode: result.dstCode,
@@ -218,12 +229,6 @@ enum DemoConversationEventAdapter {
         (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func isDisplayable(_ text: String, isFinal: Bool) -> Bool {
-        if text.isEmpty {
-            return isFinal
-        }
-        return true
-    }
 }
 
 /// 离线本句结果：按身份保存各句，暂停句只接受 stable 回填，已稳定句不可改写。
@@ -239,6 +244,8 @@ struct OfflineSentenceTextState {
     private struct SentenceSegment {
         var text: String
         var state: SegmentState
+        var displayIsFinal: Bool
+        var rawSessionIds: Set<Int>
     }
 
     private var sentenceOrder: [String] = []
@@ -256,8 +263,17 @@ struct OfflineSentenceTextState {
         activeSentenceId.flatMap { sentences[$0]?.text } ?? ""
     }
 
-    mutating func update(text: String, id: String?, isFinal: Bool, isTextRetracted: Bool = false) {
+    mutating func updateDisplayFinal(id: String?, isFinal: Bool) {
+        guard let id, var sentence = sentences[id] else { return }
+        sentence.displayIsFinal = isFinal
+        sentences[id] = sentence
+    }
+
+    mutating func update(text: String, id: String?, isFinal: Bool, isTextRetracted: Bool = false,
+                         displayIsFinal: Bool? = nil, rawSessionId: Int? = nil) {
         guard let id, !id.isEmpty else { return }
+        // 字重反映最新回调，包括空 partial；正文仍按既有状态机过滤或锁定。
+        updateDisplayFinal(id: id, isFinal: displayIsFinal ?? isFinal)
         let text = preserveSourceText ? text : text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || isFinal else { return }
         let old = sentences[id]
@@ -277,8 +293,18 @@ struct OfflineSentenceTextState {
             if sentenceOrder.allSatisfy({ Int64($0) != nil }) { sentenceOrder.sort { Int64($0)! < Int64($1)! } }
         }
         // 空 final 只结束该句，保留已有正文；迟到 final 不结束另一句的 partial。
-        let finalText = isFinal && text.isEmpty && !isTextRetracted ? old?.text ?? "" : text
-        sentences[id] = SentenceSegment(text: finalText, state: isFinal ? .finalized : (precedesActive ? .suspendedPartial : .activePartial))
+        // 与离线 SDK 的空白判定一致，仅改变终态保留规则，不改写有效原文字符。
+        let isBlank = text.unicodeScalars.allSatisfy { scalar in
+            let value = scalar.value
+            return (0x0009...0x000D).contains(value) || value == 0x0020 || value == 0x0085 ||
+                value == 0x00A0 || value == 0x1680 || (0x2000...0x200A).contains(value) ||
+                value == 0x2028 || value == 0x2029 || value == 0x202F || value == 0x205F ||
+                value == 0x3000 || (preserveSourceText && value == 0x200B)
+        }
+        let finalText = isFinal && isBlank && !isTextRetracted ? old?.text ?? "" : text
+        sentences[id] = SentenceSegment(text: finalText, state: isFinal ? .finalized : (precedesActive ? .suspendedPartial : .activePartial),
+            displayIsFinal: displayIsFinal ?? isFinal,
+            rawSessionIds: (old?.rawSessionIds ?? []).union(rawSessionId.map { [$0] } ?? []))
         if !isFinal && !precedesActive { activeSentenceId = id }
         else if activeSentenceId == id { activeSentenceId = nil }
     }
@@ -289,6 +315,19 @@ struct OfflineSentenceTextState {
             return sentence.text
         }.joined(separator: preserveSourceText ? "" : " ")
         return !preserveSourceText && active && !partialText.isEmpty ? text + "..." : text
+    }
+
+    func displaySegments(active: Bool) -> [DemoConversationDisplaySegment] {
+        var result = sentenceOrder.compactMap { id -> DemoConversationDisplaySegment? in
+            guard let sentence = sentences[id], !sentence.text.isEmpty else { return nil }
+            return DemoConversationDisplaySegment(text: sentence.text, rawSessionIds: sentence.rawSessionIds,
+                rawChunkIds: [id], isFinal: sentence.displayIsFinal)
+        }
+        if !preserveSourceText && active && !partialText.isEmpty, let last = result.popLast() {
+            result.append(DemoConversationDisplaySegment(text: last.text + "...", rawSessionIds: last.rawSessionIds,
+                rawChunkIds: last.rawChunkIds, isFinal: last.isFinal))
+        }
+        return result
     }
 }
 
@@ -302,6 +341,7 @@ final class DemoConversationBubbleAssembler {
     private struct SessionSegment {
         var text: String
         var state: SegmentState
+        var displayIsFinal: Bool
 
         var isFinal: Bool {
             state == .finalized
@@ -339,6 +379,8 @@ final class DemoConversationBubbleAssembler {
         var offlineProvisionalChunkId: String?
         var offlineTranslatedSessionIds: Set<Int> = []
         var offlineTranslatedChunkIds: Set<String> = []
+        /// 兼容累计译文只保存显示范围，正文仍由原累计算法生成。
+        var offlineTranslationDisplaySegments: [DemoConversationDisplaySegment] = []
         var latestSessionId: Int = 0
         /// 气泡内第一条 ASR final 句子的 offset(纳秒)。
         var bOffset: Int64? = nil
@@ -404,6 +446,17 @@ final class DemoConversationBubbleAssembler {
         let key = DemoConversationBubbleAssembler.rowKey(bubbleId: event.bubbleId, lane: event.lane)
         var snapshots: [DemoConversationBubbleSnapshot] = []
 
+        // 空 partial 保持原正文过滤效果，只刷新已有段的字重，不切换活跃气泡或创建片段。
+        if event.isDisplayOnly {
+            guard var aggregate = aggregates[key] else { return [] }
+            updateDisplayCompletion(event, aggregate: &aggregate)
+            aggregate.contentVersion += 1
+            let snapshot = makeSnapshot(bubbleId: event.bubbleId, lane: event.lane, aggregate: &aggregate,
+                isActiveBubble: activeBubbleIdByLane[event.lane] == event.bubbleId)
+            aggregates[key] = aggregate
+            return snapshot.map { [$0] } ?? []
+        }
+
         if let previousBubbleId = activeBubbleIdByLane[event.lane],
            previousBubbleId != event.bubbleId {
             let previousKey = DemoConversationBubbleAssembler.rowKey(bubbleId: previousBubbleId, lane: event.lane)
@@ -424,6 +477,8 @@ final class DemoConversationBubbleAssembler {
         let isNewAggregate = aggregates[key] == nil
         var aggregate = aggregates[key] ?? BubbleAggregate(sourceLangCode: event.sourceLangCode,
                                                            targetLangCode: event.targetLangCode)
+        // 后续回调可省略 sentence_* 字段；字体仍更新原来实际展示的片段。
+        updateDisplayCompletion(event, aggregate: &aggregate)
         aggregate.latestSessionId = max(aggregate.latestSessionId, event.sessionId)
         // 语言标签在气泡创建时即冻结,不随后续事件覆盖:
         // 切换语言后,正在进行的旧气泡应保留其原始源/目标语言(译文文本仍是旧语言),
@@ -433,15 +488,18 @@ final class DemoConversationBubbleAssembler {
         case .asr:
             if translationAssemblyMode == .offlineCumulative, let text = event.sourceSegmentText {
                 aggregate.usesSentenceSource = true
+                aggregate.sentenceSource.updateDisplayFinal(id: event.chunkId, isFinal: event.displayIsFinal)
                 if event.sentenceState != "end" {
                     aggregate.sentenceSource.update(text: text, id: event.chunkId,
-                                                    isFinal: event.sentenceState == "stable", isTextRetracted: event.isTextRetracted)
+                                                    isFinal: event.sentenceState == "stable", isTextRetracted: event.isTextRetracted,
+                                                    displayIsFinal: event.displayIsFinal, rawSessionId: event.sessionId)
                 }
             } else {
                 update(segmentText: event.text,
                        preserveSourceText: true,
                        isTextRetracted: event.isTextRetracted,
                        isFinal: event.isFinal,
+                       displayIsFinal: event.displayIsFinal,
                        segmentID: String(event.sessionId),
                        rawSessionID: event.sessionId,
                        rawChunkID: event.chunkId,
@@ -454,13 +512,15 @@ final class DemoConversationBubbleAssembler {
         case .mt:
             if translationAssemblyMode == .offlineCumulative, let text = event.translationSegmentText {
                 aggregate.usesSentenceTranslation = true
-                aggregate.sentenceTranslation.update(text: text, id: event.chunkId, isFinal: event.isFinal, isTextRetracted: event.isTextRetracted)
+                aggregate.sentenceTranslation.update(text: text, id: event.chunkId, isFinal: event.isFinal, isTextRetracted: event.isTextRetracted,
+                    displayIsFinal: event.displayIsFinal, rawSessionId: event.sessionId)
             } else if translationAssemblyMode == .offlineCumulative {
                 updateOfflineCumulativeTranslation(event, aggregate: &aggregate)
             } else if let chunkID = normalizedChunkId(event.chunkId) {
                 update(segmentText: event.text,
                        isTextRetracted: event.isTextRetracted,
                        isFinal: event.isFinal,
+                       displayIsFinal: event.displayIsFinal,
                        segmentID: chunkID,
                        rawSessionID: event.sessionId,
                        rawChunkID: chunkID,
@@ -563,7 +623,7 @@ final class DemoConversationBubbleAssembler {
                                      segments: aggregate.sourceBySession,
                                      isActiveBubble: isActiveBubble, preserveSourceText: true)
         let translatedText: String
-        let sourceSegments = aggregate.usesSentenceSource ? [] : composeSegments(order: aggregate.sourceSessionOrder,
+        let sourceSegments = aggregate.usesSentenceSource ? aggregate.sentenceSource.displaySegments(active: isActiveBubble) : composeSegments(order: aggregate.sourceSessionOrder,
                                              segments: aggregate.sourceBySession,
                                              rawIds: aggregate.sourceRawIdsByEffective,
                                              rawChunks: aggregate.sourceRawChunkByEffective,
@@ -571,7 +631,7 @@ final class DemoConversationBubbleAssembler {
         let translatedSegments: [DemoConversationDisplaySegment]
         if aggregate.usesSentenceTranslation {
             translatedText = aggregate.sentenceTranslation.displayText(active: isActiveBubble)
-            translatedSegments = []
+            translatedSegments = aggregate.sentenceTranslation.displaySegments(active: isActiveBubble)
         } else if translationAssemblyMode == .offlineCumulative {
             let cumulative = composeOfflineCumulativeTranslation(aggregate,
                                                                   isActiveBubble: isActiveBubble)
@@ -662,6 +722,7 @@ final class DemoConversationBubbleAssembler {
                         preserveSourceText: Bool = false,
                         isTextRetracted: Bool = false,
                         isFinal: Bool,
+                        displayIsFinal: Bool,
                         segmentID: String,
                         rawSessionID: Int,
                         rawChunkID: String?,
@@ -670,11 +731,15 @@ final class DemoConversationBubbleAssembler {
                         segments: inout [String: SessionSegment],
                         rawIdsByEffective: inout [String: Set<Int>],
                         rawChunkByEffective: inout [String: Set<String>]) {
+        guard segmentID.isEmpty == false else { return }
+        let old = segments[segmentID]
+        // 即使旧聚合分支拒绝改写正文，也允许原始回调完成态刷新字体。
+        if var displayed = old {
+            displayed.displayIsFinal = displayIsFinal
+            segments[segmentID] = displayed
+        }
         let text = preserveSourceText ? segmentText ?? "" : (segmentText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty && isFinal == false { return }
-        guard segmentID.isEmpty == false else { return }
-
-        let old = segments[segmentID]
         if let old {
             // final 一经接收即不可变；暂停段只能由它自己的 final 确认，不能再被 partial 改写。
             if old.state == .finalized || (old.state == .suspendedPartial && isFinal == false) {
@@ -686,7 +751,7 @@ final class DemoConversationBubbleAssembler {
             if let activeID = activeSegmentID,
                let active = segments[activeID],
                active.state == .activePartial {
-                segments[activeID] = SessionSegment(text: active.text, state: .suspendedPartial)
+                segments[activeID] = SessionSegment(text: active.text, state: .suspendedPartial, displayIsFinal: active.displayIsFinal)
             }
             activeSegmentID = nil
             sessionOrder.append(segmentID)
@@ -695,13 +760,44 @@ final class DemoConversationBubbleAssembler {
         // 空 final 只收口当前段，保留已展示的 partial，避免气泡内容被清空。
         let finalText = isFinal && text.isEmpty && !isTextRetracted ? old?.text ?? "" : text
         let nextState: SegmentState = isFinal ? .finalized : .activePartial
-        segments[segmentID] = SessionSegment(text: finalText, state: nextState)
+        segments[segmentID] = SessionSegment(text: finalText, state: nextState,
+            displayIsFinal: displayIsFinal)
         rawIdsByEffective[segmentID, default: []].insert(rawSessionID)
         if let rawChunkID { rawChunkByEffective[segmentID, default: []].insert(rawChunkID) }
         if isFinal {
             if activeSegmentID == segmentID { activeSegmentID = nil }
         } else {
             activeSegmentID = segmentID
+        }
+    }
+
+    /// 只更新已经存在的显示范围；原文、译文和不同身份之间互不影响。
+    private func updateDisplayCompletion(_ event: DemoConversationEvent, aggregate: inout BubbleAggregate) {
+        switch event.stage {
+        case .asr:
+            aggregate.sentenceSource.updateDisplayFinal(id: event.chunkId, isFinal: event.displayIsFinal)
+            let id = String(event.sessionId)
+            if var segment = aggregate.sourceBySession[id] {
+                segment.displayIsFinal = event.displayIsFinal
+                aggregate.sourceBySession[id] = segment
+            }
+        case .mt:
+            aggregate.sentenceTranslation.updateDisplayFinal(id: event.chunkId, isFinal: event.displayIsFinal)
+            if let id = normalizedChunkId(event.chunkId) {
+                if var segment = aggregate.translatedBySession[id] {
+                    segment.displayIsFinal = event.displayIsFinal
+                    aggregate.translatedBySession[id] = segment
+                }
+                aggregate.offlineTranslationDisplaySegments = aggregate.offlineTranslationDisplaySegments.map { segment in
+                    var copy = segment
+                    if copy.rawChunkIds.contains(where: { normalizedChunkId($0) == id }) {
+                        copy.isFinal = event.displayIsFinal
+                    }
+                    return copy
+                }
+            }
+        case .tts:
+            break
         }
     }
 
@@ -763,6 +859,30 @@ final class DemoConversationBubbleAssembler {
 
         aggregate.offlineTranslatedSessionIds = [event.sessionId]
         aggregate.offlineTranslatedChunkIds = chunkId.map { [$0] } ?? []
+        let body = aggregate.offlineProvisionalTranslatedText ?? aggregate.offlineConfirmedTranslatedText
+        let base = event.isFinal ? aggregate.offlineLatestFinalBaseText : aggregate.offlineProvisionalBaseText
+        aggregate.offlineTranslationDisplaySegments = cumulativeDisplaySegments(text: body, base: base,
+            previous: aggregate.offlineTranslationDisplaySegments, event: event)
+    }
+
+    /// 仅把原累计快照拆成样式范围，保留已知前缀的身份与字重；不参与正文生成。
+    private func cumulativeDisplaySegments(text: String, base: String,
+                                           previous: [DemoConversationDisplaySegment],
+                                           event: DemoConversationEvent) -> [DemoConversationDisplaySegment] {
+        let canKeepPrefix = text.hasPrefix(base) && previous.map(\.text).joined().hasPrefix(base)
+        var remaining = canKeepPrefix ? base.count : 0
+        var result: [DemoConversationDisplaySegment] = []
+        for segment in previous where remaining > 0 {
+            let prefix = String(segment.text.prefix(remaining))
+            result.append(withText(segment, prefix))
+            remaining -= prefix.count
+        }
+        let tail = String(text.dropFirst(canKeepPrefix ? base.count : 0))
+        if !tail.isEmpty {
+            result.append(DemoConversationDisplaySegment(text: tail, rawSessionIds: [event.sessionId],
+                rawChunkIds: event.chunkId.map { [$0] } ?? [], isFinal: event.displayIsFinal, separator: ""))
+        }
+        return result
     }
 
     private func appendOfflineTail(_ stablePrefix: String, _ tail: String) -> String {
@@ -790,10 +910,18 @@ final class DemoConversationBubbleAssembler {
         } else {
             text = appendEllipsisIfNeeded(normalized)
         }
-        return (text,
-                [DemoConversationDisplaySegment(text: text,
-                                                rawSessionIds: aggregate.offlineTranslatedSessionIds,
-                                                rawChunkIds: aggregate.offlineTranslatedChunkIds)])
+        var remaining = text.count
+        var segments: [DemoConversationDisplaySegment] = []
+        for segment in aggregate.offlineTranslationDisplaySegments where remaining > 0 {
+            let body = String(segment.text.prefix(remaining))
+            segments.append(withText(segment, body))
+            remaining -= body.count
+        }
+        // 省略号仍由既有正文规则决定；仅让最后一个样式范围覆盖它。
+        if remaining > 0, let last = segments.popLast() {
+            segments.append(withText(last, last.text + String(text.suffix(remaining))))
+        }
+        return (text, segments)
     }
 
     private func isNotOlderOfflineChunk(_ incoming: String?, than current: String?) -> Bool {
@@ -837,7 +965,8 @@ final class DemoConversationBubbleAssembler {
             guard normalized.isEmpty == false else { continue }
             result.append(DemoConversationDisplaySegment(text: normalized,
                                                          rawSessionIds: rawIds[segmentID] ?? [],
-                                                         rawChunkIds: rawChunks[segmentID] ?? []))
+                                                         rawChunkIds: rawChunks[segmentID] ?? [],
+                                                         isFinal: segment.displayIsFinal))
             latestIsFinal = segment.isFinal
         }
         guard result.isEmpty == false else { return [] }
@@ -853,7 +982,9 @@ final class DemoConversationBubbleAssembler {
         DemoConversationDisplaySegment(text: text,
                                        rawSessionIds: segment.rawSessionIds,
                                        rawChunkIds: segment.rawChunkIds,
-                                       isHighlighted: segment.isHighlighted)
+                                       isHighlighted: segment.isHighlighted,
+                                       isFinal: segment.isFinal,
+                                       separator: segment.separator)
     }
 
     private func composeText(order: [String], segments: [String: SessionSegment], isActiveBubble: Bool, preserveSourceText: Bool = false) -> String {
@@ -904,8 +1035,20 @@ final class DemoConversationBubbleAssembler {
 /// 把气泡的 meta 行 + 源语言/目标语言分段文本渲染为带颜色的富文本。
 ///
 /// 仅 `online_tts_state` 命中的 session 片段（`isHighlighted`）显示为蓝色，其余为默认色；
-/// meta 行使用次要色。两个在线场景（收听 / 一对一）共用。
+/// meta 行使用次要色。在线、离线与并行 Demo 共用分段字重规则。
 enum DemoConversationSegmentRenderer {
+    static func makeConcurrentText(sourceSegments: [DemoConversationDisplaySegment], sourceFallbackText: String,
+                                   translatedSegments: [DemoConversationDisplaySegment], translatedFallbackText: String,
+                                   font: UIFont) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        appendLine(to: result, label: "ASR：", segments: sourceSegments,
+                   fallbackText: sourceFallbackText, font: font, preserveSourceText: true)
+        result.append(NSAttributedString(string: "\n", attributes: [.font: font]))
+        appendLine(to: result, label: "MT：", segments: translatedSegments,
+                   fallbackText: translatedFallbackText, font: font, emptyFallbackText: "")
+        return result
+    }
+
     static func makeBubbleText(metaText: String,
                                sourceLangCode: String,
                                sourceSegments: [DemoConversationDisplaySegment],
@@ -942,25 +1085,27 @@ enum DemoConversationSegmentRenderer {
                                    segments: [DemoConversationDisplaySegment],
                                    fallbackText: String,
                                    font: UIFont,
-                                   preserveSourceText: Bool = false) {
+                                   preserveSourceText: Bool = false,
+                                   emptyFallbackText: String = "...") {
         result.append(NSAttributedString(string: label,
                                          attributes: [.font: font, .foregroundColor: UIColor.label]))
         let nonEmpty = segments.filter { $0.text.isEmpty == false }
         // 离线等场景未提供分段时，回退到整段纯文本（默认色），保持既有展示。
         guard nonEmpty.isEmpty == false else {
-            let display = preserveSourceText ? fallbackText : (fallbackText.isEmpty ? "..." : fallbackText)
+            let display = preserveSourceText ? fallbackText : (fallbackText.isEmpty ? emptyFallbackText : fallbackText)
             result.append(NSAttributedString(string: display,
                                              attributes: [.font: font, .foregroundColor: UIColor.label]))
             return
         }
         for (index, segment) in nonEmpty.enumerated() {
             if index > 0 && !preserveSourceText {
-                result.append(NSAttributedString(string: " ",
+                result.append(NSAttributedString(string: segment.separator,
                                                  attributes: [.font: font, .foregroundColor: UIColor.label]))
             }
             let color: UIColor = segment.isHighlighted ? .systemBlue : .label
+            let segmentFont = UIFont.systemFont(ofSize: font.pointSize, weight: segment.isFinal ? .bold : .regular)
             result.append(NSAttributedString(string: segment.text,
-                                             attributes: [.font: font, .foregroundColor: color]))
+                                             attributes: [.font: segmentFont, .foregroundColor: color]))
         }
     }
 }

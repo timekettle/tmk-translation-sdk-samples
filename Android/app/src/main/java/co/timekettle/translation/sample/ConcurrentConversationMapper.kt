@@ -24,6 +24,8 @@ class ConcurrentConversationMapper(
         val runtime: Runtime,
         val asr: String,
         val mt: String,
+        val sourceSegments: List<DemoConversationDisplaySegment> = emptyList(),
+        val translatedSegments: List<DemoConversationDisplaySegment> = emptyList(),
     )
 
     private data class RowKey(
@@ -54,8 +56,8 @@ class ConcurrentConversationMapper(
 
     fun rows(): List<Row> {
         val current = linkedMapOf<RowKey, Row>()
-        addSnapshots(Runtime.ONLINE, onlineAssembler.snapshot(), current)
-        addSnapshots(Runtime.OFFLINE, offlineAssembler.snapshot(), current)
+        addSnapshots(Runtime.ONLINE, onlineAssembler.snapshotWithSegments(), current)
+        addSnapshots(Runtime.OFFLINE, offlineAssembler.snapshotWithSegments(), current)
 
         current.keys.forEach { key ->
             if (rowOrder.containsKey(key) == false) {
@@ -92,24 +94,45 @@ class ConcurrentConversationMapper(
         Runtime.OFFLINE -> offlineAssembler
     }
 
+    /** 并行页沿用旧 row 文本，只裁去分段里多出的尾省略号与空白，不改变聚合器。 */
+    private fun alignTranslatedSegments(
+        segments: List<DemoConversationDisplaySegment>,
+        displayText: String,
+    ): List<DemoConversationDisplaySegment> {
+        val textSegments = segments.filter { it.text.isNotEmpty() }
+        val segmentedText = textSegments.joinToString(" ") { it.text }
+        if (segmentedText == displayText) return textSegments
+        // 非前缀差异保守回退 row 原文，保证字体增强不改变旧页面正文。
+        if (!segmentedText.startsWith(displayText)) return emptyList()
+        var consumedLength = 0
+        return textSegments.mapNotNull { segment ->
+            val remaining = displayText.length - consumedLength
+            consumedLength += segment.text.length + 1
+            if (remaining <= 0) null else segment.copy(text = segment.text.take(remaining))
+        }
+    }
+
     private fun addSnapshots(
         runtime: Runtime,
-        snapshots: List<co.timekettle.translation.model.BubbleRowData>,
+        snapshots: List<DemoConversationBubbleSnapshot>,
         target: MutableMap<RowKey, Row>,
     ) {
         snapshots.forEach { snapshot ->
-            val lane = when (snapshot.channel.lowercase()) {
+            val row = snapshot.row
+            val lane = when (row.channel.lowercase()) {
                 "2", DemoConversationLane.RIGHT.rawValue -> Lane.RIGHT
                 else -> Lane.LEFT
             }
-            val key = RowKey(runtime, snapshot.bubbleId, lane)
+            val key = RowKey(runtime, row.bubbleId, lane)
             target[key] = Row(
-                id = "${runtime.name.lowercase()}:${snapshot.bubbleId}:${lane.name.lowercase()}",
-                bubbleId = snapshot.bubbleId,
+                id = "${runtime.name.lowercase()}:${row.bubbleId}:${lane.name.lowercase()}",
+                bubbleId = row.bubbleId,
                 lane = lane,
                 runtime = runtime,
-                asr = snapshot.sourceText,
-                mt = snapshot.translatedText,
+                asr = row.sourceText,
+                mt = row.translatedText,
+                sourceSegments = snapshot.sourceSegments,
+                translatedSegments = alignTranslatedSegments(snapshot.translatedSegments, row.translatedText),
             )
         }
     }
