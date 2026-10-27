@@ -14,6 +14,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import co.timekettle.translation.Cancelable
 import co.timekettle.offlinesdk.vad.VadDetector
 import co.timekettle.translation.config.TmkCreateChannelOptions
@@ -45,8 +46,14 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
+
+enum class ListenAudioSource { MICROPHONE, TEST_AUDIO }
 
 @HiltViewModel
 class OnlineListenViewModel @Inject constructor(
@@ -60,6 +67,9 @@ class OnlineListenViewModel @Inject constructor(
         private const val SAMPLE_RATE = 16000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
+        private const val TEST_AUDIO_ASSET = "saucelabs_en_0_16k_mono_s16le.pcm"
+        private const val TEST_FRAME_BYTES = 640 // 20 ms of 16 kHz mono PCM16
+        private const val TEST_TAIL_FRAMES = 50 // One second of silence for the final ASR result.
         private const val SPEECH_START_TRACE_MIN_INTERVAL_MS = 6_000L
     }
 
@@ -79,6 +89,21 @@ class OnlineListenViewModel @Inject constructor(
     private var channelCancelable: Cancelable? = null
     private var speakerCancelable: Cancelable? = null
     private var audioRecord: AudioRecord? = null
+    private val _audioSource = MutableStateFlow(ListenAudioSource.MICROPHONE)
+    val audioSource: StateFlow<ListenAudioSource> = _audioSource.asStateFlow()
+    private val _testAudioComplete = MutableStateFlow(false)
+    val testAudioComplete: StateFlow<Boolean> = _testAudioComplete.asStateFlow()
+    private val sauceListenMetrics = SauceListenMetrics()
+    val testMetrics: StateFlow<String> = sauceListenMetrics.snapshot
+    private val _remoteTestAudioUrl = MutableStateFlow("")
+    val remoteTestAudioUrl: StateFlow<String> = _remoteTestAudioUrl.asStateFlow()
+    private val _remoteDownload = MutableStateFlow(SauceRemotePcmDownloader.diagnostic("idle"))
+    val remoteDownload: StateFlow<String> = _remoteDownload.asStateFlow()
+    private val _remoteDownloadStatus = MutableStateFlow("idle")
+    val remoteDownloadStatus: StateFlow<String> = _remoteDownloadStatus.asStateFlow()
+    private val _isRemoteDownloading = MutableStateFlow(false)
+    val isRemoteDownloading: StateFlow<Boolean> = _isRemoteDownloading.asStateFlow()
+    private var remoteTestAudioFile: File? = null
     private val ttsCoordinator = DemoTtsPlaybackCoordinator(
         tag = TAG,
         scene = DemoTtsScene.LISTEN,
@@ -199,6 +224,41 @@ class OnlineListenViewModel @Inject constructor(
     private var pendingTargetLang: String? = null
 
     private fun log(msg: String) = Log.d(TAG, msg)
+
+    fun setAudioSource(source: ListenAudioSource) {
+        if (isRecording) return
+        _audioSource.value = source
+        _testAudioComplete.value = false
+        sauceListenMetrics.reset()
+    }
+
+    fun setRemoteTestAudioUrl(url: String) {
+        if (isRecording || _isRemoteDownloading.value) return
+        _remoteTestAudioUrl.value = url
+        remoteTestAudioFile = null
+        _remoteDownload.value = SauceRemotePcmDownloader.diagnostic("idle")
+        _remoteDownloadStatus.value = "idle"
+    }
+
+    fun downloadRemoteTestAudio() {
+        if (isRecording || _isRemoteDownloading.value) return
+        val url = _remoteTestAudioUrl.value.trim()
+        remoteTestAudioFile = null
+        _isRemoteDownloading.value = true
+        _remoteDownloadStatus.value = "downloading"
+        _remoteDownload.value = SauceRemotePcmDownloader.diagnostic("downloading")
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                SauceRemotePcmDownloader.fetch(application, url)
+            }
+            if (_remoteTestAudioUrl.value.trim() == url) {
+                remoteTestAudioFile = result.file
+                _remoteDownload.value = result.diagnostic
+                _remoteDownloadStatus.value = if (result.file != null) "ok" else "failed"
+            }
+            _isRemoteDownloading.value = false
+        }
+    }
 
     private fun publishBubbles() {
         val blueSessions = blueSessionByChannel.values.toSet()
@@ -802,6 +862,7 @@ class OnlineListenViewModel @Inject constructor(
         override fun onRecognized(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
             Log.d(TAG, DemoTmkResultLogFormatter.makeLine("OnlineListen", "ASR", r, isFinal))
             val text = r?.data ?: ""
+            if (_audioSource.value == ListenAudioSource.TEST_AUDIO) sauceListenMetrics.recordAsr(text, isFinal)
             val src = r?.srcCode?.takeIf { it.isNotEmpty() } ?: _sourceLang.value
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
             DemoConversationEventAdapter.makeRecognizedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
@@ -815,6 +876,7 @@ class OnlineListenViewModel @Inject constructor(
         override fun onTranslate(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, isFinal: Boolean) {
             Log.d(TAG, DemoTmkResultLogFormatter.makeLine("OnlineListen", "MT", r, isFinal))
             val text = r?.data ?: ""
+            if (_audioSource.value == ListenAudioSource.TEST_AUDIO) sauceListenMetrics.recordMt(text, isFinal)
             val src = r?.srcCode?.takeIf { it.isNotEmpty() } ?: _sourceLang.value
             val dst = r?.dstCode?.takeIf { it.isNotEmpty() } ?: _targetLang.value
             DemoConversationEventAdapter.makeTranslatedEvent(r, isFinal, src, dst)?.let { bubbleAssembler.consume(it) }
@@ -826,6 +888,7 @@ class OnlineListenViewModel @Inject constructor(
             }
         }
         override fun onAudioDataReceive(fromEngine: AbstractChannelEngine?, r: co.timekettle.translation.model.Result<String>?, data: ByteArray, channelCount: Int) {
+            if (_audioSource.value == ListenAudioSource.TEST_AUDIO) sauceListenMetrics.recordTtsPacket(data)
             ttsCoordinator.handleAudioData(r, data, channelCount)
         }
         override fun onError(code: Int, msg: String) {
@@ -989,16 +1052,42 @@ class OnlineListenViewModel @Inject constructor(
     }
 
     private fun startRecording(): Boolean {
-        if (ContextCompat.checkSelfPermission(application, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+        val source = _audioSource.value
+        if (source == ListenAudioSource.MICROPHONE &&
+            ContextCompat.checkSelfPermission(application, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             _statusText.value = "麦克风权限未授权"
             log("没有录音权限")
             return false
         }
         if (isRecording) return true
+        val testStream = if (source == ListenAudioSource.TEST_AUDIO) {
+            try {
+                if (_remoteTestAudioUrl.value.isNotBlank()) {
+                    val downloaded = remoteTestAudioFile
+                    if (downloaded == null || !downloaded.isFile) {
+                        _statusText.value = "请先下载远程测试音频"
+                        return false
+                    }
+                    downloaded.inputStream()
+                } else application.assets.open(TEST_AUDIO_ASSET)
+            } catch (e: Exception) {
+                _statusText.value = "测试音频读取失败：${e.message}"
+                return false
+            }
+        } else null
         val sessionId = pageSessionId.get()
-        val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
-        audioRecord = AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT, bufferSize)
-        isRecording = true; audioRecord?.startRecording(); log("录音已开始")
+        val bufferSize = if (source == ListenAudioSource.MICROPHONE) {
+            AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+                .coerceAtLeast(TEST_FRAME_BYTES)
+        } else TEST_FRAME_BYTES
+        if (source == ListenAudioSource.MICROPHONE) {
+            audioRecord = AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT, bufferSize)
+            audioRecord?.startRecording()
+        }
+        isRecording = true
+        _testAudioComplete.value = false
+        if (source == ListenAudioSource.TEST_AUDIO) sauceListenMetrics.reset()
+        log("${if (source == ListenAudioSource.TEST_AUDIO) "测试音频" else "录音"}已开始")
         _captureSampleRate.value = SAMPLE_RATE
         _captureChannels.value = 1
         vadDetector = VadDetector(sampleRate = SAMPLE_RATE).apply {
@@ -1018,13 +1107,49 @@ class OnlineListenViewModel @Inject constructor(
             }); init()
         }
         recordingThread = Thread({
-            val buf = ByteArray(bufferSize)
-            while (isRecording && isActiveSession(sessionId)) {
-                val read = audioRecord?.read(buf, 0, buf.size) ?: -1
-                if (read > 0) {
-                    val data = buf.copyOf(read); vadDetector?.pushAudioBytes(data)
+            testStream.use { stream ->
+                val buf = ByteArray(bufferSize)
+                val startedAtMs = SystemClock.elapsedRealtime()
+                var frameIndex = 0L
+                var tailFrames = 0
+                while (isRecording && isActiveSession(sessionId)) {
+                    val read = if (source == ListenAudioSource.MICROPHONE) {
+                        audioRecord?.read(buf, 0, buf.size) ?: -1
+                    } else if (stream != null) {
+                        var count = 0
+                        while (count < buf.size) {
+                            val n = stream.read(buf, count, buf.size - count)
+                            if (n <= 0) break
+                            count += n
+                        }
+                        if (count == 0 && tailFrames < TEST_TAIL_FRAMES) {
+                            buf.fill(0)
+                            tailFrames++
+                            buf.size
+                        } else count
+                    } else -1
+                    if (read <= 0) break
+                    if (source == ListenAudioSource.TEST_AUDIO) {
+                        val waitMs = startedAtMs + frameIndex * 20 - SystemClock.elapsedRealtime()
+                        if (waitMs > 0) {
+                            try { Thread.sleep(waitMs) } catch (_: InterruptedException) { break }
+                        }
+                        frameIndex++
+                    }
+                    if (!isRecording || !isActiveSession(sessionId)) break
+                    val data = buf.copyOf(read)
+                    vadDetector?.pushAudioBytes(data)
                     val extra = pendingMetadata; if (extra != null) pendingMetadata = null
+                    if (source == ListenAudioSource.TEST_AUDIO) sauceListenMetrics.markInputStarted()
                     channel?.pushStreamAudioData(data, 1, extra)
+                }
+                if (source == ListenAudioSource.TEST_AUDIO && isRecording && isActiveSession(sessionId)) {
+                    Handler(Looper.getMainLooper()).post {
+                        if (isRecording && isActiveSession(sessionId)) {
+                            _testAudioComplete.value = true
+                            _statusText.value = "测试音频已推送完毕，等待翻译结果"
+                        }
+                    }
                 }
             }
         }, "$TAG-Recorder").apply { start() }
@@ -1042,6 +1167,7 @@ class OnlineListenViewModel @Inject constructor(
         recordingThread = null
         _captureSampleRate.value = 0
         _captureChannels.value = 0
+        _testAudioComplete.value = false
         _playbackChannels.value = 0
         ttsCoordinator.setActive(false)
         ttsCoordinator.release()

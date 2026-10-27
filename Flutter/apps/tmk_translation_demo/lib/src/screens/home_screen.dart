@@ -1,6 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:tmk_translation_flutter/tmk_translation_flutter.dart' as api;
 import '../tmk_translation_adapter.dart';
 
@@ -8,6 +11,10 @@ import '../sample_settings_store.dart';
 import '../theme.dart';
 import 'session_screen.dart';
 import 'settings_screen.dart';
+
+const _sauceDeviceDiagnostics = bool.fromEnvironment(
+  'TMK_SAUCE_DEVICE_DIAGNOSTICS',
+);
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -33,12 +40,43 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _hasLoadedLanguagesOnce = false;
   bool _shouldRetryOnlineLanguagesOnResume = false;
   bool _lastOnlineLanguagesLoadFailed = false;
+  Map<String, dynamic> _sauceDeviceEnvironment = {'status': 'not_requested'};
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _bootstrap();
+  }
+
+  Future<void> _readSauceDeviceEnvironment() async {
+    if (_sauceDeviceEnvironment['status'] == 'pending') return;
+    setState(() {
+      _sauceDeviceEnvironment = {'status': 'pending'};
+    });
+    try {
+      final payload = await const MethodChannel(
+        'tmk.sauce.deviceEnvironment',
+      ).invokeMapMethod<String, dynamic>('read');
+      if (mounted) {
+        setState(() {
+          _sauceDeviceEnvironment = {
+            ...?payload,
+            'status': payload?['status'] ?? 'empty_response',
+            'sample_network_environment': _settings.networkEnvironment,
+          };
+        });
+      }
+    } on PlatformException catch (error) {
+      if (mounted) {
+        setState(() {
+          _sauceDeviceEnvironment = {
+            'status': 'channel_error',
+            'detail': error.code,
+          };
+        });
+      }
+    }
   }
 
   @override
@@ -280,16 +318,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             itemBuilder: (context, index) {
               final item = _languages[index];
               final isSelected = item.code == currentOption?.code;
-              return ListTile(
-                title: Text(item.title),
-                subtitle: Text(
-                  item.code,
-                  style: const TextStyle(color: appTextMuted),
+              return Semantics(
+                identifier: 'tmk.sauce.language.${item.code}',
+                child: ListTile(
+                  title: Text(item.title),
+                  subtitle: Text(
+                    item.code,
+                    style: const TextStyle(color: appTextMuted),
+                  ),
+                  trailing: isSelected
+                      ? const Icon(Icons.check_circle_rounded, color: appAccent)
+                      : null,
+                  onTap: () => Navigator.of(context).pop(item),
                 ),
-                trailing: isSelected
-                    ? const Icon(Icons.check_circle_rounded, color: appAccent)
-                    : null,
-                onTap: () => Navigator.of(context).pop(item),
               );
             },
           ),
@@ -472,26 +513,40 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       const SizedBox(height: 28),
                       const _SectionLabel('③ 语言设置'),
                       const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: _LanguageCard(
-                              label: '源语言',
-                              option: _sourceLanguage,
-                              onTap: () => _pickLanguage(isSource: true),
+                      Semantics(
+                        identifier: 'tmk.sauce.home.languagePair',
+                        explicitChildNodes: true,
+                        label: 'TMK_LANGUAGE_PAIR=${jsonEncode({'source': _sourceLanguage?.code, 'target': _targetLanguage?.code})}',
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Semantics(
+                                identifier: 'tmk.sauce.home.sourceLanguage',
+                                child: _LanguageCard(
+                                  label: '源语言',
+                                  option: _sourceLanguage,
+                                  onTap: () => _pickLanguage(isSource: true),
+                                ),
+                              ),
                             ),
-                          ),
-                          const SizedBox(width: 12),
-                          _SwapLanguageButton(onTap: _swapLanguages),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: _LanguageCard(
-                              label: '目标语言',
-                              option: _targetLanguage,
-                              onTap: () => _pickLanguage(isSource: false),
+                            const SizedBox(width: 12),
+                            Semantics(
+                              identifier: 'tmk.sauce.home.swap',
+                              child: _SwapLanguageButton(onTap: _swapLanguages),
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Semantics(
+                                identifier: 'tmk.sauce.home.targetLanguage',
+                                child: _LanguageCard(
+                                  label: '目标语言',
+                                  option: _targetLanguage,
+                                  onTap: () => _pickLanguage(isSource: false),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                       const SizedBox(height: 16),
                       Text(
@@ -515,28 +570,60 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   ),
                 ),
               ),
+              if (_sauceDeviceDiagnostics &&
+                  (Platform.isIOS || Platform.isAndroid))
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Semantics(
+                      identifier: 'tmk.sauce.home.environment',
+                      label:
+                          'TMK_DEVICE_ENV=${jsonEncode(_sauceDeviceEnvironment)}',
+                      child: Text(
+                        '设备定位：${_sauceDeviceEnvironment['status'] == 'ok' ? '已获取' : _sauceDeviceEnvironment['status']}',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: appTextMuted,
+                        ),
+                      ),
+                    ),
+                    Semantics(
+                      identifier: 'tmk.sauce.home.requestLocation',
+                      child: TextButton(
+                        onPressed:
+                            _sauceDeviceEnvironment['status'] == 'pending'
+                            ? null
+                            : () => unawaited(_readSauceDeviceEnvironment()),
+                        child: const Text('读取设备定位'),
+                      ),
+                    ),
+                  ],
+                ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
                 child: SizedBox(
                   width: double.infinity,
                   height: 56,
-                  child: FilledButton(
-                    onPressed: _canStart ? _openSession : null,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: appPrimary,
-                      disabledBackgroundColor: appBorder,
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(18),
+                  child: Semantics(
+                    identifier: 'tmk.sauce.home.start',
+                    child: FilledButton(
+                      onPressed: _canStart ? _openSession : null,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: appPrimary,
+                        disabledBackgroundColor: appBorder,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(18),
+                        ),
                       ),
+                      child: _isBootstrapping
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('开始翻译'),
                     ),
-                    child: _isBootstrapping
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('开始翻译'),
                   ),
                 ),
               ),

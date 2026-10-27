@@ -16,6 +16,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -30,6 +33,7 @@ import androidx.compose.ui.window.PopupProperties
 import cafe.adriel.voyager.core.screen.Screen
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
+import org.json.JSONObject
 
 private val BgColor = Color(0xFF0F1117)
 private val SurfaceColor = Color(0xFF1A1D27)
@@ -136,6 +140,8 @@ class HomeScreen : Screen {
     @Composable
     override fun Content() {
         val navigator = LocalNavigator.currentOrThrow
+        val context = LocalContext.current
+        var deviceEnvironment by remember { mutableStateOf<Map<String, Any?>>(mapOf("status" to "not_requested")) }
         var scenarioName by rememberSaveable { mutableStateOf(ScenarioType.LISTEN.name) }
         var modeId by rememberSaveable { mutableStateOf(ModeId.ONLINE) }
         var sourceLang by rememberSaveable { mutableStateOf("zh-CN") }
@@ -217,6 +223,32 @@ class HomeScreen : Screen {
                     modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
                 Text("先选场景，再选模式", fontSize = 14.sp, color = TextDim,
                     modifier = Modifier.fillMaxWidth().padding(top = 4.dp), textAlign = TextAlign.Center)
+
+                if (BuildConfig.TMK_SAUCE_DEVICE_DIAGNOSTICS) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "设备定位：${if (deviceEnvironment["status"] == "ok") "已获取" else deviceEnvironment["status"]}",
+                        fontSize = 11.sp,
+                        color = TextDim,
+                        modifier = Modifier.semantics {
+                            contentDescription = "TMK_DEVICE_ENV=${JSONObject(deviceEnvironment)}"
+                        },
+                    )
+                    TextButton(
+                        onClick = {
+                            deviceEnvironment = mapOf("status" to "pending")
+                            val activity = context as? MainActivity
+                            if (activity == null) {
+                                deviceEnvironment = mapOf("status" to "activity_unavailable")
+                            } else {
+                                activity.readSauceDeviceEnvironment { result -> deviceEnvironment = result }
+                            }
+                        },
+                        enabled = deviceEnvironment["status"] != "pending",
+                    ) {
+                        Text("读取设备定位")
+                    }
+                }
 
                 Spacer(Modifier.height(28.dp))
 

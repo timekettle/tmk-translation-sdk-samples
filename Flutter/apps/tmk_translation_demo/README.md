@@ -44,6 +44,7 @@ maven(url = "https://mvnrepo.jiagouyun.com/repository/maven-releases")
 - 订阅插件事件并渲染识别/翻译气泡。
 - 收听模式从手机麦克风推送单声道 PCM；一对一模式将手机麦克风映射到右声道，
   将原 Sample 的固定英文 PCM 映射到左声道。
+- 在线收听可切换到内置测试 PCM，供 Sauce Labs 真机自动化验证；见 [云测说明](saucelabs/README.md)。
 - 按一对一播放音源选择消费 SDK 返回的翻译 PCM，并通过手机扬声器播放。
 - 在 Sample 内持久化诊断、控制台日志和网络环境设置。
 

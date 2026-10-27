@@ -1,12 +1,52 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tmk_translation_demo/src/sample_fixed_pcm_source.dart';
+import 'package:tmk_translation_demo/src/sample_online_listen_test_audio.dart';
 import 'package:tmk_translation_demo/src/sample_pcm_player.dart';
 import 'package:tmk_translation_demo/src/sample_session_audio_input.dart';
 import 'package:tmk_translation_demo/src/tmk_translation_adapter.dart';
 import 'package:tmk_translation_flutter/tmk_translation_flutter.dart' as api;
 
 void main() {
+  group('online listening test audio', () {
+    test('pads the final frame and pushes one second of silence', () async {
+      final frames = <Uint8List>[];
+      final source = SampleOnlineListenTestAudio(
+        bundle: _MemoryAssetBundle({
+          SampleOnlineListenTestAudio.asset: List<int>.filled(642, 7),
+        }),
+        wait: (_) async {},
+      );
+
+      final finished = await source.play((frame) async => frames.add(frame));
+
+      expect(finished, isTrue);
+      expect(frames, hasLength(2 + SampleOnlineListenTestAudio.tailFrames));
+      expect(frames.first, everyElement(7));
+      expect(frames[1].sublist(0, 2), [7, 7]);
+      expect(frames[1].sublist(2), everyElement(0));
+      expect(frames.last, everyElement(0));
+    });
+
+    test('cancellation stops the remaining frames', () async {
+      final frames = <Uint8List>[];
+      final source = SampleOnlineListenTestAudio(
+        bundle: _MemoryAssetBundle({
+          SampleOnlineListenTestAudio.asset: List<int>.filled(1280, 1),
+        }),
+        wait: (_) async {},
+      );
+
+      final finished = await source.play((frame) async {
+        frames.add(frame);
+        source.cancel();
+      });
+
+      expect(finished, isFalse);
+      expect(frames, hasLength(1));
+    });
+  });
+
   group('fixed PCM source', () {
     test(
       'pads the last frame and waits three seconds before repeating',

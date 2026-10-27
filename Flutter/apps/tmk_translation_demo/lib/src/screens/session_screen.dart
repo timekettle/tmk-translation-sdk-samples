@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/cupertino.dart';
@@ -10,6 +11,7 @@ import '../tmk_translation_adapter.dart';
 import '../conversation_bubbles.dart';
 import '../models.dart';
 import '../sample_fixed_pcm_source.dart';
+import '../sample_online_listen_test_audio.dart';
 import '../sample_pcm_capture.dart';
 import '../sample_pcm_player.dart';
 import '../sample_session_audio_input.dart';
@@ -32,6 +34,10 @@ class _SessionScreenState extends State<SessionScreen> {
   final Map<String, int> _bubbleIndex = {};
   final SamplePcmCapture _pcmCapture = SamplePcmCapture();
   final SampleFixedPcmSource _fixedPcmSource = SampleFixedPcmSource();
+  final SampleOnlineListenTestAudio _testAudio = SampleOnlineListenTestAudio();
+  final TextEditingController _remoteTestAudioUrl = TextEditingController();
+  Map<String, Object?> _remoteDownload = const {'status': 'idle'};
+  bool _remoteDownloading = false;
   late final SamplePcmPlayer _pcmPlayer;
 
   final api.TmkTranslationSdk _sdk = api.TmkTranslationSdk.instance;
@@ -56,6 +62,59 @@ class _SessionScreenState extends State<SessionScreen> {
   int _sessionGeneration = 0;
   int _captureGeneration = 0;
   bool _captureFailureInProgress = false;
+  bool _isLeaving = false;
+  bool _useTestAudio = false;
+  bool _testAudioFinished = false;
+  Future<void>? _testAudioTask;
+  Stopwatch? _testInputClock;
+  int? _firstTestAsrMs;
+  int? _firstTestMtMs;
+  int? _firstTestAudioCallbackMs;
+  int? _firstTestTtsPacketMs;
+  final List<String> _testAsrFinalSegments = [];
+  final List<String> _testMtFinalSegments = [];
+
+  void _resetTestMetrics() {
+    _testInputClock?.stop();
+    _testInputClock = null;
+    _firstTestAsrMs = null;
+    _firstTestMtMs = null;
+    _firstTestAudioCallbackMs = null;
+    _firstTestTtsPacketMs = null;
+    _testAsrFinalSegments.clear();
+    _testMtFinalSegments.clear();
+  }
+
+  void _markTestInputStarted() {
+    if (_testInputClock != null) return;
+    _testInputClock = Stopwatch()..start();
+    setState(() {});
+  }
+
+  void _recordTestText(TmkConversationTextEvent event) {
+    final clock = _testInputClock;
+    final text = event.text?.trim() ?? '';
+    if (clock == null || text.isEmpty) return;
+    if (event is TmkRecognizedEvent) {
+      _firstTestAsrMs ??= clock.elapsedMilliseconds;
+      if (event.isFinal) _testAsrFinalSegments.add(text);
+    } else if (event is TmkTranslatedEvent) {
+      _firstTestMtMs ??= clock.elapsedMilliseconds;
+      if (event.isFinal) _testMtFinalSegments.add(text);
+    }
+  }
+
+  String get _testMetricsPayload =>
+      'TMK_TEST_METRICS=${jsonEncode({'schema_version': 1, 'input_started': _testInputClock != null, 'first_asr_ms': _firstTestAsrMs, 'first_mt_ms': _firstTestMtMs, 'first_audio_callback_ms': _firstTestAudioCallbackMs, 'first_tts_packet_ms': _firstTestTtsPacketMs, 'asr_final_segments': _testAsrFinalSegments, 'mt_final_segments': _testMtFinalSegments})}';
+
+  bool _containsAudiblePcm16Le(Uint8List data) {
+    for (var index = 0; index + 1 < data.length; index += 2) {
+      final raw = data[index] | (data[index + 1] << 8);
+      final sample = raw >= 0x8000 ? raw - 0x10000 : raw;
+      if (sample.abs() > 2) return true;
+    }
+    return false;
+  }
 
   @override
   void initState() {
@@ -72,6 +131,7 @@ class _SessionScreenState extends State<SessionScreen> {
   @override
   void dispose() {
     _sessionGeneration++;
+    _remoteTestAudioUrl.dispose();
     unawaited(_disposeResources());
     super.dispose();
   }
@@ -80,6 +140,13 @@ class _SessionScreenState extends State<SessionScreen> {
     await _disposeSession(invalidateGeneration: false);
     await _pcmCapture.dispose();
     await _pcmPlayer.dispose();
+  }
+
+  Future<void> _leaveSession() async {
+    if (_isLeaving) return;
+    _isLeaving = true;
+    await _disposeSession();
+    if (mounted) Navigator.of(context).pop();
   }
 
   TmkLanguageSource get _languageSource {
@@ -106,9 +173,28 @@ class _SessionScreenState extends State<SessionScreen> {
     return !_isCreating &&
         !_isStarting &&
         !_isStarted &&
+        !_remoteDownloading &&
+        (!_useTestAudio || _sessionConfig.scenario != TmkScenario.listen ||
+            _remoteTestAudioUrl.text.trim().isEmpty || _remoteDownload['status'] == 'ok') &&
         _sessionId != null &&
         (_sessionConfig.mode != TmkTranslationMode.offline ||
             (_offlineModelStatus?.isReady ?? false));
+  }
+
+  Future<void> _downloadRemoteTestAudio() async {
+    if (_remoteDownloading || _isStarted) return;
+    final url = _remoteTestAudioUrl.text.trim();
+    if (url.isEmpty) return;
+    setState(() {
+      _remoteDownloading = true;
+      _remoteDownload = const {'status': 'downloading'};
+    });
+    final result = await _testAudio.downloadRemote(url);
+    if (!mounted) return;
+    setState(() {
+      _remoteDownloading = false;
+      _remoteDownload = result;
+    });
   }
 
   Future<void> _disposeSession({bool invalidateGeneration = true}) async {
@@ -117,6 +203,9 @@ class _SessionScreenState extends State<SessionScreen> {
     }
     _captureGeneration++;
     _captureFailureInProgress = false;
+    _testAudio.cancel();
+    final testAudioTask = _testAudioTask;
+    _testAudioTask = null;
     final creation = _creationOperation;
     _creationOperation = null;
     final session = _session;
@@ -131,6 +220,7 @@ class _SessionScreenState extends State<SessionScreen> {
     _eventsSubscription = null;
     await creation?.cancel().catchError((_) {});
     await _pcmCapture.stop().catchError((_) {});
+    await testAudioTask;
     _fixedPcmSource.reset();
     await download?.cancel().catchError((_) {});
     await eventsSubscription?.cancel().catchError((_) {});
@@ -279,7 +369,9 @@ class _SessionScreenState extends State<SessionScreen> {
     final captureGeneration = ++_captureGeneration;
     setState(() {
       _isStarting = true;
+      _testAudioFinished = false;
       _statusText = '正在启动收听...';
+      _resetTestMetrics();
     });
     try {
       if (_sessionConfig.scenario == TmkScenario.oneToOne &&
@@ -296,10 +388,14 @@ class _SessionScreenState extends State<SessionScreen> {
         sampleRate: session.config.audioConfig.pcmSampleRate,
         channelCount: 1,
       );
-      await _pcmCapture.start(
-        onFrame: (pcm) => _pushAudioFrame(session, pcm),
-        onError: (error) => _handleCaptureError(session, error),
-      );
+      if (_useTestAudio && _sessionConfig.scenario == TmkScenario.listen) {
+        await _testAudio.load();
+      } else {
+        await _pcmCapture.start(
+          onFrame: (pcm) => _pushAudioFrame(session, pcm),
+          onError: (error) => _handleCaptureError(session, error),
+        );
+      }
       if (!mounted ||
           captureGeneration != _captureGeneration ||
           !identical(_session, session)) {
@@ -316,6 +412,9 @@ class _SessionScreenState extends State<SessionScreen> {
         _isStarting = false;
         _statusText = '翻译中...';
       });
+      if (_useTestAudio && _sessionConfig.scenario == TmkScenario.listen) {
+        _testAudioTask = _playTestAudio(session, captureGeneration);
+      }
     } catch (error) {
       if (captureGeneration != _captureGeneration ||
           !identical(_session, session)) {
@@ -329,6 +428,42 @@ class _SessionScreenState extends State<SessionScreen> {
         _isStarted = false;
         _isStarting = false;
         _statusText = '开始收听失败：$error';
+      });
+    }
+  }
+
+  Future<void> _playTestAudio(
+    api.TmkTranslationSession session,
+    int captureGeneration,
+  ) async {
+    try {
+      final finished = await _testAudio.play((frame) {
+        if (!identical(_session, session) ||
+            captureGeneration != _captureGeneration) {
+          return Future<void>.value();
+        }
+        _markTestInputStarted();
+        return session.pushStreamAudioData(frame, channelCount: 1);
+      });
+      if (finished &&
+          mounted &&
+          identical(_session, session) &&
+          captureGeneration == _captureGeneration) {
+        setState(() {
+          _testAudioFinished = true;
+        });
+      }
+    } catch (error) {
+      if (!mounted ||
+          !identical(_session, session) ||
+          captureGeneration != _captureGeneration) {
+        return;
+      }
+      _captureGeneration++;
+      _testAudio.cancel();
+      setState(() {
+        _isStarted = false;
+        _statusText = '测试音频推送失败：$error';
       });
     }
   }
@@ -705,8 +840,14 @@ class _SessionScreenState extends State<SessionScreen> {
       case TmkBubbleEvent():
       case TmkRecognizedEvent():
       case TmkTranslatedEvent():
+        if (_useTestAudio && event is TmkConversationTextEvent) {
+          _recordTestText(event);
+        }
         final snapshots = _bubbleRenderPipeline.consumePluginEvent(event);
         if (snapshots.isEmpty) {
+          if (_useTestAudio && event is TmkConversationTextEvent) {
+            setState(() {});
+          }
           break;
         }
         setState(() {
@@ -719,6 +860,21 @@ class _SessionScreenState extends State<SessionScreen> {
           _metrics = event;
         });
       case TmkAudioDataEvent():
+        if (_useTestAudio && event.data.isNotEmpty && _testInputClock != null) {
+          final firstCallback = _firstTestAudioCallbackMs == null;
+          final audible =
+              _firstTestTtsPacketMs == null &&
+              _containsAudiblePcm16Le(event.data);
+          if (firstCallback || audible) {
+            setState(() {
+              _firstTestAudioCallbackMs ??=
+                  _testInputClock!.elapsedMilliseconds;
+              if (audible) {
+                _firstTestTtsPacketMs ??= _testInputClock!.elapsedMilliseconds;
+              }
+            });
+          }
+        }
         unawaited(_playTranslatedAudio(event));
       case TmkDownloadEvent():
         setState(() {
@@ -860,6 +1016,10 @@ class _SessionScreenState extends State<SessionScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
+        leading: Semantics(
+          identifier: 'tmk.sauce.listen.back',
+          child: BackButton(onPressed: _leaveSession),
+        ),
         actions: [
           if (_sessionConfig.scenario == TmkScenario.oneToOne)
             _AppBarAction(title: '播放音源', onPressed: _changePlaybackMode),
@@ -888,6 +1048,106 @@ class _SessionScreenState extends State<SessionScreen> {
                 style: TextStyle(fontSize: 12, color: appTextMuted),
               ),
             ],
+            if (_sessionConfig.scenario == TmkScenario.listen &&
+                _sessionConfig.mode == TmkTranslationMode.online) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  const Text('音频输入'),
+                  ChoiceChip(
+                    label: const Text('麦克风'),
+                    selected: !_useTestAudio,
+                    onSelected: _isStarted || _isStarting
+                        ? null
+                        : (_) => setState(() {
+                            _useTestAudio = false;
+                            _testAudioFinished = false;
+                          }),
+                  ),
+                  Semantics(
+                    identifier: 'tmk.sauce.listen.testAudio',
+                    child: ChoiceChip(
+                      label: const Text('测试音频'),
+                      selected: _useTestAudio,
+                      onSelected: _isStarted || _isStarting
+                          ? null
+                          : (_) => setState(() {
+                              _useTestAudio = true;
+                              _testAudioFinished = false;
+                            }),
+                    ),
+                  ),
+                ],
+              ),
+              if (_useTestAudio) ...[
+                const SizedBox(height: 8),
+                Semantics(
+                  identifier: 'tmk.sauce.listen.remoteUrl',
+                  child: TextField(
+                    controller: _remoteTestAudioUrl,
+                    obscureText: true,
+                    keyboardType: TextInputType.url,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    decoration: const InputDecoration(
+                      labelText: 'HTTPS PCM URL（留空使用包内音频）',
+                      border: OutlineInputBorder(),
+                    ),
+                    enabled: !_isStarted && !_remoteDownloading,
+                    onChanged: (_) => setState(() {
+                      _testAudio.clearRemote();
+                      _remoteDownload = const {'status': 'idle'};
+                    }),
+                  ),
+                ),
+                Semantics(
+                  identifier: 'tmk.sauce.listen.download',
+                  child: FilledButton(
+                    onPressed: !_isStarted && !_remoteDownloading &&
+                            _remoteTestAudioUrl.text.trim().isNotEmpty
+                        ? _downloadRemoteTestAudio
+                        : null,
+                    child: const Text('下载测试音频'),
+                  ),
+                ),
+                Semantics(
+                  identifier: 'tmk.sauce.listen.downloadStatus',
+                  label: 'TMK_TEST_DOWNLOAD=${jsonEncode(_remoteDownload)}',
+                  child: Text(
+                    switch (_remoteDownload['status']) {
+                      'ok' => '远程音频下载成功',
+                      'failed' => '远程音频下载失败',
+                      'downloading' => '远程音频下载中',
+                      _ => '远程音频未下载',
+                    },
+                    style: const TextStyle(fontSize: 12, color: appTextMuted),
+                  ),
+                ),
+              ],
+              Semantics(
+                identifier: 'tmk.sauce.listen.counts',
+                child: Text(
+                  '测试观察：识别${_bubbles.where((bubble) => (bubble.sourceText ?? '').trim().isNotEmpty).length}条，'
+                  '翻译${_bubbles.where((bubble) => (bubble.translatedText ?? '').trim().isNotEmpty).length}条',
+                  style: const TextStyle(fontSize: 12, color: appTextMuted),
+                ),
+              ),
+              Semantics(
+                identifier: 'tmk.sauce.listen.metrics',
+                label: _testMetricsPayload,
+                child: const Text('测试指标采集中'),
+              ),
+              if (_useTestAudio && _testAudioFinished)
+                Semantics(
+                  identifier: 'tmk.sauce.listen.audioComplete',
+                  child: const Text(
+                    '测试音频已推送完毕',
+                    style: TextStyle(fontSize: 12, color: appTextMuted),
+                  ),
+                ),
+            ],
             const SizedBox(height: 10),
             if (_sessionConfig.mode == TmkTranslationMode.offline) ...[
               _OfflineControlPanel(
@@ -907,9 +1167,12 @@ class _SessionScreenState extends State<SessionScreen> {
             Row(
               children: [
                 Expanded(
-                  child: _ControlButton(
-                    title: _isStarting ? '正在启动...' : '开始收听',
-                    onPressed: _canStartListening ? _startListening : null,
+                  child: Semantics(
+                    identifier: 'tmk.sauce.listen.start',
+                    child: _ControlButton(
+                      title: _isStarting ? '正在启动...' : '开始收听',
+                      onPressed: _canStartListening ? _startListening : null,
+                    ),
                   ),
                 ),
                 const SizedBox(width: 8),

@@ -7,6 +7,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
 import cafe.adriel.voyager.core.screen.Screen
@@ -32,6 +37,13 @@ data class ListenModeScreen(
         val isTranslateEngineUpdating by viewModel.isTranslateEngineUpdating.collectAsState()
         val isScenarioUpdating by viewModel.isScenarioUpdating.collectAsState()
         val isStarting by viewModel.isStarting.collectAsState()
+        val audioSource by viewModel.audioSource.collectAsState()
+        val testAudioComplete by viewModel.testAudioComplete.collectAsState()
+        val testMetrics by viewModel.testMetrics.collectAsState()
+        val remoteTestAudioUrl by viewModel.remoteTestAudioUrl.collectAsState()
+        val remoteDownload by viewModel.remoteDownload.collectAsState()
+        val remoteDownloadStatus by viewModel.remoteDownloadStatus.collectAsState()
+        val isRemoteDownloading by viewModel.isRemoteDownloading.collectAsState()
         val bubbles by viewModel.bubbles.collectAsState()
         val statusText by viewModel.statusText.collectAsState()
         val networkStats by viewModel.networkStats.collectAsState()
@@ -227,10 +239,66 @@ data class ListenModeScreen(
                 )
             }
 
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("音频输入")
+                FilterChip(
+                    selected = audioSource == ListenAudioSource.MICROPHONE,
+                    onClick = { viewModel.setAudioSource(ListenAudioSource.MICROPHONE) },
+                    label = { Text("麦克风") },
+                    enabled = !isStarted,
+                )
+                FilterChip(
+                    selected = audioSource == ListenAudioSource.TEST_AUDIO,
+                    onClick = { viewModel.setAudioSource(ListenAudioSource.TEST_AUDIO) },
+                    label = { Text("测试音频") },
+                    enabled = !isStarted,
+                )
+            }
+            if (audioSource == ListenAudioSource.TEST_AUDIO) {
+                OutlinedTextField(
+                    value = remoteTestAudioUrl,
+                    onValueChange = viewModel::setRemoteTestAudioUrl,
+                    modifier = Modifier.fillMaxWidth().semantics {
+                        contentDescription = "tmk.sauce.listen.remoteUrl"
+                    },
+                    label = { Text("HTTPS PCM URL（留空使用包内音频）") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
+                    singleLine = true,
+                    enabled = !isStarted && !isRemoteDownloading,
+                )
+                Button(
+                    onClick = viewModel::downloadRemoteTestAudio,
+                    enabled = !isStarted && !isRemoteDownloading && remoteTestAudioUrl.isNotBlank(),
+                ) { Text("下载测试音频") }
+                Text(
+                    when (remoteDownloadStatus) {
+                        "ok" -> "远程音频下载成功"
+                        "failed" -> "远程音频下载失败"
+                        "downloading" -> "远程音频下载中"
+                        else -> "远程音频未下载"
+                    },
+                    modifier = Modifier.semantics { contentDescription = "TMK_TEST_DOWNLOAD=$remoteDownload" },
+                )
+                val asrRows = bubbles.count { it.row.sourceText.isNotBlank() }
+                val mtRows = bubbles.count { it.row.translatedText.isNotBlank() }
+                Text("测试观察：识别${asrRows}条，翻译${mtRows}条")
+                Text(
+                    "测试指标采集中",
+                    modifier = Modifier.semantics { contentDescription = "TMK_TEST_METRICS=$testMetrics" },
+                )
+                if (testAudioComplete) Text("测试音频已推送完毕")
+            }
+
             TranslationStartStopButtons(
                 startText = "开始收听",
                 stopText = "停止收听",
-                startEnabled = isChannelReady && !isStarted && !isStarting,
+                startEnabled = isChannelReady && !isStarted && !isStarting && !isRemoteDownloading &&
+                    (remoteTestAudioUrl.isBlank() || remoteDownloadStatus == "ok"),
                 stopEnabled = isStarted,
                 onStart = { memoryMonitor.markRunStarted(); viewModel.startTranslation() },
                 onStop = { memoryMonitor.markRunStopped(); viewModel.stopListening() },

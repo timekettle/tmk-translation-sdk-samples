@@ -15,6 +15,11 @@ val sampleAppSecret = providers.environmentVariable("TMK_SAMPLE_APP_SECRET")
     .orElse(providers.gradleProperty("TMK_SAMPLE_APP_SECRET"))
     .orElse("")
     .get()
+val sauceDeviceDiagnostics = providers.gradleProperty("TMK_SAUCE_DEVICE_DIAGNOSTICS")
+    .orElse(providers.environmentVariable("TMK_SAUCE_DEVICE_DIAGNOSTICS"))
+    .orElse("false")
+    .get()
+    .toBooleanStrictOrNull() ?: false
 
 android {
     namespace = "co.timekettle.translation.sample"
@@ -23,7 +28,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "co.timekettle.translation.sample"
+        applicationId = "co.timekettle.saas.sample"
         minSdk = 28
         targetSdk = 36
         versionCode = 1
@@ -37,6 +42,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "TMK_SAMPLE_APP_ID", "\"$sampleAppId\"")
         buildConfigField("String", "TMK_SAMPLE_APP_SECRET", "\"$sampleAppSecret\"")
+        buildConfigField("boolean", "TMK_SAUCE_DEVICE_DIAGNOSTICS", sauceDeviceDiagnostics.toString())
     }
 
     buildTypes {

@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "pairs": [
+    {
+      "source_language": "en-US",
+      "target_language": "zh-CN",
+      "cases": [
+        {
+          "id": "p1_01",
+          "source_transcript": "TODO: verified source transcript",
+          "reference_translation": "TODO: optional reference translation",
+          "url": "https://example.invalid/p1_01.pcm"
+        },
+        {
+          "id": "p1_02",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p1_02.pcm"
+        },
+        {
+          "id": "p1_03",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p1_03.pcm"
+        },
+        {
+          "id": "p1_04",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p1_04.pcm"
+        },
+        {
+          "id": "p1_05",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p1_05.pcm"
+        }
+      ]
+    },
+    {
+      "source_language": "fr-FR",
+      "target_language": "zh-CN",
+      "cases": [
+        {
+          "id": "p2_01",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p2_01.pcm"
+        },
+        {
+          "id": "p2_02",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p2_02.pcm"
+        },
+        {
+          "id": "p2_03",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p2_03.pcm"
+        },
+        {
+          "id": "p2_04",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p2_04.pcm"
+        },
+        {
+          "id": "p2_05",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p2_05.pcm"
+        }
+      ]
+    },
+    {
+      "source_language": "ja-JP",
+      "target_language": "zh-CN",
+      "cases": [
+        {
+          "id": "p3_01",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p3_01.pcm"
+        },
+        {
+          "id": "p3_02",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p3_02.pcm"
+        },
+        {
+          "id": "p3_03",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p3_03.pcm"
+        },
+        {
+          "id": "p3_04",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p3_04.pcm"
+        },
+        {
+          "id": "p3_05",
+          "source_transcript": "TODO: verified source transcript",
+          "url": "https://example.invalid/p3_05.pcm"
+        }
+      ]
+    }
+  ]
+}
