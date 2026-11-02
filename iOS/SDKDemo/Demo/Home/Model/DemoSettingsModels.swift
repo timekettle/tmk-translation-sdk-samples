@@ -54,6 +54,7 @@ struct DemoSettingsViewState: Equatable {
         draftConfig != persistedConfig
             && draftConfig.isCustomNetworkBaseURLValid
             && draftConfig.isOfflineModelBaseURLValid
+            && draftConfig.isDiagnosisLimitsValid
             && isApplying == false
     }
 }
@@ -71,6 +72,24 @@ struct DemoSettingsConfig: Equatable {
     var sensitiveWordRedactionEnabled: Bool
     var mockEngineEnabled: Bool
     var schemaVersion: Int
+    // 文本保留编辑中的空值；nil 次数表示跟随等级，不能隐式固化当前默认次数。
+    var diagnosisMaxTotalSizeMBInput: String = "500"
+    var diagnosisMaxSessionCountInput: String? = nil
+
+    var diagnosisMaxTotalSizeMB: Int64? {
+        DemoDiagnosisLimits.positiveInteger(diagnosisMaxTotalSizeMBInput, maximum: DemoDiagnosisLimits.maximumCapacityMB)
+    }
+    var diagnosisMaxSessionCount: Int? {
+        diagnosisMaxSessionCountInput.flatMap {
+            DemoDiagnosisLimits.positiveInteger($0, maximum: Int64(Int32.max)).map(Int.init)
+        }
+    }
+    var diagnosisSessionCountText: String {
+        diagnosisMaxSessionCountInput ?? String(diagnosisLevel.demoDefaultSessionCount)
+    }
+    var isDiagnosisLimitsValid: Bool {
+        diagnosisMaxTotalSizeMB != nil && (diagnosisMaxSessionCountInput == nil || diagnosisMaxSessionCount != nil)
+    }
 
     static let rayneoNetworkBaseURL = "https://api-rayneo.timekettle.co"
 
@@ -158,6 +177,14 @@ struct DemoSettingsConfig: Equatable {
 }
 
 extension TmkDiagnosisLevel {
+    var demoDefaultSessionCount: Int {
+        switch self {
+        case .essential: return 10
+        case .diagnostic: return 50
+        case .trace: return 200
+        }
+    }
+
     var demoDisplayName: String {
         switch self {
         case .essential:

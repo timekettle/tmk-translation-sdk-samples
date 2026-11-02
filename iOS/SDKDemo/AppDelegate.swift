@@ -16,6 +16,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         let config = DemoSettingsStore().loadCurrentConfig()
         let globalConfig = DemoSDKConfigurationFactory.makeGlobalConfig(from: config)
         TmkTranslationSDK.shared.sdkInit(globalConfig)
+        DemoDiagnosisAppliedRoot.shared.record(globalConfig.diagnosisConfig.enabled ? globalConfig.diagnosisConfig.rootDirectory : nil)
         
         return true
     }

@@ -26,8 +26,10 @@ enum DemoSDKConfigurationFactory {
                 TmkDiagnosisConfig(
                     enabled: config.diagnosisEnabled,
                     level: config.diagnosisLevel,
-                    rootDirectory: nil,
-                    audioCaptureEnabled: config.diagnosisLevel == .trace && config.diagnosisAudioCaptureEnabled
+                    rootDirectory: (FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)).appendingPathComponent("sdk_diagnosis", isDirectory: true),
+                    audioCaptureEnabled: config.diagnosisLevel == .trace && config.diagnosisAudioCaptureEnabled,
+                    maxTotalSizeMB: config.diagnosisMaxTotalSizeMB ?? 500,
+                    maxSessionCount: config.diagnosisMaxSessionCount
                 )
             )
             .setNetworkTimeout(networkTimeoutSeconds)

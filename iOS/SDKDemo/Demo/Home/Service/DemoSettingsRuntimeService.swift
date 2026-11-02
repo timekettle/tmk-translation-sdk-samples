@@ -15,6 +15,9 @@ struct DemoRuntimeSnapshot {
 final class DemoSettingsRuntimeService {
     private let queue = DispatchQueue(label: "co.timekettle.demo.settings.runtime", qos: .userInitiated)
 
+    // 仅持有可跨线程释放的队列，避免隐式 MainActor 析构的旧系统回部署路径。
+    nonisolated deinit {}
+
     func refreshStatus(completion: @escaping (DemoRuntimeSnapshot) -> Void) {
         queue.async {
             TmkTranslationSDK.shared.verifyAuth { result in
@@ -31,6 +34,7 @@ final class DemoSettingsRuntimeService {
             let globalConfig = DemoSDKConfigurationFactory.makeGlobalConfig(from: config)
             TmkTranslationSDK.shared.destroy()
             TmkTranslationSDK.shared.sdkInit(globalConfig)
+            DemoDiagnosisAppliedRoot.shared.record(globalConfig.diagnosisConfig.enabled ? globalConfig.diagnosisConfig.rootDirectory : nil)
             TmkTranslationSDK.shared.verifyAuth { result in
                 let snapshot = Self.makeSnapshot(from: result)
                 DispatchQueue.main.async {

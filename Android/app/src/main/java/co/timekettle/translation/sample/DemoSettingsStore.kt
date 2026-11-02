@@ -16,6 +16,8 @@ object DemoSettingsStore {
     private const val KEY_DIAGNOSIS_ENABLED = "diagnosis_enabled"
     private const val KEY_DIAGNOSIS_LEVEL = "diagnosis_level"
     private const val KEY_DIAGNOSIS_AUDIO_CAPTURE_ENABLED = "diagnosis_audio_capture_enabled"
+    private const val KEY_DIAGNOSIS_MAX_TOTAL_SIZE_MB = "diagnosis_max_total_size_mb"
+    private const val KEY_DIAGNOSIS_MAX_SESSION_COUNT = "diagnosis_max_session_count"
     private const val KEY_CONSOLE_LOG_ENABLED = "console_log_enabled"
     private const val KEY_SENSITIVE_WORD_REDACTION_ENABLED = "sensitive_word_redaction_enabled"
     private const val KEY_CUSTOM_OFFLINE_MODEL_BASE_URL_ENABLED = "custom_offline_model_base_url_enabled"
@@ -118,6 +120,31 @@ object DemoSettingsStore {
             .edit()
             .putBoolean(KEY_DIAGNOSIS_AUDIO_CAPTURE_ENABLED, enabled)
             .apply()
+    }
+
+    fun loadDiagnosisMaxTotalSizeMB(context: Context): Long {
+        val raw = diagnosisIntegerPreference(context, KEY_DIAGNOSIS_MAX_TOTAL_SIZE_MB)
+        return raw?.let { DemoDiagnosisSettings.positiveInteger(it, DemoDiagnosisSettings.MAX_CAPACITY_MB) } ?: 500L
+    }
+
+    fun loadDiagnosisMaxSessionCount(context: Context): Int? =
+        diagnosisIntegerPreference(context, KEY_DIAGNOSIS_MAX_SESSION_COUNT)
+            ?.let { DemoDiagnosisSettings.positiveInteger(it, Int.MAX_VALUE.toLong())?.toInt() }
+
+    fun saveDiagnosisLimits(context: Context, maxTotalSizeMB: Long, maxSessionCount: Int?) {
+        require(maxTotalSizeMB in 1..DemoDiagnosisSettings.MAX_CAPACITY_MB)
+        require(maxSessionCount == null || maxSessionCount > 0)
+        val editor = context.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+            .putString(KEY_DIAGNOSIS_MAX_TOTAL_SIZE_MB, maxTotalSizeMB.toString())
+        if (maxSessionCount == null) editor.remove(KEY_DIAGNOSIS_MAX_SESSION_COUNT)
+        else editor.putString(KEY_DIAGNOSIS_MAX_SESSION_COUNT, maxSessionCount.toString())
+        editor.apply()
+    }
+
+    private fun diagnosisIntegerPreference(context: Context, key: String): String? {
+        val preferences = context.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        // 旧版本缺值或损坏类型仅影响该新增项，不能破坏其他已保存设置。
+        return preferences.all[key] as? String
     }
 
     fun loadConsoleLogEnabled(context: Context): Boolean {

@@ -21,6 +21,10 @@ final class DemoSettingsViewController: UIViewController {
     private let confirmContainer = UIView()
     private let confirmButton = UIButton(type: .system)
 
+    private let diagnosisCapacityField = UITextField()
+    private let diagnosisSessionCountField = UITextField()
+    private let diagnosisBrowserButton = UIButton(type: .system)
+    private let diagnosisLimitsHint = UILabel()
     private let diagnosisSwitch = UISwitch()
     private let diagnosisLevelButton = UIButton(type: .system)
     private let diagnosisAudioCaptureSwitch = UISwitch()
@@ -110,6 +114,26 @@ final class DemoSettingsViewController: UIViewController {
         exportButton.layer.borderWidth = 1
         exportButton.layer.borderColor = DemoTheme.border.cgColor
         exportButton.addTarget(self, action: #selector(onExport), for: .touchUpInside)
+
+        diagnosisBrowserButton.setTitle("浏览诊断目录", for: .normal)
+        diagnosisBrowserButton.setTitleColor(DemoTheme.primaryLight, for: .normal)
+        diagnosisBrowserButton.addTarget(self, action: #selector(onBrowseDiagnosis), for: .touchUpInside)
+        diagnosisBrowserButton.accessibilityIdentifier = "diagnosis.browser.open"
+        [diagnosisCapacityField, diagnosisSessionCountField].forEach {
+            $0.keyboardType = .numberPad
+            $0.borderStyle = .roundedRect
+            $0.textColor = DemoTheme.text
+            $0.backgroundColor = DemoTheme.background
+            $0.font = .systemFont(ofSize: 13)
+            $0.snp.makeConstraints { $0.width.equalTo(150); $0.height.equalTo(40) }
+        }
+        diagnosisCapacityField.accessibilityIdentifier = "diagnosis.capacity"
+        diagnosisSessionCountField.accessibilityIdentifier = "diagnosis.sessionCount"
+        diagnosisCapacityField.addTarget(self, action: #selector(onDiagnosisCapacityChanged), for: .editingChanged)
+        diagnosisSessionCountField.addTarget(self, action: #selector(onDiagnosisCountChanged), for: .editingChanged)
+        diagnosisLimitsHint.textColor = DemoTheme.danger
+        diagnosisLimitsHint.font = .systemFont(ofSize: 11)
+        diagnosisLimitsHint.numberOfLines = 0
 
         networkButton.setTitleColor(DemoTheme.primaryLight, for: .normal)
         networkButton.contentHorizontalAlignment = .right
@@ -254,11 +278,14 @@ final class DemoSettingsViewController: UIViewController {
         }
 
         diagnosisLevelRow = makeValueRow(title: "日志级别", hint: "控制诊断采集范围", valueView: diagnosisLevelButton)
-        diagnosisAudioCaptureRow = makeToggleRow(title: "PCM 采集", hint: "仅 Trace 采集音频 PCM 文件", control: diagnosisAudioCaptureSwitch)
+        diagnosisAudioCaptureRow = makeToggleRow(title: "是否采集音频", hint: "仅启用诊断且为 Trace 时采集音频 PCM 文件", control: diagnosisAudioCaptureSwitch)
         let sdkConfigSection = makeSection(title: "SDK 配置", rows: [
             makeToggleRow(title: "诊断模式", hint: "记录详细日志用于排查问题", control: diagnosisSwitch),
             diagnosisLevelRow,
             diagnosisAudioCaptureRow,
+            makeValueRow(title: "诊断总容量 MB", hint: "正整数；1 MB = 1024 × 1024 字节", valueView: diagnosisCapacityField),
+            makeValueRow(title: "对话保留次数", hint: "正整数；确认后在下次 SDK 初始化应用", valueView: diagnosisSessionCountField),
+            diagnosisLimitsHint,
             makeToggleRow(title: "控制台日志", hint: "在 Xcode 控制台输出日志", control: consoleLogSwitch),
             makeToggleRow(title: "敏感词脱敏", hint: "仅在线翻译生效：对客户端可见文本启用敏感词脱敏", control: sensitiveWordRedactionSwitch),
             makeValueRow(title: "网络环境", hint: "当前 SDK 请求环境", valueView: networkButton),
@@ -275,7 +302,7 @@ final class DemoSettingsViewController: UIViewController {
             makeStatusRow(title: "Token 状态", hint: "当前鉴权结果", statusLabel: tokenStatusLabel, detailLabel: tokenStatusHintLabel),
             makeStatusRow(title: "自动刷新", hint: "自动续期能力展示占位", statusLabel: autoRefreshLabel, detailLabel: autoRefreshHintLabel)
         ])
-        diagnosisSectionView = makeSection(title: "诊断", rows: [makeSingleButtonRow(button: exportButton)])
+        diagnosisSectionView = makeSection(title: "诊断", rows: [makeSingleButtonRow(button: diagnosisBrowserButton), makeSingleButtonRow(button: exportButton)])
 
         sectionStackView.axis = .vertical
         sectionStackView.spacing = 20
@@ -353,9 +380,19 @@ final class DemoSettingsViewController: UIViewController {
         autoRefreshLabel.text = state.authInfo.autoRefreshSummary
         autoRefreshHintLabel.text = state.authInfo.autoRefreshDetail
         versionLabel.text = state.versionText
-        diagnosisSectionView.isHidden = state.draftConfig.diagnosisEnabled == false
+        if diagnosisCapacityField.text != state.draftConfig.diagnosisMaxTotalSizeMBInput {
+            diagnosisCapacityField.text = state.draftConfig.diagnosisMaxTotalSizeMBInput
+        }
+        if diagnosisSessionCountField.text != state.draftConfig.diagnosisSessionCountText {
+            diagnosisSessionCountField.text = state.draftConfig.diagnosisSessionCountText
+        }
+        diagnosisLimitsHint.text = state.draftConfig.isDiagnosisLimitsValid ? nil
+            : "容量须为 1…\(DemoDiagnosisLimits.maximumCapacityMB) 的整数，次数须为 1…\(Int32.max) 的整数"
+        diagnosisLimitsHint.isHidden = state.draftConfig.isDiagnosisLimitsValid
+        diagnosisSectionView.isHidden = false
+        exportButton.isHidden = state.draftConfig.diagnosisEnabled == false
         diagnosisLevelRow.isHidden = state.draftConfig.diagnosisEnabled == false
-        diagnosisAudioCaptureRow.isHidden = state.draftConfig.diagnosisEnabled == false || state.draftConfig.diagnosisLevel != .trace
+        diagnosisAudioCaptureRow.isHidden = !state.draftConfig.diagnosisEnabled || state.draftConfig.diagnosisLevel != .trace
         confirmButton.isEnabled = state.isConfirmEnabled
         confirmButton.alpha = state.isConfirmEnabled ? 1 : 0.5
         state.isApplying ? loadingIndicator.startAnimating() : loadingIndicator.stopAnimating()
@@ -490,16 +527,34 @@ final class DemoSettingsViewController: UIViewController {
         }
     }
 
+    @objc private func onDiagnosisCapacityChanged() {
+        viewModel.setDiagnosisMaxTotalSizeMB(diagnosisCapacityField.text ?? "")
+    }
+    @objc private func onDiagnosisCountChanged() {
+        viewModel.setDiagnosisMaxSessionCount(diagnosisSessionCountField.text ?? "")
+    }
+    @objc private func onBrowseDiagnosis() {
+        view.endEditing(true)
+        let navigation = UINavigationController(rootViewController: DemoDiagnosisBrowserViewController())
+        navigation.modalPresentationStyle = .fullScreen
+        present(navigation, animated: true)
+    }
+
     @objc private func onExport() {
-        guard let diagnosisURL = TmkTranslationSDK.shared.getDiagnosisDirectoryURL() else {
-            let alert = UIAlertController(title: "暂无数据",
-                                          message: "当前没有可导出的诊断日志。",
-                                          preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "确定", style: .default))
-            present(alert, animated: true)
-            return
+        exportButton.isEnabled = false
+        TmkTranslationSDK.shared.createDiagnosisSnapshot { [weak self] result in
+            guard let self else {
+                if case .success(let url) = result { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+                return
+            }
+            self.exportButton.isEnabled = true
+            switch result {
+            case .success(let snapshot):
+                self.presentPreparedDiagnosisSnapshot(snapshot, sourceView: self.exportButton)
+            case .failure(let error):
+                self.showDemoToast(error.localizedDescription)
+            }
         }
-        presentShareActivityForDirectoryURL(diagnosisURL, sourceView: exportButton)
     }
 
     private func makeSection(title: String, rows: [UIView]) -> UIView {

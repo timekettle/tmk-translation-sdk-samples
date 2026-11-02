@@ -9,6 +9,8 @@ import TmkTranslationSDK
 struct DemoSettingsStore {
     private enum Key {
         static let diagnosisEnabled = "demo.settings.diagnosisEnabled"
+        static let diagnosisMaxTotalSizeMB = "demo.settings.diagnosisMaxTotalSizeMB"
+        static let diagnosisMaxSessionCount = "demo.settings.diagnosisMaxSessionCount"
         static let diagnosisLevel = "demo.settings.diagnosisLevel"
         static let diagnosisAudioCaptureEnabled = "demo.settings.diagnosisAudioCaptureEnabled"
         static let consoleLogEnabled = "demo.settings.consoleLogEnabled"
@@ -56,7 +58,9 @@ struct DemoSettingsStore {
             sensitiveWordRedactionEnabled: (userDefaults.object(forKey: Key.sensitiveWordRedactionEnabled) as? Bool)
                 ?? DemoSettingsConfig.default.sensitiveWordRedactionEnabled,
             mockEngineEnabled: userDefaults.bool(forKey: Key.mockEngineEnabled),
-            schemaVersion: schemaVersion
+            schemaVersion: schemaVersion,
+            diagnosisMaxTotalSizeMBInput: storedCapacity(),
+            diagnosisMaxSessionCountInput: storedSessionCount()
         )
         guard schemaVersion < DemoSettingsConfig.default.schemaVersion else {
             return storedConfig
@@ -83,7 +87,28 @@ struct DemoSettingsStore {
         return migratedConfig
     }
 
+    private func storedCapacity() -> String {
+        guard let text = userDefaults.string(forKey: Key.diagnosisMaxTotalSizeMB),
+              let value = DemoDiagnosisLimits.positiveInteger(text, maximum: DemoDiagnosisLimits.maximumCapacityMB)
+        else { return "500" }
+        return String(value)
+    }
+
+    private func storedSessionCount() -> String? {
+        guard let text = userDefaults.string(forKey: Key.diagnosisMaxSessionCount),
+              let value = DemoDiagnosisLimits.positiveInteger(text, maximum: Int64(Int32.max))
+        else { return nil }
+        return String(value)
+    }
+
     func save(_ config: DemoSettingsConfig) {
+        guard config.isDiagnosisLimitsValid else { return }
+        userDefaults.set(config.diagnosisMaxTotalSizeMBInput, forKey: Key.diagnosisMaxTotalSizeMB)
+        if let count = config.diagnosisMaxSessionCountInput {
+            userDefaults.set(count, forKey: Key.diagnosisMaxSessionCount)
+        } else {
+            userDefaults.removeObject(forKey: Key.diagnosisMaxSessionCount)
+        }
         userDefaults.set(config.diagnosisEnabled, forKey: Key.diagnosisEnabled)
         userDefaults.set(config.diagnosisLevel.rawValue, forKey: Key.diagnosisLevel)
         userDefaults.set(config.diagnosisAudioCaptureEnabled, forKey: Key.diagnosisAudioCaptureEnabled)

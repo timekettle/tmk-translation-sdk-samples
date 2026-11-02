@@ -21,6 +21,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
@@ -48,6 +50,9 @@ import co.timekettle.translation.listener.AuthCallback
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import java.io.File
 import java.util.UUID
 
@@ -88,6 +93,10 @@ class SettingsScreen : Screen {
             DemoDraftConfig(
                 diagnosisEnabled = DemoSettingsStore.loadDiagnosisEnabled(context),
                 diagnosisLevel = DemoSettingsStore.loadDiagnosisLevel(context),
+                diagnosisLimits = DemoDiagnosisSettings(
+                    capacityInput = DemoSettingsStore.loadDiagnosisMaxTotalSizeMB(context).toString(),
+                    sessionCountOverride = DemoSettingsStore.loadDiagnosisMaxSessionCount(context)?.toString(),
+                ),
                 diagnosisAudioCaptureEnabled = DemoSettingsStore.loadDiagnosisAudioCaptureEnabled(context),
                 consoleLogEnabled = DemoSettingsStore.loadConsoleLogEnabled(context),
                 networkEnvironment = DemoSettingsStore.loadNetworkEnvironment(context),
@@ -99,8 +108,8 @@ class SettingsScreen : Screen {
                 offlineModelBaseURLInput = DemoSettingsStore.loadOfflineModelBaseURL(context).orEmpty(),
             )
         }
-        var persisted by remember { mutableStateOf(initialConfig) }
-        var draft by remember { mutableStateOf(initialConfig) }
+        var persisted by rememberSaveable(stateSaver = DemoDraftConfigSaver) { mutableStateOf(initialConfig) }
+        var draft by rememberSaveable(stateSaver = DemoDraftConfigSaver) { mutableStateOf(initialConfig) }
         var isApplying by remember { mutableStateOf(false) }
         var onlineEngineStatus by remember { mutableStateOf(DemoEngineStatus.CHECKING) }
         var offlineEngineStatus by remember { mutableStateOf(DemoEngineStatus.CHECKING) }
@@ -115,41 +124,13 @@ class SettingsScreen : Screen {
             DemoSettingsStore.normalizeOfflineModelBaseURL(draft.offlineModelBaseURLInput) != null
         // 确认按钮启用:有未应用改动 && (未开自定义URL 或 URL 合法) && 非应用中。
         val isConfirmEnabled = draft != persisted && isCustomBaseURLValid &&
-            isOfflineModelBaseURLValid && !isApplying
+            isOfflineModelBaseURLValid && draft.diagnosisLimits.valid && !isApplying
 
         // 仅刷新引擎状态展示:不销毁 SDK,用于进入页面时呈现当前鉴权/引擎可用性。
         fun refreshEngineStatus() {
             onlineEngineStatus = DemoEngineStatus.CHECKING
             offlineEngineStatus = DemoEngineStatus.CHECKING
-            runCatching {
-                TmkTranslationSDK.sdkInit(context.applicationContext, SampleSdkConfig.globalConfig(context))
-                TmkTranslationSDK.verifyAuth(object : AuthCallback {
-                    override fun onSuccess() {
-                        val snapshot = DemoEngineStatusMapper.fromAuthResult(
-                            authSuccess = true,
-                            offlineSupported = TmkTranslationSDK.isOfflineTranslationSupported(),
-                            errorMessage = null,
-                        )
-                        onlineEngineStatus = snapshot.online
-                        offlineEngineStatus = snapshot.offline
-                    }
-
-                    override fun onError(errorId: Int, e: Exception) {
-                        val snapshot = DemoEngineStatusMapper.fromAuthResult(
-                            authSuccess = false,
-                            offlineSupported = false,
-                            errorMessage = e.message,
-                        )
-                        onlineEngineStatus = snapshot.online
-                        offlineEngineStatus = snapshot.offline
-                    }
-                })
-            }.onFailure { error ->
-                val snapshot = DemoEngineStatusMapper.fromAuthResult(
-                    authSuccess = false,
-                    offlineSupported = false,
-                    errorMessage = error.message,
-                )
+            refreshDemoEngineStatus { snapshot ->
                 onlineEngineStatus = snapshot.online
                 offlineEngineStatus = snapshot.offline
             }
@@ -160,6 +141,7 @@ class SettingsScreen : Screen {
         // 已改为动态派生 baseUrl,此处 destroy 是交互语义上的「显式确认重建」,与之互补而非互相依赖。
         fun applyNetworkSettings() {
             val target = draft
+            if (!target.diagnosisLimits.valid) return
             isApplying = true
             onlineEngineStatus = DemoEngineStatus.CHECKING
             offlineEngineStatus = DemoEngineStatus.CHECKING
@@ -167,9 +149,7 @@ class SettingsScreen : Screen {
             SdkDiagnosisManager.setEnabled(target.diagnosisEnabled)
             SdkDiagnosisManager.setConsoleEnabled(target.consoleLogEnabled)
             // 设置持久化，供 SampleSdkConfig.globalConfig(context) 读取后重建 SDK。
-            DemoSettingsStore.saveDiagnosisEnabled(context, target.diagnosisEnabled)
-            DemoSettingsStore.saveDiagnosisLevel(context, target.diagnosisLevel)
-            DemoSettingsStore.saveDiagnosisAudioCaptureEnabled(context, target.diagnosisAudioCaptureEnabled)
+            target.persistDiagnosisSettings(context)
             DemoSettingsStore.saveConsoleLogEnabled(context, target.consoleLogEnabled)
             DemoSettingsStore.saveNetworkEnvironment(context, target.networkEnvironment)
             DemoSettingsStore.saveCustomNetworkBaseURLEnabled(context, target.customBaseURLEnabled)
@@ -279,10 +259,22 @@ class SettingsScreen : Screen {
                     }
                 }
                 if (draft.diagnosisLevel == TmkDiagnosisLevel.TRACE) {
-                    SettingToggle("PCM 采集", "采集音频 PCM 文件", draft.diagnosisAudioCaptureEnabled) {
+                    SettingToggle("是否采集音频", "仅启用诊断且为 Trace 时采集音频 PCM 文件", draft.diagnosisAudioCaptureEnabled) {
                         draft = draft.copy(diagnosisAudioCaptureEnabled = it)
                     }
                 }
+                DiagnosisPositiveIntegerField(
+                    label = "诊断总容量（MB）",
+                    value = draft.diagnosisLimits.capacityInput,
+                    valid = draft.diagnosisLimits.capacityMB != null,
+                    hint = "正整数，1 MB = 1024 × 1024 字节",
+                ) { value -> draft = draft.copy(diagnosisLimits = draft.diagnosisLimits.copy(capacityInput = value)) }
+                DiagnosisPositiveIntegerField(
+                    label = "对话保留次数",
+                    value = draft.diagnosisLimits.displayedSessionCount(draft.diagnosisLevel),
+                    valid = draft.diagnosisLimits.sessionCountOverride == null || draft.diagnosisLimits.sessionCount != null,
+                    hint = if (draft.diagnosisLimits.sessionCountOverride == null) "跟随当前日志等级默认值" else "已自定义，切换等级时保留",
+                ) { value -> draft = draft.copy(diagnosisLimits = draft.diagnosisLimits.copy(sessionCountOverride = value)) }
             }
             SettingToggle("控制台日志", "在 Logcat 输出日志", draft.consoleLogEnabled) {
                 draft = draft.copy(consoleLogEnabled = it)
@@ -538,11 +530,20 @@ class SettingsScreen : Screen {
 //            }
 //            SettingToggle("自动刷新", "剩余 <20% 时自动续期", autoRefresh) { autoRefresh = it }
 
+
+            Spacer(Modifier.height(24.dp))
+            SectionLabel("诊断")
+            OutlinedButton(
+                onClick = { navigator.push(DiagnosisFilesScreen()) },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Text("浏览诊断目录", color = PrimaryLight, fontSize = 13.sp)
+            }
             if (draft.diagnosisEnabled) {
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(8.dp))
 
                 // 诊断关闭时整个导出模块不渲染，避免保留空按钮占位。
-                SectionLabel("诊断")
                 OutlinedButton(
                     onClick = {
                         if (exportingDiagnosis) return@OutlinedButton
@@ -607,9 +608,10 @@ class SettingsScreen : Screen {
  * 设置页配置草稿。所有设置项改动只更新此 draft(不即时生效),点「确认并应用」才落地——
  * 对齐 iOS DemoSettingsConfig 的 draft/persisted 双态语义。
  */
-private data class DemoDraftConfig(
+internal data class DemoDraftConfig(
     val diagnosisEnabled: Boolean,
     val diagnosisLevel: TmkDiagnosisLevel,
+    val diagnosisLimits: DemoDiagnosisSettings,
     val diagnosisAudioCaptureEnabled: Boolean,
     val consoleLogEnabled: Boolean,
     val networkEnvironment: TmkTranslationNetworkEnvironment,
@@ -618,14 +620,51 @@ private data class DemoDraftConfig(
     val sensitiveWordRedactionEnabled: Boolean,
     val customOfflineModelBaseURLEnabled: Boolean,
     val offlineModelBaseURLInput: String,
+) {
+    /** 确认按钮的原诊断保存步骤；编辑草稿不调用，SDK 重建仍由原确认流程执行。 */
+    fun persistDiagnosisSettings(context: Context) {
+        DemoSettingsStore.saveDiagnosisEnabled(context, diagnosisEnabled)
+        DemoSettingsStore.saveDiagnosisLevel(context, diagnosisLevel)
+        DemoSettingsStore.saveDiagnosisLimits(context, diagnosisLimits.capacityMB!!, diagnosisLimits.sessionCount)
+        DemoSettingsStore.saveDiagnosisAudioCaptureEnabled(context, diagnosisAudioCaptureEnabled)
+    }
+}
+
+// 浏览页进出和配置重建时保留所有未确认草稿，绝不为新增页面丢失其他设置。
+private val DemoDraftConfigSaver = listSaver<DemoDraftConfig, Any>(
+    save = { value -> listOf(
+        value.diagnosisEnabled, value.diagnosisLevel.name, value.diagnosisAudioCaptureEnabled,
+        value.consoleLogEnabled, value.networkEnvironment.name, value.customBaseURLEnabled,
+        value.customBaseURLInput, value.sensitiveWordRedactionEnabled, value.customOfflineModelBaseURLEnabled,
+        value.offlineModelBaseURLInput, value.diagnosisLimits.capacityInput,
+        value.diagnosisLimits.sessionCountOverride.orEmpty(), value.diagnosisLimits.sessionCountOverride != null,
+    ) },
+    restore = { values -> DemoDraftConfig(
+        diagnosisEnabled = values[0] as Boolean, diagnosisLevel = TmkDiagnosisLevel.valueOf(values[1] as String),
+        diagnosisAudioCaptureEnabled = values[2] as Boolean, consoleLogEnabled = values[3] as Boolean,
+        networkEnvironment = TmkTranslationNetworkEnvironment.valueOf(values[4] as String),
+        customBaseURLEnabled = values[5] as Boolean, customBaseURLInput = values[6] as String,
+        sensitiveWordRedactionEnabled = values[7] as Boolean, customOfflineModelBaseURLEnabled = values[8] as Boolean,
+        offlineModelBaseURLInput = values[9] as String,
+        diagnosisLimits = DemoDiagnosisSettings(values[10] as String, if (values[12] as Boolean) values[11] as String else null),
+    ) },
 )
 
 private suspend fun exportDiagnosisZip(context: Context): File = withContext(Dispatchers.IO) {
-    val diagnosisDir = TmkTranslationSDK.getDiagnosisDirectory()
-        ?: throw IllegalStateException("暂无可导出的诊断日志")
     val exportDir = File(context.cacheDir, "tmk_share_exports/${UUID.randomUUID()}").apply { mkdirs() }
-    val outputFile = File(exportDir, "sdk_diagnosis.zip")
-    DiagnosisExportUtils.zipDirectory(diagnosisDir, outputFile)
+    val snapshot = File(exportDir, "snapshot")
+    try {
+        suspendCancellableCoroutine<File> { continuation ->
+            val cancellation = SdkDiagnosisManager.createDiagnosisLogSnapshot(snapshot) { result ->
+                if (continuation.isActive) result.fold(continuation::resume, continuation::resumeWithException)
+            }
+            continuation.invokeOnCancellation { cancellation.close() }
+        }
+        DiagnosisExportUtils.zipDirectory(snapshot, File(exportDir, "sdk_diagnosis.zip"))
+    } finally {
+        snapshot.deleteRecursively()
+        if (!File(exportDir, "sdk_diagnosis.zip").exists()) exportDir.deleteRecursively()
+    }
 }
 
 private fun shareDiagnosisZip(context: Context, zipFile: File) {
@@ -698,4 +737,38 @@ private fun SettingToggle(label: String, hint: String, checked: Boolean, onToggl
             )
         )
     }
+}
+
+@Composable
+private fun DiagnosisPositiveIntegerField(label: String, value: String, valid: Boolean, hint: String, onChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = value, onValueChange = onChange,
+        label = { Text(label) }, supportingText = { Text(if (valid) hint else "请输入允许范围内的正整数") },
+        isError = !valid, singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = TextColor, unfocusedTextColor = TextColor, errorTextColor = TextColor,
+            focusedLabelColor = PrimaryLight, unfocusedLabelColor = TextDim, cursorColor = PrimaryLight,
+            focusedBorderColor = PrimaryLight, unfocusedBorderColor = BorderColor, errorBorderColor = DangerColor,
+        ),
+    )
+}
+
+
+/** 设置页只查询当前引擎状态；显式确认配置的重建仍由applyNetworkSettings负责。 */
+internal fun refreshDemoEngineStatus(
+    sdk: TmkTranslationSDK = TmkTranslationSDK,
+    completion: (DemoRuntimeStatusSnapshot) -> Unit,
+) {
+    runCatching {
+        sdk.verifyAuth(object : AuthCallback {
+            override fun onSuccess() {
+                completion(DemoEngineStatusMapper.fromAuthResult(true, sdk.isOfflineTranslationSupported(), null))
+            }
+            override fun onError(errorId: Int, e: Exception) {
+                completion(DemoEngineStatusMapper.fromAuthResult(false, false, e.message))
+            }
+        })
+    }.onFailure { completion(DemoEngineStatusMapper.fromAuthResult(false, false, it.message)) }
 }

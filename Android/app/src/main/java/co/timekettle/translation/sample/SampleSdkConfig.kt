@@ -29,6 +29,8 @@ object SampleSdkConfig {
         diagnosisAudioCaptureEnabled: Boolean = false,
         diagnosisConsoleEnabled: Boolean = true,
         diagnosisRootDirectory: File? = null,
+        diagnosisMaxTotalSizeMB: Long = 500L,
+        diagnosisMaxSessionCount: Int? = null,
     ): TmkTransGlobalConfig {
         check(BuildConfig.TMK_SAMPLE_APP_ID.isNotBlank()) {
             "Missing $ENV_APP_ID. Export it in your shell or configure it in $USER_GRADLE_PROPERTIES_PATH."
@@ -47,6 +49,8 @@ object SampleSdkConfig {
                     level = diagnosisLevel,
                     rootDirectory = diagnosisRootDirectory,
                     audioCaptureEnabled = diagnosisLevel == TmkDiagnosisLevel.TRACE && diagnosisAudioCaptureEnabled,
+                    maxTotalSizeMB = diagnosisMaxTotalSizeMB,
+                    maxSessionCount = diagnosisMaxSessionCount,
                 )
             )
             .setDiagnosisConsoleEnabled(diagnosisConsoleEnabled)
@@ -84,8 +88,15 @@ object SampleSdkConfig {
                 DemoSettingsStore.loadDiagnosisAudioCaptureEnabled(context),
             diagnosisConsoleEnabled = DemoSettingsStore.loadConsoleLogEnabled(context),
             diagnosisRootDirectory = diagnosisRootDirectory,
+            diagnosisMaxTotalSizeMB = DemoSettingsStore.loadDiagnosisMaxTotalSizeMB(context),
+            diagnosisMaxSessionCount = DemoSettingsStore.loadDiagnosisMaxSessionCount(context),
         )
     }
+
+    /** 只取已应用 SDK 的路径，不 flush、不创建目录、不读取设置页草稿。 */
+    internal fun appliedDiagnosisRootDirectory(): File? =
+        co.timekettle.offlinesdk.diagnosis.SdkDiagnosisManager.currentRootDir()
+            .takeIf { it.isNotBlank() }?.let(::File)
 
     internal fun resolveDiagnosisRootDirectory(externalFilesDirectory: File?): File? {
         val directory = externalFilesDirectory?.let { File(it, DIAGNOSIS_DIRECTORY_NAME) } ?: return null
