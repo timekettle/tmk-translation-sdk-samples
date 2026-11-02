@@ -9,6 +9,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.Composable
+import cafe.adriel.voyager.core.screen.Screen
+import cafe.adriel.voyager.core.annotation.ExperimentalVoyagerApi
+import cafe.adriel.voyager.navigator.NavigatorDisposeBehavior
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
@@ -38,14 +42,19 @@ class MainActivity : ComponentActivity() {
         setContent {
             TmkTranslationSDKTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    Navigator(HomeScreen()) { navigator ->
-                        SlideTransition(
-                            navigator = navigator,
-                            modifier = Modifier.padding(innerPadding)
-                        )
-                    }
+                    DemoNavigation(modifier = Modifier.padding(innerPadding))
                 }
             }
         }
+    }
+}
+
+/** Demo 统一导航宿主，页面状态与退场动画共用同一生命周期。 */
+@OptIn(ExperimentalVoyagerApi::class)
+@Composable
+internal fun DemoNavigation(initialScreen: Screen = HomeScreen(), modifier: Modifier = Modifier) {
+    // pop后页面仍在退场动画中；由Transition统一在动画结束后释放，避免VM被重建并再次sdkInit。
+    Navigator(initialScreen, disposeBehavior = NavigatorDisposeBehavior(disposeSteps = false)) { navigator ->
+        SlideTransition(navigator = navigator, modifier = modifier, disposeScreenAfterTransitionEnd = true)
     }
 }

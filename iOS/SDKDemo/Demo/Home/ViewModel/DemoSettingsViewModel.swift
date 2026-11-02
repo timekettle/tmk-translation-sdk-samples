@@ -13,6 +13,9 @@ final class DemoSettingsViewModel {
     private let store: DemoSettingsStore
     private let runtimeService: DemoSettingsRuntimeService
 
+    // 析构仅释放配置、存储与服务引用，避免隐式 MainActor 的旧系统回部署析构路径。
+    nonisolated deinit {}
+
     init(store: DemoSettingsStore = DemoSettingsStore(),
          runtimeService: DemoSettingsRuntimeService = DemoSettingsRuntimeService()) {
         self.store = store
@@ -41,6 +44,16 @@ final class DemoSettingsViewModel {
 
     func setDiagnosisLevel(_ level: TmkDiagnosisLevel) {
         state.draftConfig.diagnosisLevel = level
+        publishState()
+    }
+
+    func setDiagnosisMaxTotalSizeMB(_ text: String) {
+        state.draftConfig.diagnosisMaxTotalSizeMBInput = text
+        publishState()
+    }
+
+    func setDiagnosisMaxSessionCount(_ text: String) {
+        state.draftConfig.diagnosisMaxSessionCountInput = text
         publishState()
     }
 

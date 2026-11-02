@@ -87,6 +87,26 @@ extension UIViewController {
         }
     }
 
+    /// SDK 已生成固定快照，展示层只负责分享和副本生命周期。
+    func presentPreparedDiagnosisSnapshot(_ url: URL, sourceView: UIView) {
+        if ProcessInfo.processInfo.isiOSAppOnMac {
+            let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+            if let popover = picker.popoverPresentationController {
+                popover.sourceView = sourceView; popover.sourceRect = sourceView.bounds
+            }
+            present(picker, animated: true)
+            return
+        }
+        let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        activity.completionWithItemsHandler = { _, _, _, _ in
+            DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        }
+        if let popover = activity.popoverPresentationController {
+            popover.sourceView = sourceView; popover.sourceRect = sourceView.bounds
+        }
+        present(activity, animated: true)
+    }
+
     /// 分享 Demo 诊断目录。
     /// - Note: iPhone / iPad 优先使用系统分享面板；`My Mac (Designed for iPad)` 仍走导出面板，
     ///   避免系统分享面板直接处理目录或沙盒 live directory 时出现兼容性问题。
